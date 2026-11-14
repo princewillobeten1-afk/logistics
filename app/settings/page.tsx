@@ -1,0 +1,376 @@
+import { headers } from "next/headers";
+import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { ChannelCards } from "@/app/settings/channels";
+import { listChannels } from "@/app/settings/channel-actions";
+import { money, relative, when } from "@/lib/format";
+import { activePolicy, currencies, latestRates, migrations } from "@/lib/queries";
+
+export const dynamic = "force-dynamic";
+
+// Where the assistant is used, in the terms of the business rather than the
+// system. Which model serves each job is a deployment decision made outside
+// this dashboard — an administrator cannot change it here, and a model
+// identifier tells the person running a haulage company nothing useful.
+//
+// The flag is whether that job takes time to reason before answering. It is
+// worth surfacing: it explains why investigating a delay takes a moment while
+// a customer reply comes back instantly.
+const AI_USES: [string, string, boolean][] = [
+  ["Reading new orders", "Pulls addresses, quantities and deadlines out of a customer's message.", true],
+  ["Investigating delays", "Works out why a shipment is late and what can still be done.", true],
+  ["Difficult cases", "A second, more careful look when the first answer is not confident.", true],
+  ["Understanding carrier replies", "Turns a haulier's freeform message into a comparable quote.", false],
+  ["Answering customers", "Replies to tracking questions and booking requests.", false],
+  ["Delay notifications", "Writes the message that tells a customer something has changed.", false],
+  ["Screening messages", "Checks incoming messages for abuse before anyone replies.", false],
+  ["Reading paperwork", "Extracts details from delivery notes and scanned documents.", false],
+  ["Weekly analysis", "Explains what the numbers did and what changed.", true],
+];
+
+const INTEGRATIONS: [string, string, boolean][] = [
+  ["AI assistant", "Handles exceptions, customer replies and document reading", true],
+  ["Telegram", "Carriers and customers message your bot directly", true],
+  ["Carrier booking", "Book straight into carriers that offer a direct connection", false],
+  ["WhatsApp Business", "Meta must approve your message templates first", false],
+  ["Vehicle tracking", "Live positions fed from your carriers' tracking systems", false],
+  ["Address lookup", "Turns written addresses into map positions automatically", false],
+  ["Accounting and warehouse systems", "Keep orders and stock in step with your existing systems", false],
+];
+
+export default async function Settings() {
+  // The widget snippet must point at wherever this dashboard is actually
+  // served from, not a hardcoded localhost.
+  const head = await headers();
+  const origin = `${head.get("x-forwarded-proto") ?? "http"}://${
+    head.get("host") ?? "localhost:3002"
+  }`;
+  const keyConfigured = Boolean(process.env.CREDENTIALS_KEY);
+
+  let policy, currencyList, rates, applied, channels;
+  try {
+    [policy, currencyList, rates, applied, channels] = await Promise.all([
+      activePolicy(),
+      currencies(),
+      latestRates(),
+      migrations(),
+      listChannels(),
+    ]);
+  } catch (error) {
+    return (
+      <>
+        <div className="page-head">
+          <h1>Settings and integrations</h1>
+        </div>
+        <Offline error={error instanceof Error ? error.message : String(error)} />
+      </>
+    );
+  }
+
+  const rules = (policy?.rules ?? {}) as Record<string, any>;
+  const actions = (rules.actions ?? {}) as Record<string, any>;
+  const triggers = (rules.require_approval_when ?? {}) as Record<string, unknown>;
+  const base = (rules.base_currency as string) ?? "NGN";
+  const maxAge = Number(rules.fx_max_age_hours ?? 24);
+
+  return (
+    <>
+      <div className="page-head">
+        <h1>Settings and integrations</h1>
+        <p>
+          Spend caps live here as versioned data, not in a system prompt. "The
+          model was instructed not to" is not a spend control — changing a cap
+          is a row, and past decisions stay explicable against the policy in
+          force at the time.
+        </p>
+      </div>
+
+      <Panel
+        title="Customer channels"
+        hint="how customers reach your support agent"
+      >
+        <p className="prose" style={{ marginBottom: 16 }}>
+          Customers never see this dashboard. They message one of these
+          channels, and the support agent answers on whichever one they used —
+          from live shipment data, and only ever about their own shipment.
+        </p>
+        <ChannelCards
+          channels={channels}
+          keyConfigured={keyConfigured}
+          origin={origin}
+        />
+      </Panel>
+
+      <Panel
+        title="Active policy"
+        hint={policy ? `version ${policy.version} · ${policy.name}` : "none"}
+      >
+        {!policy ? (
+          <Empty
+            message="No spending rules configured"
+            hint="Until rules exist, nothing that costs money is allowed to proceed on its own — every booking waits for a person. Ask your administrator to configure them."
+          />
+        ) : (
+          <dl className="kv">
+            <dt>base currency</dt>
+            <dd>
+              {base}{" "}
+              <span className="text-faint">
+                — all amounts convert here before any comparison
+              </span>
+            </dd>
+            <dt>max FX age</dt>
+            <dd>
+              {maxAge} h{" "}
+              <span className="text-faint">
+                — a staler rate denies rather than guesses
+              </span>
+            </dd>
+            <dt>auto-execute tiers</dt>
+            <dd className="num">
+              {(rules.auto_execute_tiers as number[])?.join(", ") ?? "—"}
+            </dd>
+            <dt>default</dt>
+            <dd>
+              <Pill state={String(rules.default_decision ?? "REQUIRE_APPROVAL")} />
+            </dd>
+            <dt>in force since</dt>
+            <dd>{when(policy.created_at)}</dd>
+          </dl>
+        )}
+      </Panel>
+
+      <div className="grid-2">
+        <Panel title="Spend caps" hint="per action" flush>
+          <div
+            className="scroller"
+            tabIndex={0}
+            role="region"
+            aria-label="Spend caps"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Action</th>
+                  <th scope="col">Auto-approve below</th>
+                  <th scope="col">Hard ceiling</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(actions).map(([action, rule]) => (
+                  <tr key={action}>
+                    <td className="ref">{action}</td>
+                    <td className="num">
+                      {rule.auto_approve_below_minor === null ? (
+                        <span className="text-warn">never automatic</span>
+                      ) : rule.auto_approve_below_minor === 0 ? (
+                        <span className="text-warn">always approved by a human</span>
+                      ) : (
+                        money(rule.auto_approve_below_minor, base)
+                      )}
+                    </td>
+                    <td className="num">
+                      {rule.hard_deny_above_minor
+                        ? money(rule.hard_deny_above_minor, base)
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title="Non-monetary approval triggers" hint="apply regardless of amount">
+          <dl className="kv">
+            {Object.entries(triggers).map(([key, value]) => (
+              <div key={key} style={{ display: "contents" }}>
+                <dt>{key.replace(/_/g, " ")}</dt>
+                <dd>
+                  {typeof value === "boolean" ? (
+                    <Pill state={value ? "OK" : "PENDING"} />
+                  ) : (
+                    <span className="num">{money(Number(value), base)}</span>
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </Panel>
+      </div>
+
+      <div className="grid-2">
+        <Panel title="Currencies" hint="minor units are per-currency" flush>
+          <div
+            className="scroller"
+            tabIndex={0}
+            role="region"
+            aria-label="Currencies"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Code</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Minor units</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currencyList.map((c) => (
+                  <tr key={c.code}>
+                    <td className="ref">{c.code}</td>
+                    <td>{c.name}</td>
+                    <td className="num">10^{c.minor_unit_exponent}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title="FX rates" hint={`stale after ${maxAge}h`} flush>
+          {rates.length === 0 ? (
+            <Empty
+              message="No FX rates"
+              hint="Any non-base amount will be denied until a rate exists."
+            />
+          ) : (
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="FX rates"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Pair</th>
+                    <th scope="col">Rate</th>
+                    <th scope="col">As of</th>
+                    <th scope="col">Source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rates.map((r) => {
+                    const ageH =
+                      (Date.now() - new Date(r.as_of).getTime()) / 3_600_000;
+                    return (
+                      <tr key={`${r.base}${r.quote}`}>
+                        <td className="ref">
+                          {r.base}/{r.quote}
+                        </td>
+                        <td className="num">{Number(r.rate).toLocaleString()}</td>
+                        <td
+                          className={`num${ageH > maxAge ? " text-crit" : ""}`}
+                        >
+                          {relative(r.as_of)}
+                          {ageH > maxAge ? " — stale" : ""}
+                        </td>
+                        <td className="num text-faint">
+                          {r.source}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      <Panel
+        title="Where AI is used"
+        hint="every use is recorded under Activity"
+        flush
+      >
+        <div
+          className="scroller"
+          tabIndex={0}
+          role="region"
+          aria-label="Where AI is used"
+        >
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Used for</th>
+                <th scope="col">What it does</th>
+                <th scope="col">Speed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {AI_USES.map(([use, what, deliberates]) => (
+                <tr key={use}>
+                  <td>{use}</td>
+                  <td className="text-muted">{what}</td>
+                  <td className="text-muted">
+                    {deliberates ? "Considers before answering" : "Immediate"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <div className="grid-2">
+        <Panel title="Integrations" flush>
+          <div
+            className="scroller"
+            tabIndex={0}
+            role="region"
+            aria-label="Integrations"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Service</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {INTEGRATIONS.map(([name, note, live]) => (
+                  <tr key={name}>
+                    <td className="ref">{name}</td>
+                    <td>
+                      <Pill state={live ? "OK" : "PENDING"} />
+                    </td>
+                    <td className="text-muted">{note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <Panel title="Schema" hint={`${applied.length} migrations applied`} flush>
+          <div
+            className="scroller"
+            tabIndex={0}
+            role="region"
+            aria-label="Schema migrations"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Migration</th>
+                  <th scope="col">Applied</th>
+                </tr>
+              </thead>
+              <tbody>
+                {applied.map((m) => (
+                  <tr key={m.version}>
+                    <td className="ref">{m.version}</td>
+                    <td className="num text-faint">
+                      {relative(m.applied_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </div>
+    </>
+  );
+}

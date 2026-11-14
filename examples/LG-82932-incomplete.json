@@ -1,0 +1,18 @@
+{
+  "reference": "LG-82932",
+  "customer": "ABC Retail Ltd",
+  "origin": {
+    "warehouse": "Lagos",
+    "city": "Lagos",
+    "address": "Plot 14 Acme Way, Ikeja, Lagos"
+  },
+  "destination": {
+    "city": "Abuja"
+  },
+  "cargo": {
+    "sku": "DEFAULT",
+    "quantity": 100,
+    "weight_kg": 1800
+  },
+  "deadline": "2026-09-02T18:00:00+01:00"
+}

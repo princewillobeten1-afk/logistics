@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pip install -q \"cryptography>=43\")",
+      "Bash(.venv/Scripts/python.exe -c \"from cryptography.fernet import Fernet; import cryptography; print\\('cryptography', cryptography.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_support_delegate.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_support_decide.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_support_actions.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_channels.py tests/test_support.py -q)",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_support_decide.py tests/test_support_delegate.py tests/test_support_actions.py -q)",
+      "Bash(python -c \"import logistics; print\\(' yes'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import logistics; print\\('  yes'\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m logistics.cli worker)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_handlers.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_reservations.py -q)"
+    ]
+  }
+}

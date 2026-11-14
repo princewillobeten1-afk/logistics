@@ -1,0 +1,24 @@
+{
+  "reference": "LG-90014",
+  "customer": "Tema Trading Co",
+  "origin": {
+    "warehouse": "Lagos",
+    "city": "Lagos",
+    "country": "NG",
+    "address": "Lagos Central DC, Ikeja, Lagos"
+  },
+  "destination": {
+    "city": "Tema",
+    "country": "GH",
+    "address": "Plot 22 Harbour Road, Tema, Ghana",
+    "latitude": 5.6167,
+    "longitude": 0.0167
+  },
+  "cargo": {
+    "sku": "DEFAULT",
+    "quantity": 100,
+    "weight_kg": 12000,
+    "description": "100 cartons, palletised"
+  },
+  "deadline": "2026-09-20T17:00:00+00:00"
+}

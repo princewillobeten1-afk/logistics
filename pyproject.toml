@@ -1,0 +1,48 @@
+[project]
+name = "logistics"
+version = "0.1.0"
+description = "AI Logistics Control Tower — event-driven agentic shipment orchestration"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "psycopg[binary,pool]>=3.2",
+    "openai>=1.50",
+    # Used directly by the Telegram transport. Declared rather than relied on
+    # transitively through the openai SDK — a dependency you import is yours.
+    "httpx>=0.27",
+    # Channel credentials live in Postgres and are encrypted at rest.
+    "cryptography>=43",
+    "tenacity>=9.0",
+    "structlog>=24.4",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[project.scripts]
+logistics = "logistics.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/logistics"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:logistics.*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
