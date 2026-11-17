@@ -75,13 +75,13 @@ export default async function Exceptions() {
 
       <Panel
         title="Exception records"
-        hint="written by the detection engine"
+        hint="raised by automated monitoring"
         flush
       >
         {exceptions.length === 0 ? (
           <Empty
-            message="No exception records"
-            hint="The tracking and detection engine that writes these is the next phase; shipment-level exceptions above already work."
+            message="No open exception records"
+            hint="All active shipments are currently operating within SLA thresholds."
           />
         ) : (
           <div className="scroller" tabIndex={0} role="region" aria-label="Exception records">
@@ -90,7 +90,7 @@ export default async function Exceptions() {
                 <tr>
                   <th scope="col">Severity</th>
                   <th scope="col">Shipment</th>
-                  <th scope="col">Kind</th>
+                  <th scope="col">Issue</th>
                   <th scope="col">Detected by</th>
                   <th scope="col">Raised</th>
                 </tr>
@@ -110,7 +110,7 @@ export default async function Exceptions() {
                     <td className="ref">
                       <ShipmentLink reference={e.reference} />
                     </td>
-                    <td>{e.kind}</td>
+                    <td>{e.kind.replace(/_/g, " ")}</td>
                     <td className="num">{e.detected_by}</td>
                     <td className="num text-faint">
                       {relative(e.created_at)}

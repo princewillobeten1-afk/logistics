@@ -1,8 +1,12 @@
 import { notFound } from "next/navigation";
 import { Assistant } from "./assistant";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { MapsGroundingPanel } from "@/components/maps-grounding-panel";
+import { ShipmentCorridorMap } from "@/components/shipment-corridor-map";
 import { city, labelFor, money, relative, when } from "@/lib/format";
-import { getEvents, getLegs, getQuotes, getShipment } from "@/lib/queries";
+import { getServerMapsApiKey } from "@/lib/maps-config";
+import { extractPointFromAddress, resolveLocationCoordinates } from "@/lib/maps-grounding";
+import { getEvents, getLegs, getQuotes, getShipment, listLocations } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -13,14 +17,15 @@ export default async function ShipmentDetail({
 }) {
   const { reference } = await params;
 
-  let shipment, events, legs, quotes;
+  let shipment, events, legs, quotes, locations;
   try {
     shipment = await getShipment(decodeURIComponent(reference));
     if (!shipment) notFound();
-    [events, legs, quotes] = await Promise.all([
+    [events, legs, quotes, locations] = await Promise.all([
       getEvents(shipment.id),
       getLegs(shipment.id),
       getQuotes(shipment.id),
+      listLocations(),
     ]);
   } catch (error) {
     if (error instanceof Error && error.message === "NEXT_NOT_FOUND") throw error;
@@ -36,6 +41,23 @@ export default async function ShipmentDetail({
 
   const plan = shipment.plan as Record<string, unknown> | null;
   const allocation = shipment.allocation as Record<string, unknown> | null;
+  const originCity = city(shipment.origin);
+  const destinationCity = city(shipment.destination);
+  const originPoint =
+    extractPointFromAddress(shipment.origin) ??
+    resolveLocationCoordinates(originCity, locations);
+  const destinationPoint =
+    extractPointFromAddress(shipment.destination) ??
+    resolveLocationCoordinates(destinationCity, locations);
+  const focusPoint =
+    originPoint && destinationPoint
+      ? {
+          lat: (originPoint.lat + destinationPoint.lat) / 2,
+          lng: (originPoint.lng + destinationPoint.lng) / 2,
+        }
+      : (originPoint ?? destinationPoint);
+  const mapsApiKey = getServerMapsApiKey();
+  const isAlert = ["EXCEPTION", "NEEDS_INFO", "AWAITING_APPROVAL"].includes(shipment.state);
 
   return (
     <>
@@ -45,12 +67,39 @@ export default async function ShipmentDetail({
           <Pill state={shipment.state} />
         </h1>
         <p>
-          {city(shipment.origin)} → {city(shipment.destination)} · version{" "}
+          {originCity} → {destinationCity} · version{" "}
           {shipment.version} · updated {relative(shipment.updated_at)}
         </p>
       </div>
 
       <Assistant reference={shipment.reference} />
+
+      <Panel
+        title="Corridor map & place intelligence"
+        hint={`${originCity} → ${destinationCity}`}
+      >
+        <div className="corridor-grid">
+          <ShipmentCorridorMap
+            apiKey={mapsApiKey}
+            origin={originPoint}
+            destination={destinationPoint}
+            originLabel={String(shipment.origin?.address ?? originCity)}
+            destinationLabel={String(shipment.destination?.address ?? destinationCity)}
+            alert={isAlert}
+          />
+          <MapsGroundingPanel
+            title="Live Maps Corridor Briefing"
+            context={{
+              label: `${originCity} → ${destinationCity}`,
+              lat: focusPoint?.lat,
+              lng: focusPoint?.lng,
+              originCity,
+              destinationCity,
+              modes: Array.isArray(plan?.modes) ? (plan.modes as string[]) : undefined,
+            }}
+          />
+        </div>
+      </Panel>
 
       <div className="grid-2">
         <Panel title="Order">
@@ -88,7 +137,7 @@ export default async function ShipmentDetail({
           {!plan ? (
             <Empty
               message="Not planned yet"
-              hint="planning.plan runs once the shipment is allocated."
+              hint="Route planning runs once inventory stock is allocated."
             />
           ) : (
             <dl className="kv">
@@ -139,7 +188,7 @@ export default async function ShipmentDetail({
       {quotes.length > 0 ? (
         <Panel
           title="Carrier quotes"
-          hint={`round ${quotes[0].round} · scored in Python, shown as stored`}
+          hint={`round ${quotes[0].round} · deterministic weighted scoring`}
           flush
         >
           <div className="scroller" tabIndex={0} role="region" aria-label="Carrier quotes">
@@ -206,7 +255,7 @@ export default async function ShipmentDetail({
 
       <Panel title="Legs" hint="one row per mode change" flush>
         {legs.length === 0 ? (
-          <Empty message="No legs yet" hint="Created by planning.plan." />
+          <Empty message="No legs yet" hint="Route legs appear once corridor planning completes." />
         ) : (
           <div className="body">
             <ul className="legs" role="list">
@@ -270,7 +319,7 @@ export default async function ShipmentDetail({
           {!allocation ? (
             <Empty
               message="Not allocated yet"
-              hint="warehouse.allocate reserves stock once the order validates."
+              hint="Stock allocation reserves warehouse units once the order validates."
             />
           ) : (
             <>

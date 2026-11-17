@@ -25,6 +25,28 @@ export async function recordAudit(entry: {
   // the record of an approval is bad, but refusing an approval that already
   // happened is worse.
   try {
+    if (!process.env.DATABASE_URL?.trim()) {
+      if (entry.orgId) {
+        await pool.query(
+          `INSERT INTO audit_logs
+             (actor, actor_type, action, entity_type, entity_id,
+              before, after, ip_address, user_agent)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            entry.actor,
+            entry.actorType ?? "USER",
+            entry.action,
+            entry.entityType ?? null,
+            entry.entityId ?? null,
+            entry.before ? JSON.stringify(entry.before) : null,
+            entry.after ? JSON.stringify(entry.after) : null,
+            entry.ip ?? null,
+            entry.userAgent?.slice(0, 500) ?? null,
+          ],
+        );
+      }
+      return;
+    }
     const client = await pool.connect();
     try {
       await client.query("SET ROLE logistics_app");

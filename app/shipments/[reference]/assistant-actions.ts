@@ -1,5 +1,8 @@
 "use server";
 
+import { classifyGeminiError } from "@/lib/agents/catalog";
+import { getServerGeminiKey } from "@/lib/agents/gemini-client";
+import { runShipmentAssistantWithGemini } from "@/lib/agents/orchestrator";
 import { requireUser } from "@/lib/auth";
 import { query, transaction } from "@/lib/db";
 
@@ -16,13 +19,9 @@ export type AssistantTurn = {
 /**
  * Ask the assistant about a shipment.
  *
- * The model call happens in the Python worker, not here — one model client,
- * one routing table, one place where cost and latency land in `agent_runs`.
- * So this writes the question, writes an empty PENDING answer for the panel to
- * show progress against, and queues the work. The panel polls for the answer.
- *
- * Nothing on this path can change a shipment. `shipment.assist` reads and
- * writes only its own row.
+ * Uses the backend Gemini Shipment Management Agent directly when
+ * GEMINI_API_KEY is configured, writing the structured answer + agent_runs
+ * telemetry and preserving tenant-scoped persistence.
  */
 export async function askAssistant(
   reference: string,
@@ -34,17 +33,18 @@ export async function askAssistant(
   if (!text) return { ok: false, error: "Type a question first." };
   if (text.length > 1000) return { ok: false, error: "That question is too long." };
 
+  const hasGeminiKey = Boolean(getServerGeminiKey());
+
   try {
-    return await transaction(async (client) => {
+    const setup = await transaction(async (client) => {
       const found = await client.query(
         `SELECT id FROM shipments WHERE upper(reference) = upper($1)`,
         [reference],
       );
       if (found.rowCount === 0) {
-        // Also what another organisation's shipment looks like from here.
         return { ok: false as const, error: "No such shipment." };
       }
-      const shipmentId = found.rows[0].id;
+      const shipmentId = found.rows[0].id as string;
 
       await client.query(
         `INSERT INTO assistant_messages (shipment_id, user_id, role, body, state)
@@ -58,20 +58,72 @@ export async function askAssistant(
          RETURNING id`,
         [shipmentId, user.id],
       );
+      const pendingId = pending.rows[0].id as string;
 
-      await client.query(
-        `INSERT INTO work_items (shipment_id, kind, payload, priority, dedupe_key)
-         VALUES ($1, 'shipment.assist', $2, 1, $3)
-         ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
-        [
-          shipmentId,
-          JSON.stringify({ message_id: pending.rows[0].id }),
-          `assist:${pending.rows[0].id}`,
-        ],
-      );
+      if (!hasGeminiKey) {
+        await client.query(
+          `INSERT INTO work_items (shipment_id, kind, payload, priority, dedupe_key)
+           VALUES ($1, 'shipment.assist', $2, 1, $3)
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+          [
+            shipmentId,
+            JSON.stringify({ message_id: pendingId }),
+            `assist:${pendingId}`,
+          ],
+        );
+      }
 
-      return { ok: true as const };
+      return { ok: true as const, shipmentId, pendingId };
     });
+
+    if (!setup.ok) {
+      return { ok: false, error: setup.error };
+    }
+
+    if (hasGeminiKey) {
+      try {
+        const result = await runShipmentAssistantWithGemini({
+          reference,
+          shipmentId: setup.shipmentId,
+          question: text,
+        });
+
+        await query(
+          `UPDATE assistant_messages
+              SET body = $1, state = $2, confidence = $3, next_step = $4
+            WHERE id = $5`,
+          [
+            result.answer,
+            "DONE",
+            result.confidence.toFixed(3),
+            result.nextStep,
+            setup.pendingId,
+          ],
+        );
+
+        await query(
+          `INSERT INTO work_items (shipment_id, kind, state, payload, priority, dedupe_key)
+           VALUES ($1, 'shipment.assist', 'DONE', $2, 1, $3)
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+          [
+            setup.shipmentId,
+            JSON.stringify({ message_id: setup.pendingId, engine: "gemini" }),
+            `assist:${setup.pendingId}`,
+          ],
+        );
+      } catch (geminiErr) {
+        const mapped = classifyGeminiError(geminiErr);
+        await query(
+          `UPDATE assistant_messages
+              SET body = $1, state = $2, confidence = $3, next_step = $4
+            WHERE id = $5`,
+          [mapped.message, "FAILED", null, null, setup.pendingId],
+        );
+        return { ok: false, error: mapped.message };
+      }
+    }
+
+    return { ok: true };
   } catch (error) {
     return {
       ok: false,

@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
+import { GmailConnect } from "@/app/settings/gmail-connect";
 import { relative } from "@/lib/format";
 import { listCommunications } from "@/lib/queries";
 
@@ -7,7 +8,7 @@ export const dynamic = "force-dynamic";
 const CHANNELS = [
   ["TELEGRAM", "customers and carriers message your bot directly"],
   ["WHATSAPP", "message templates must be approved by Meta before you can start a conversation"],
-  ["EMAIL", "incoming mail is read and matched to a shipment automatically"],
+  ["GMAIL", "connect with Google Sign-In to read support mail and send replies"],
   ["PORTAL", "the tracking page customers use to check on a delivery"],
 ];
 
@@ -57,6 +58,13 @@ export default async function Communications() {
         </div>
       </dl>
 
+      <Panel
+        title="Gmail support mailbox"
+        hint="sign in with Google to read inbox messages and send replies"
+      >
+        <GmailConnect compact />
+      </Panel>
+
       <Panel title="Channels" flush>
         <div
           className="scroller"
@@ -91,7 +99,7 @@ export default async function Communications() {
         {messages.length === 0 ? (
           <Empty
             message="No messages yet"
-            hint="The Communication Agent lands after tracking and exceptions — it has nothing worth telling a customer until then."
+            hint="Customer notifications and support replies appear here as shipments progress."
           />
         ) : (
           <div

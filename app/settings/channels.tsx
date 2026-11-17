@@ -4,6 +4,7 @@ import {
   toggleChannel,
   type ChannelRow,
 } from "@/app/settings/channel-actions";
+import { GmailConnect } from "@/app/settings/gmail-connect";
 import { Pill } from "@/app/components";
 import { relative } from "@/lib/format";
 
@@ -68,26 +69,12 @@ const CHANNELS: Record<
   },
   GMAIL: {
     blurb:
-      "Reads your support inbox over IMAP and replies over SMTP using a Google app password. Works immediately — no Google Cloud project and no verification review.",
-    fields: [
-      {
-        key: "address",
-        label: "Email address",
-        placeholder: "support@yourcompany.com",
-      },
-      {
-        key: "app_password",
-        label: "App password",
-        secret: true,
-        placeholder: "abcd efgh ijkl mnop",
-        help: "Google Account → Security → App passwords. Not your normal password.",
-      },
-    ],
+      "Connect your support Gmail mailbox directly with Google Sign-In to read incoming customer emails and send replies with permission.",
+    fields: [],
     setup: [
-      "Turn on 2-step verification for the Google account",
-      "Generate an app password under Security → App passwords",
-      "Paste the address and app password here",
-      "Forward your public support address to this mailbox",
+      "Sign in with the Google account that hosts your support mailbox",
+      "Grant permission to read incoming support mail and send replies",
+      "Read and reply to customer emails directly from this workspace",
     ],
   },
   WIDGET: {
@@ -133,13 +120,12 @@ export function ChannelCards({
   return (
     <div className="channels">
       {!keyConfigured ? (
-        <div className="banner" style={{ marginBottom: 0 }}>
-          <strong>Channels cannot be connected yet</strong>
+        <div className="banner" data-tone="warn" style={{ marginBottom: 0 }}>
+          <strong>Token encryption key is not configured</strong>
           <div>
-            The tokens and passwords you enter here are encrypted before they
-            are stored, and the encryption has not been set up on this server
-            yet — so nothing can be saved. Ask your administrator to finish
-            setting it up. Nothing is ever stored unencrypted.
+            Gmail Sign-In works immediately with Google. Token-based channels
+            (Telegram, WhatsApp, Widget) require <code>CREDENTIALS_KEY</code> on
+            this server before saving secrets.
           </div>
         </div>
       ) : null}
@@ -155,9 +141,13 @@ export function ChannelCards({
             <header>
               <div>
                 <h3>{row.display_name}</h3>
-                <Pill state={statusLabel(row.state, row.enabled)} />
+                {row.channel === "GMAIL" ? (
+                  <Pill state="GOOGLE SIGN-IN" />
+                ) : (
+                  <Pill state={statusLabel(row.state, row.enabled)} />
+                )}
               </div>
-              {connected ? (
+              {connected && row.channel !== "GMAIL" ? (
                 <form action={toggleChannel} className="toggle">
                   <input type="hidden" name="channel" value={row.channel} />
                   <input
@@ -178,98 +168,108 @@ export function ChannelCards({
               <p className="channel-error">{row.last_error}</p>
             ) : null}
 
-            {connected ? (
-              <dl className="connected-facts">
-                {row.config?.username ? (
-                  <div>
-                    <dt>bot</dt>
-                    <dd>
-                      <a
-                        href={`https://t.me/${row.config.username}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        @{String(row.config.username)}
-                      </a>
-                    </dd>
-                  </div>
-                ) : null}
-                {row.config?.phone_number ? (
-                  <div>
-                    <dt>number</dt>
-                    <dd>{String(row.config.phone_number)}</dd>
-                  </div>
-                ) : null}
-                {row.config?.address ? (
-                  <div>
-                    <dt>mailbox</dt>
-                    <dd>{String(row.config.address)}</dd>
-                  </div>
-                ) : null}
-                <div>
-                  <dt>verified</dt>
-                  <dd>{relative(row.verified_at)}</dd>
-                </div>
-                <div>
-                  <dt>last message</dt>
-                  <dd>
-                    {row.last_inbound_at ? relative(row.last_inbound_at) : "none yet"}
-                  </dd>
-                </div>
-              </dl>
+            {row.channel === "GMAIL" ? (
+              <GmailConnect />
             ) : (
-              <ol className="setup">
-                {spec.setup.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </ol>
-            )}
+              <>
+                {connected ? (
+                  <dl className="connected-facts">
+                    {row.config?.username ? (
+                      <div>
+                        <dt>bot</dt>
+                        <dd>
+                          <a
+                            href={`https://t.me/${row.config.username}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            @{String(row.config.username)}
+                          </a>
+                        </dd>
+                      </div>
+                    ) : null}
+                    {row.config?.phone_number ? (
+                      <div>
+                        <dt>number</dt>
+                        <dd>{String(row.config.phone_number)}</dd>
+                      </div>
+                    ) : null}
+                    {row.config?.address ? (
+                      <div>
+                        <dt>mailbox</dt>
+                        <dd>{String(row.config.address)}</dd>
+                      </div>
+                    ) : null}
+                    <div>
+                      <dt>verified</dt>
+                      <dd>{relative(row.verified_at)}</dd>
+                    </div>
+                    <div>
+                      <dt>last message</dt>
+                      <dd>
+                        {row.last_inbound_at
+                          ? relative(row.last_inbound_at)
+                          : "none yet"}
+                      </dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <ol className="setup">
+                    {spec.setup.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                )}
 
-            <form action={saveChannel} className="channel-form">
-              <input type="hidden" name="channel" value={row.channel} />
-              {spec.fields.map((f) => {
-                const inputId = `channel-${row.channel.toLowerCase()}-${f.key}`;
-                const helpId = f.help ? `${inputId}-help` : undefined;
-                return (
-                  <label key={f.key} htmlFor={inputId}>
-                    <span>{f.label}</span>
-                    <input
-                      id={inputId}
-                      name={f.key}
-                      type={f.secret ? "password" : "text"}
-                      placeholder={
-                        f.secret && row.has_credentials
-                          ? "•••••••• (leave blank to keep)"
-                          : (f.placeholder ?? "")
-                      }
-                      defaultValue={
-                        f.secret ? "" : ((row.config?.[f.key] as string) ?? "")
-                      }
-                      autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="off"
-                      spellCheck={false}
-                      aria-describedby={helpId}
-                    />
-                    {f.help ? <em id={helpId}>{f.help}</em> : null}
-                  </label>
-                );
-              })}
-              <div className="channel-buttons">
-                <button type="submit" disabled={!keyConfigured}>
-                  {connected ? "Re-verify" : "Connect"}
-                </button>
-                {row.has_credentials ? (
-                  <button
-                    type="submit"
-                    formAction={disconnectChannel}
-                    className="danger"
-                  >
-                    Disconnect
-                  </button>
-                ) : null}
-              </div>
-            </form>
+                <form action={saveChannel} className="channel-form">
+                  <input type="hidden" name="channel" value={row.channel} />
+                  {spec.fields.map((f) => {
+                    const inputId = `channel-${row.channel.toLowerCase()}-${f.key}`;
+                    const helpId = f.help ? `${inputId}-help` : undefined;
+                    return (
+                      <label key={f.key} htmlFor={inputId}>
+                        <span>{f.label}</span>
+                        <input
+                          id={inputId}
+                          name={f.key}
+                          type={f.secret ? "password" : "text"}
+                          placeholder={
+                            f.secret && row.has_credentials
+                              ? "•••••••• (leave blank to keep)"
+                              : (f.placeholder ?? "")
+                          }
+                          defaultValue={
+                            f.secret
+                              ? ""
+                              : ((row.config?.[f.key] as string) ?? "")
+                          }
+                          autoComplete="off"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
+                          aria-describedby={helpId}
+                        />
+                        {f.help ? <em id={helpId}>{f.help}</em> : null}
+                      </label>
+                    );
+                  })}
+                  <div className="channel-buttons">
+                    <button type="submit" disabled={!keyConfigured}>
+                      {connected ? "Re-verify" : "Connect"}
+                    </button>
+                    {row.has_credentials ? (
+                      <button
+                        type="submit"
+                        formAction={disconnectChannel}
+                        className="danger"
+                      >
+                        Disconnect
+                      </button>
+                    ) : null}
+                  </div>
+                </form>
+              </>
+            )}
 
             {row.channel === "WIDGET" && siteKey ? (
               <div className="snippet">

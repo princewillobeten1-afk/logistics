@@ -2,6 +2,7 @@ import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { relative } from "@/lib/format";
 import { query } from "@/lib/db";
 import { deadWork, queueStats } from "@/lib/queries";
+import { formatStateLabel } from "@/lib/view-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -58,7 +59,7 @@ export default async function Queue() {
             key={state}
             className={`tile${state === "DEAD" && (stats[state] ?? 0) > 0 ? " alert" : ""}`}
           >
-            <dt>{state}</dt>
+            <dt>{formatStateLabel(state)}</dt>
             <dd>{stats[state] ?? 0}</dd>
           </div>
         ))}

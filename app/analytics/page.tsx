@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { ThroughputChart } from "@/components/throughput-chart";
 import {
   legStats,
   modelUsage,
@@ -32,12 +33,9 @@ export default async function Analytics() {
 
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const states = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  const maxDaily = Math.max(1, ...daily.map((d) => Number(d.created)));
   const totalCo2e = legs.reduce((a, l) => a + Number(l.total_co2e ?? 0), 0);
   const totalKm = legs.reduce((a, l) => a + Number(l.total_km ?? 0), 0);
   const modelCalls = usage.reduce((a, r) => a + Number(r.calls), 0);
-
-  // The cost thesis, measured: model calls per shipment should stay near 1.
   const callsPerShipment = total > 0 ? modelCalls / total : 0;
 
   return (
@@ -45,9 +43,8 @@ export default async function Analytics() {
       <div className="page-head">
         <h1>Analytics and reports</h1>
         <p>
-          Operational and model economics from the same event stream the agents
-          run on. Carrier cost trends and on-time rates arrive once bookings
-          and tracking produce history worth analysing.
+          Operational volume, mode mix, carbon intensity, and AI usage metrics
+          computed directly from live shipment records.
         </p>
       </div>
 
@@ -68,46 +65,27 @@ export default async function Analytics() {
           <small>kg CO2e planned</small>
         </div>
         <div className="tile">
-          <dt>Model calls</dt>
+          <dt>AI decisions</dt>
           <dd>{modelCalls}</dd>
           <small>last 24h</small>
         </div>
         <div className="tile">
           <dt>Calls / shipment</dt>
           <dd>{callsPerShipment.toFixed(2)}</dd>
-          <small>deterministic steps cost nothing</small>
+          <small>rule-based routing uses zero</small>
         </div>
       </dl>
 
       <div className="grid-2">
-        <Panel title="Intake, last 14 days" hint="shipments created per day">
+        <Panel title="Intake and closures, last 14 days" hint="hover or tap a day">
           {daily.length === 0 ? (
             <Empty message="No history yet" />
           ) : (
-            <>
-              <div className="spark">
-                {daily.map((d) => {
-                  const n = Number(d.created);
-                  return (
-                    <div
-                      key={d.day}
-                      data-empty={n === 0}
-                      style={{ height: `${Math.max(2, (n / maxDaily) * 100)}%` }}
-                      title={`${d.day}: ${n}`}
-                    />
-                  );
-                })}
-              </div>
-              <div className="spark-labels">
-                {daily.map((d, i) => (
-                  <div key={d.day}>{i % 3 === 0 ? d.day.split(" ")[1] : ""}</div>
-                ))}
-              </div>
-            </>
+            <ThroughputChart daily={daily} />
           )}
         </Panel>
 
-        <Panel title="Shipments by state">
+        <Panel title="Shipments by status">
           {states.length === 0 ? (
             <Empty message="No shipments yet" />
           ) : (
@@ -172,23 +150,23 @@ export default async function Analytics() {
         )}
       </Panel>
 
-      <Panel title="Model economics, last 24h" hint="the hot-loop rule, measured" flush>
+      <Panel title="Assistant activity, last 24h" hint="usage and response latency" flush>
         {usage.length === 0 ? (
           <Empty
-            message="No model calls"
-            hint="Allocation, planning and detection are deterministic and never call one."
+            message="No assistant calls"
+            hint="Standard allocation and route planning run deterministically without AI calls."
           />
         ) : (
           <div
             className="scroller"
             tabIndex={0}
             role="region"
-            aria-label="Model economics"
+            aria-label="Assistant activity"
           >
             <table>
               <thead>
                 <tr>
-                  <th scope="col">Job</th>
+                  <th scope="col">Workflow</th>
                   <th scope="col">Model</th>
                   <th scope="col">Calls</th>
                   <th scope="col">Avg latency</th>
@@ -199,7 +177,7 @@ export default async function Analytics() {
               <tbody>
                 {usage.map((row) => (
                   <tr key={`${row.job}-${row.model}`}>
-                    <td>{row.job}</td>
+                    <td>{row.job.replace(/[._]/g, " ")}</td>
                     <td className="num text-muted">
                       {row.model.replace("nvidia/", "")}
                     </td>
@@ -221,13 +199,11 @@ export default async function Analytics() {
         )}
       </Panel>
 
-      <Panel title="Not yet measurable">
+      <Panel title="Data completeness">
         <p className="prose">
-          On-time delivery rate, cost per kilometre, detention, empty miles,
-          claims and carrier cost trends all need booking and tracking history
-          that does not exist yet. Showing them as zeroes would be worse than
-          not showing them — a dashboard that lies about having data is harder
-          to trust than one that says what it cannot yet answer.
+          Longitudinal carrier cost trends, detention benchmarks, and empty-mile
+          ratios will appear here automatically once enough closed bookings and
+          verified proofs of delivery accumulate for statistical comparison.
         </p>
       </Panel>
     </>

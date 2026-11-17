@@ -1,10 +1,13 @@
 "use server";
 
-import { requireUser } from "@/lib/auth";
-import { query, transaction } from "@/lib/db";
+import { revalidatePath } from "next/cache";
+import { after } from "next/server";
+import { scheduleBackgroundAgent } from "@/lib/agents/background";
+import { getServerGeminiKey } from "@/lib/agents/gemini-client";
+import { currentUser, requireUser } from "@/lib/auth";
+import { query } from "@/lib/db";
 
-/** What a customer is allowed to see. An allowlist, mirroring
- *  `src/logistics/support/view.py::CustomerView` — carrier cost, quotes, scores and
+/** What a customer is allowed to see. An allowlist — carrier cost, quotes, scores and
  *  policy decisions are absent by construction rather than filtered out. */
 export type TrackResult = {
   reference: string;
@@ -71,6 +74,24 @@ export async function lookupShipment(
   const row = rows[0];
   if (!row) return null;
 
+  const delayed = Number(row.open_exceptions) > 0 || row.state === "EXCEPTION";
+  if (delayed && getServerGeminiKey()) {
+    const user = await currentUser();
+    if (user?.orgId) {
+      after(() => {
+        scheduleBackgroundAgent({
+          workflow: "tracking.monitor",
+          orgId: user.orgId,
+          reference: row.reference,
+          actorEmail: user.email,
+          task: `Verify latest transit milestone and delay ETA impact for ${row.reference}.`,
+          workKind: "tracking.delayed_check",
+          cooldownMs: 180_000,
+        });
+      });
+    }
+  }
+
   return {
     reference: row.reference,
     status: CUSTOMER_STATUS[row.state] ?? "In progress",
@@ -78,9 +99,8 @@ export async function lookupShipment(
     destination: place(row.destination),
     promised_by: row.deadline ? new Date(row.deadline).toISOString() : null,
     estimated_arrival: (row.plan?.projected_delivery as string) ?? null,
-    // The carrier's name is fine to share. Nothing about what we paid is.
     carrier: (row.booking?.carrier_code as string) ?? null,
-    delayed: Number(row.open_exceptions) > 0 || row.state === "EXCEPTION",
+    delayed,
     quantity: (row.cargo?.quantity as number) ?? null,
   };
 }
@@ -90,17 +110,20 @@ export type ChatTurn = { role: "customer" | "agent"; text: string; at: string };
 export async function conversation(
   reference?: string,
   sessionKey?: string,
+  channel: "WEBSITE_CHAT" | "WHATSAPP" | "TELEGRAM" = "WEBSITE_CHAT",
 ): Promise<{ turns: ChatTurn[]; activeReference: string | null }> {
   const user = await requireUser();
   const extId = sessionKey?.trim() || `portal:${user.id}`;
   const trimmedRef = reference?.trim().toUpperCase() || "";
+  const dbChannel = channel === "WEBSITE_CHAT" ? "WIDGET" : channel;
 
   if (trimmedRef) {
     const rows = await query<{ direction: string; body: string; created_at: Date }>(
       `SELECT m.direction, m.body, m.created_at
          FROM communications m
          JOIN shipments s ON s.id = m.shipment_id
-        WHERE upper(s.reference) = $1 AND m.channel IN ('WIDGET', 'PORTAL')
+        WHERE upper(s.reference) = $1
+          AND m.channel IN ('WIDGET', 'PORTAL', 'WHATSAPP', 'TELEGRAM')
         ORDER BY m.created_at`,
       [trimmedRef],
     );
@@ -114,14 +137,13 @@ export async function conversation(
     };
   }
 
-  // Session-based conversation (e.g. booking a new shipment via support chat)
   const contacts = await query<{ id: string; last_ref: string | null }>(
     `SELECT c.id,
             (SELECT s.reference FROM shipments s WHERE s.id = c.last_shipment_id) AS last_ref
        FROM channel_contacts c
-      WHERE c.channel = 'WIDGET' AND c.external_id = $1
+      WHERE c.channel = $1 AND c.external_id = $2
       LIMIT 1`,
-    [extId],
+    [dbChannel, extId],
   );
   const contact = contacts[0];
   if (!contact) {
@@ -146,78 +168,59 @@ export async function conversation(
   };
 }
 
-/** Record a question or booking message and queue the support agent to answer it.
- *
- *  Deliberately does not call a model here. The reply is produced by the
- *  `support.reply` handler in the Python worker, so it lands in `agent_runs`
- *  with its cost and latency, registers any completed new order on WPCargo,
- *  and delegates to the Orchestrator pipeline. */
+/** Route any message arriving through Website Chat, WhatsApp, or Telegram
+ *  through the server-side Action Controller -> AI Customer Support Agent
+ *  AND straight into the backend Autonomous Agent. */
 export async function askQuestion(
   reference: string,
   question: string,
   sessionKey?: string,
-): Promise<{ ok: boolean; error?: string }> {
-  const trimmed = question.trim();
-  if (!trimmed) return { ok: false, error: "Type a message first." };
-  if (trimmed.length > 1500) {
-    return { ok: false, error: "That message is too long." };
-  }
-
-  const user = await requireUser();
-  const extId = sessionKey?.trim() || `portal:${user.id}`;
-  const trimmedRef = reference.trim().toUpperCase();
+  channel: "WEBSITE_CHAT" | "WHATSAPP" | "TELEGRAM" = "WEBSITE_CHAT",
+): Promise<{
+  ok: boolean;
+  error?: string;
+  reply?: string;
+  reference?: string | null;
+  orderReference?: string | null;
+  autonomousStarted?: boolean;
+  intent?: string;
+}> {
+  await requireUser();
 
   try {
-    return await transaction(async (client) => {
-      let shipmentId: string | null = null;
-      if (trimmedRef) {
-        const found = await client.query(
-          `SELECT id FROM shipments WHERE upper(reference) = $1`,
-          [trimmedRef],
-        );
-        if (found.rowCount === 0) {
-          return { ok: false as const, error: "We could not find that reference." };
-        }
-        shipmentId = found.rows[0].id;
-      }
-
-      const contactRes = await client.query(
-        `INSERT INTO channel_contacts (channel, external_id, display_name, last_shipment_id)
-         VALUES ('WIDGET', $1, $2, $3)
-         ON CONFLICT (org_id, channel, external_id) DO UPDATE
-             SET last_seen_at = now(),
-                 last_shipment_id = COALESCE($3, channel_contacts.last_shipment_id)
-         RETURNING id, last_shipment_id`,
-        [extId, user.name || user.email, shipmentId],
-      );
-      const contactId: string = contactRes.rows[0].id;
-      const effectiveShipmentId: string | null =
-        shipmentId ?? contactRes.rows[0].last_shipment_id ?? null;
-
-      const inbound = await client.query(
-        `INSERT INTO communications
-            (shipment_id, contact_id, channel, direction, body, recipient, state, safety_checked)
-         VALUES ($1, $2, 'WIDGET', 'INBOUND', $3, $4, 'RECEIVED', false)
-         RETURNING id`,
-        [effectiveShipmentId, contactId, trimmed, extId],
-      );
-
-      await client.query(
-        `INSERT INTO work_items (shipment_id, kind, payload, priority, dedupe_key)
-         VALUES ($1, 'support.reply', $2, 5, $3)
-         ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
-        [
-          effectiveShipmentId,
-          JSON.stringify({
-            communication_id: inbound.rows[0].id,
-            contact_id: contactId,
-          }),
-          `support:${inbound.rows[0].id}`,
-        ],
-      );
-
-      return { ok: true as const };
+    const { handleFrontendLogisticsAction } = await import(
+      "@/lib/controllers/action-controller"
+    );
+    const out = await handleFrontendLogisticsAction({
+      intent: "SUPPORT_MESSAGE",
+      payload: {
+        channel,
+        message: question,
+        reference: reference.trim() || undefined,
+        sessionKey,
+      },
     });
+
+    if (!out.ok) {
+      return { ok: false, error: out.error ?? out.message };
+    }
+
+    revalidatePath("/support");
+    revalidatePath("/orders");
+    revalidatePath("/shipments");
+    revalidatePath("/planning");
+    revalidatePath("/exceptions");
+    revalidatePath("/queue");
+    revalidatePath("/activity");
+
+    return {
+      ok: true,
+      reply: out.reply,
+      reference: out.shipmentReference ?? null,
+      orderReference: out.orderReference ?? null,
+      autonomousStarted: Boolean(out.startedWork),
+      intent: out.intent,
+    };
   } catch (error) {
     return {
       ok: false,

@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
+import { GoogleSignInButton } from "@/components/google-sign-in-button";
 
 import { loginAction, type LoginState } from "./actions";
 
@@ -26,55 +27,63 @@ export function LoginForm({ next }: { next: string }) {
   const [showPassword, setShowPassword] = useState(false);
 
   return (
-    <form action={action} className="auth-form">
-      <input type="hidden" name="next" value={next} />
+    <div className="auth-stack">
+      <GoogleSignInButton next={next} />
 
-      <div className="auth-field">
-        <label htmlFor="login-email">Email</label>
-        <input
-          id="login-email"
-          name="email"
-          type="email"
-          autoComplete="username"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          autoFocus
-          required
-          aria-describedby={state.error ? "login-error" : undefined}
-        />
+      <div className="auth-divider" role="separator">
+        <span>or continue with email</span>
       </div>
 
-      <div className="auth-field">
-        <label htmlFor="login-password">Password</label>
-        <div className="password-wrap">
+      <form action={action} className="auth-form">
+        <input type="hidden" name="next" value={next} />
+
+        <div className="auth-field">
+          <label htmlFor="login-email">Email</label>
           <input
-            id="login-password"
-            name="password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
+            id="login-email"
+            name="email"
+            type="email"
+            autoComplete="username"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            autoFocus
             required
             aria-describedby={state.error ? "login-error" : undefined}
           />
-          <button
-            type="button"
-            className="password-toggle"
-            aria-pressed={showPassword}
-            aria-label={showPassword ? "Hide password" : "Show password"}
-            onClick={() => setShowPassword((prev) => !prev)}
-          >
-            {showPassword ? "Hide" : "Show"}
-          </button>
         </div>
-      </div>
 
-      {state.error ? (
-        <p id="login-error" className="auth-error" role="alert">
-          {state.error}
-        </p>
-      ) : null}
+        <div className="auth-field">
+          <label htmlFor="login-password">Password</label>
+          <div className="password-wrap">
+            <input
+              id="login-password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              required
+              aria-describedby={state.error ? "login-error" : undefined}
+            />
+            <button
+              type="button"
+              className="password-toggle"
+              aria-pressed={showPassword}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              onClick={() => setShowPassword((prev) => !prev)}
+            >
+              {showPassword ? "Hide" : "Show"}
+            </button>
+          </div>
+        </div>
 
-      <SubmitButton />
-    </form>
+        {state.error ? (
+          <p id="login-error" className="auth-error" role="alert">
+            {state.error}
+          </p>
+        ) : null}
+
+        <SubmitButton />
+      </form>
+    </div>
   );
 }

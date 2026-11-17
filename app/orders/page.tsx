@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
+import { OrderIntakeForm } from "@/app/orders/order-intake-form";
 import { city, relative, when } from "@/lib/format";
 import { listOrders, listShipments } from "@/lib/queries";
 
@@ -6,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 // Every channel the platform is meant to accept intake from.
 const SOURCES = ["API", "ERP", "CRM", "EMAIL", "WHATSAPP", "CSV", "PORTAL", "MANUAL"];
-const LIVE_SOURCES = new Set(["API", "CSV", "MANUAL"]);
+const LIVE_SOURCES = new Set(["API", "CSV", "MANUAL", "PORTAL", "WHATSAPP", "EMAIL"]);
 
 export default async function Orders() {
   let orders, intake;
@@ -36,12 +37,15 @@ export default async function Orders() {
       <div className="page-head">
         <h1>Orders and shipment requests</h1>
         <p>
-          Intake, before validation turns a request into a shipment. The Order
-          Agent runs deterministic checks first and only calls a model for the
-          judgment those cannot make — is this address deliverable, is this
-          deadline plausible.
+          Submit new shipment orders directly or review requests arriving from
+          connected intake channels. Incoming orders are automatically validated,
+          allocated, and scheduled for fulfillment.
         </p>
       </div>
+
+      <Panel title="New order & shipment request" hint="automated validation & dispatch">
+        <OrderIntakeForm />
+      </Panel>
 
       <Panel title="Intake channels" hint="where orders arrive from" flush>
         <div className="scroller" tabIndex={0} role="region" aria-label="Order intake channels">
@@ -65,7 +69,7 @@ export default async function Orders() {
                     {!LIVE_SOURCES.has(source) ? (
                       <span className="text-faint">
                         {" "}
-                        — connector not built
+                        — connector standby
                       </span>
                     ) : null}
                   </td>

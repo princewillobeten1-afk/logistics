@@ -6,9 +6,9 @@ export const metadata = { title: "Sign in · Control Tower" };
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string; reset?: string }>;
+  searchParams: Promise<{ next?: string; reset?: string; expired?: string }>;
 }) {
-  const { next, reset } = await searchParams;
+  const { next, reset, expired } = await searchParams;
 
   return (
     <main className="auth-page">
@@ -44,7 +44,7 @@ export default async function LoginPage({
               <span className="feat-dot" aria-hidden="true">03</span>
               <div>
                 <strong>Tenant-Isolated by Design</strong>
-                PostgreSQL Row-Level Security scopes every query to your
+                Row-level isolation scopes every record and workflow to your
                 organisation.
               </div>
             </li>
@@ -59,6 +59,10 @@ export default async function LoginPage({
           {reset ? (
             <p className="auth-notice" role="status">
               Your password has been changed. Sign in with your new password.
+            </p>
+          ) : expired ? (
+            <p className="auth-notice" role="status">
+              Your previous session expired. Sign in to continue.
             </p>
           ) : null}
           <LoginForm next={next ?? "/"} />

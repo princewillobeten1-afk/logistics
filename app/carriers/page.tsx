@@ -187,7 +187,7 @@ export default async function Carriers() {
         )}
       </Panel>
 
-      <Panel title="Why this ordering" hint="the §7 trade-off, made explicit">
+      <Panel title="Why this ordering" hint="cost vs. reliability trade-off">
         <p className="prose">
           The cheapest carrier is frequently not the right one. Quickmove
           Ventures shows near-perfect availability and the worst damage rate in

@@ -83,9 +83,8 @@ export default async function Approvals() {
                       Reject
                     </button>
                     <span className="note">
-                      Deciding as <strong>{user.email}</strong>. Approving queues
-                      the booking; the worker executes it through the idempotent
-                      tool path.
+                      Deciding as <strong>{user.email}</strong>. Approving
+                      authorises and queues the carrier booking once.
                     </span>
                   </form>
                 ) : (

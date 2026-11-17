@@ -167,7 +167,7 @@ export default async function Warehouses() {
         )}
       </Panel>
 
-      <Panel title="Picking and packing" hint="written by warehouse.allocate">
+      <Panel title="Picking and packing" hint="warehouse floor tasks">
         <Empty
           message="No open picking tasks"
           hint="Stock is reserved against a shipment as soon as it is allocated. Picking instructions for the warehouse floor are not issued from here yet."

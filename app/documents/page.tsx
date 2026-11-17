@@ -81,7 +81,7 @@ export default async function Documents() {
             <tbody>
               {DOC_TYPES.map(([kind, applies, note]) => (
                 <tr key={kind}>
-                  <td className="ref">{kind}</td>
+                  <td className="ref">{kind.replace(/_/g, " ")}</td>
                   <td className="num">{applies}</td>
                   <td className="text-muted">{note}</td>
                   <td>

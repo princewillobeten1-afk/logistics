@@ -2,6 +2,7 @@ import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  output: "standalone",
   // Build and dev must not share an output directory. `next build` rewrites
   // the chunk files a running `next dev` still holds references to, and the
   // dev server then dies with "Cannot find module './611.js'" — the build

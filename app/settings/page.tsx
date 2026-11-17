@@ -42,7 +42,7 @@ export default async function Settings() {
   // served from, not a hardcoded localhost.
   const head = await headers();
   const origin = `${head.get("x-forwarded-proto") ?? "http"}://${
-    head.get("host") ?? "localhost:3002"
+    head.get("host") ?? "localhost:3000"
   }`;
   const keyConfigured = Boolean(process.env.CREDENTIALS_KEY);
 
@@ -77,10 +77,8 @@ export default async function Settings() {
       <div className="page-head">
         <h1>Settings and integrations</h1>
         <p>
-          Spend caps live here as versioned data, not in a system prompt. "The
-          model was instructed not to" is not a spend control — changing a cap
-          is a row, and past decisions stay explicable against the policy in
-          force at the time.
+          Configure customer support channels, versioned spending thresholds,
+          supported currencies, and FX staleness rules.
         </p>
       </div>
 
@@ -111,29 +109,29 @@ export default async function Settings() {
           />
         ) : (
           <dl className="kv">
-            <dt>base currency</dt>
+            <dt>Base currency</dt>
             <dd>
               {base}{" "}
               <span className="text-faint">
-                — all amounts convert here before any comparison
+                — all amounts convert here before comparison
               </span>
             </dd>
-            <dt>max FX age</dt>
+            <dt>Max FX age</dt>
             <dd>
               {maxAge} h{" "}
               <span className="text-faint">
-                — a staler rate denies rather than guesses
+                — rates older than this require manual review
               </span>
             </dd>
-            <dt>auto-execute tiers</dt>
+            <dt>Auto-execute tiers</dt>
             <dd className="num">
               {(rules.auto_execute_tiers as number[])?.join(", ") ?? "—"}
             </dd>
-            <dt>default</dt>
+            <dt>Default rule</dt>
             <dd>
               <Pill state={String(rules.default_decision ?? "REQUIRE_APPROVAL")} />
             </dd>
-            <dt>in force since</dt>
+            <dt>Effective since</dt>
             <dd>{when(policy.created_at)}</dd>
           </dl>
         )}

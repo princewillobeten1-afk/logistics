@@ -12,28 +12,19 @@ import { relative } from "@/lib/format";
  * that into something the operator expects.
  */
 export function Live({ label = "shipment events" }: { label?: string }) {
-  const { status, last, count } = useLiveEvents();
+  const { last } = useLiveEvents();
+
+  if (!last) return null;
 
   return (
-    <div className="live" data-status={status} role="status" aria-live="polite">
+    <div className="live" data-status="live" role="status" aria-live="polite">
       <span className="live-dot" aria-hidden="true" />
-      <span className="live-label">
-        {status === "live"
-          ? `Live · ${label}`
-          : status === "connecting"
-            ? "Connecting…"
-            : "Reconnecting…"}
+      <span className="live-label">{label}</span>
+      <span className="live-last">
+        {last.reference ? `${last.reference} ` : ""}
+        {last.type}
+        {last.state ? ` → ${last.state}` : ""} · {relative(last.at)}
       </span>
-      {last ? (
-        <span className="live-last">
-          {last.reference ? `${last.reference} ` : ""}
-          {last.type}
-          {last.state ? ` → ${last.state}` : ""} · {relative(last.at)}
-        </span>
-      ) : status === "live" ? (
-        <span className="live-last">awaiting new events</span>
-      ) : null}
-      {count > 0 ? <span className="live-count">{count}</span> : null}
     </div>
   );
 }

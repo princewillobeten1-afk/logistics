@@ -43,8 +43,8 @@ export default async function Overview() {
       <div className="page-head">
         <h1>Operations overview</h1>
         <p>
-          What the floor still owns, and what is waiting on someone. Everything
-          here is live from the same Postgres the worker writes to.
+          Live floor workload, shipments awaiting customer details, active
+          exceptions, and pending spending approvals.
         </p>
       </div>
 
@@ -54,22 +54,22 @@ export default async function Overview() {
         <div className="tile">
           <dt>Active shipments</dt>
           <dd>{stats.active}</dd>
-          <small>{totalShipments} total, all states</small>
+          <small>{totalShipments} total across all stages</small>
         </div>
         <div className="tile warn">
           <dt>Waiting on customer</dt>
           <dd>{stats.waitingOnCustomer}</dd>
-          <small>blocked at NEEDS_INFO</small>
+          <small>missing required info</small>
         </div>
         <div className="tile alert">
           <dt>In exception</dt>
           <dd>{stats.inException}</dd>
-          <small>detection fired, needs a decision</small>
+          <small>needs operator review</small>
         </div>
         <div className="tile alert">
           <dt>Awaiting approval</dt>
           <dd>{stats.awaitingApproval}</dd>
-          <small>a human must decide</small>
+          <small>pending spend sign-off</small>
         </div>
         <div className="tile warn">
           <dt>Deadline &lt; 24h</dt>
@@ -112,7 +112,7 @@ export default async function Overview() {
       ) : null}
 
       <div className="grid-2">
-        <Panel title="Work queue" hint="durable steps in Postgres">
+        <Panel title="Work queue" hint="scheduled workflow steps">
           {Object.keys(queue).length === 0 ? (
             <Empty
               message="Nothing in progress"
@@ -122,9 +122,11 @@ export default async function Overview() {
             <dl className="kv">
               {Object.entries(queue).map(([state, n]) => (
                 <div key={state} className="contents">
-                  <dt>{state}</dt>
-                  <dd className="row-center">
-                    <Pill state={state} /> <span className="font-mono">{n}</span>
+                  <dt>
+                    <Pill state={state} />
+                  </dt>
+                  <dd className="font-mono font-semibold">
+                    {n} {Number(n) === 1 ? "step" : "steps"}
                   </dd>
                 </div>
               ))}
@@ -132,7 +134,7 @@ export default async function Overview() {
           )}
         </Panel>
 
-        <Panel title="Model usage, last 24h" hint="the cost thesis, measured">
+        <Panel title="Assistant usage, last 24h" hint="AI calls and response time">
           {usage.length === 0 ? (
             <Empty
               message="No AI activity yet"
@@ -141,29 +143,35 @@ export default async function Overview() {
           ) : (
             <>
               <dl className="kv">
-                {usage.map((row) => (
-                  <div key={`${row.job}-${row.model}`} className="contents">
-                    <dt>{row.job}</dt>
-                    <dd>
-                      <span className="font-mono">{row.calls} calls</span>
-                      {row.avg_latency ? (
-                        <span className="text-faint">
-                          {" · "}
-                          {row.avg_latency}ms avg
+                {usage.map((row) => {
+                  const nCalls = Number(row.calls);
+                  return (
+                    <div key={`${row.job}-${row.model}`} className="contents">
+                      <dt>{row.job.replace(/[._]/g, " ")}</dt>
+                      <dd>
+                        <span className="font-mono">
+                          {row.calls} {nCalls === 1 ? "call" : "calls"}
                         </span>
-                      ) : null}
-                      {Number(row.failures) > 0 ? (
-                        <span className="text-crit">
-                          {" · "}
-                          {row.failures} failed
-                        </span>
-                      ) : null}
-                    </dd>
-                  </div>
-                ))}
+                        {row.avg_latency ? (
+                          <span className="text-faint">
+                            {" · "}
+                            {row.avg_latency}ms avg
+                          </span>
+                        ) : null}
+                        {Number(row.failures) > 0 ? (
+                          <span className="text-crit">
+                            {" · "}
+                            {row.failures} failed
+                          </span>
+                        ) : null}
+                      </dd>
+                    </div>
+                  );
+                })}
               </dl>
               <p className="prose-note">
-                {modelCalls} calls across {stats.active} active shipments
+                {modelCalls} {modelCalls === 1 ? "call" : "calls"} across{" "}
+                {stats.active} active shipments
                 {modelFailures > 0 ? ` · ${modelFailures} failures` : ""}
               </p>
             </>

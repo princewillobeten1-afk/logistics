@@ -1,16 +1,17 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { OptimizeFleetButton } from "@/app/planning/optimize-button";
+import { RoutingRequestForm } from "@/app/planning/routing-request-form";
 import { city, money } from "@/lib/format";
 import { legStats, listShipments } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 const OBJECTIVES = [
-  ["Cost", "carrier rate plus weight surcharge, in integer minor units"],
-  ["Delivery time", "dispatch lead plus cuOpt transit matrix, against the deadline"],
-  ["Vehicle Routing (cuOpt)", "NVIDIA cuOpt GPU-accelerated CVRPTW / PDPTW solver"],
-  ["AI Route Advisory", "nvidia/nemotron-3.5-super-vl-120b-a12b waypoint & corridor risk analysis"],
-  ["Carbon", "per-mode gCO2e/tonne-km — air is ~60x sea"],
+  ["Cost", "carrier base rate plus cargo weight surcharge"],
+  ["Delivery time", "warehouse dispatch lead plus transit matrix against deadline"],
+  ["Fleet routing", "capacity and time-window optimisation across active vehicles"],
+  ["Corridor advisory", "automated waypoint, weather, and border risk evaluation"],
+  ["Carbon footprint", "mode-weighted emissions estimate (kg CO2e per tonne-km)"],
 ];
 
 export default async function Planning() {
@@ -50,32 +51,37 @@ export default async function Planning() {
         <div>
           <h1>Planning workspace</h1>
           <p>
-            Multimodal corridor selection, NVIDIA cuOpt vehicle routing
-            (CVRPTW / PDPTW), and Nemotron 3.5 Super VL route advisory.
+            Multimodal corridor selection, vehicle routing across active fleet
+            capacity, and automated corridor risk advisory.
           </p>
         </div>
         <OptimizeFleetButton />
       </div>
 
+      <Panel
+        title="Custom route & planning intake"
+        hint="submit a new lane or reroute request"
+      >
+        <RoutingRequestForm />
+      </Panel>
+
       <div className="grid-2">
         <Panel
           title="Optimisation objectives"
-          hint="NVIDIA cuOpt + Nemotron 3.5 Super VL"
+          hint="routing & corridor constraints"
         >
           <dl className="kv">
             {OBJECTIVES.map(([name, detail]) => (
               <div key={name} className="contents">
-                <dt>{name.toLowerCase()}</dt>
+                <dt>{name}</dt>
                 <dd className="text-muted">{detail}</dd>
               </div>
             ))}
           </dl>
           <p className="prose-note">
-            Road legs and fleet dispatches are solved via{" "}
-            <code>https://optimize.api.nvidia.com/v1/nvidia/cuopt</code> (with
-            status polling at <code>/v1/status/&#123;requestId&#125;</code>) and
-            enriched with waypoint &amp; risk analysis from{" "}
-            <code>nvidia/nemotron-3.5-super-vl-120b-a12b</code>.
+            Road legs and fleet dispatches are balanced across vehicle capacity,
+            time windows, and border clearance lead times before carrier
+            sourcing opens.
           </p>
         </Panel>
 

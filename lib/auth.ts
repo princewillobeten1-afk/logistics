@@ -5,7 +5,7 @@ import {
   timingSafeEqual,
   type ScryptOptions,
 } from "node:crypto";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
 
@@ -101,7 +101,10 @@ export const currentUser = cache(async (): Promise<SessionUser | null> => {
 /** For pages. Sends anyone without a session to the sign-in form. */
 export async function requireUser(): Promise<SessionUser> {
   const user = await currentUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    const hadCookie = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
+    redirect(hadCookie ? "/login?expired=1" : "/login");
+  }
   return user;
 }
 
@@ -201,15 +204,52 @@ type SessionRow = {
   role: Role;
 };
 
+export function isHttpsRequest(head: Headers): boolean {
+  const proto = (head.get("x-forwarded-proto") ?? "").toLowerCase();
+  const origin = (head.get("origin") ?? "").toLowerCase();
+  const referer = (head.get("referer") ?? "").toLowerCase();
+  const host = (
+    head.get("x-forwarded-host") ??
+    head.get("host") ??
+    ""
+  ).toLowerCase();
+  const appUrl = (process.env.APP_URL ?? "").toLowerCase();
+
+  return (
+    proto.includes("https") ||
+    origin.startsWith("https://") ||
+    referer.startsWith("https://") ||
+    host.endsWith(".run.app") ||
+    appUrl.startsWith("https://") ||
+    process.env.NODE_ENV === "production"
+  );
+}
+
+export function sessionCookieOptions(isHttps: boolean, expires: Date) {
+  return {
+    httpOnly: true, // unreadable from JavaScript, so XSS cannot lift it
+    sameSite: (isHttps ? "none" : "lax") as "none" | "lax",
+    secure: isHttps,
+    partitioned: isHttps,
+    path: "/",
+    expires,
+  };
+}
+
+export type SessionCookieMeta = {
+  token: string;
+  options: ReturnType<typeof sessionCookieOptions>;
+};
+
 /**
  * Issues a session and sets the cookie. Shared by sign-in and sign-up so a
  * freshly created account does not have to be verified a second time right
  * after its password was hashed.
  */
-async function startSession(
+async function startSessionWithCookie(
   row: SessionRow,
   meta: { ip?: string | null; userAgent?: string | null },
-): Promise<SessionUser> {
+): Promise<{ user: SessionUser; cookie: SessionCookieMeta }> {
   const token = randomBytes(32).toString("base64url");
   const expires = new Date(Date.now() + SESSION_DAYS * 86_400_000);
   await identityQuery(
@@ -219,21 +259,31 @@ async function startSession(
   );
   await identityQuery("UPDATE users SET last_login_at = now() WHERE id = $1", [row.id]);
 
-  (await cookies()).set(SESSION_COOKIE, token, {
-    httpOnly: true, // unreadable from JavaScript, so XSS cannot lift it
-    sameSite: "lax", // survives following a link in, blocks cross-site POSTs
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    expires,
-  });
+  const isHttps = isHttpsRequest(await headers());
+  const options = sessionCookieOptions(isHttps, expires);
+
+  (await cookies()).set(SESSION_COOKIE, token, options);
 
   return {
-    id: row.id, orgId: row.org_id, orgName: row.org_name,
-    email: row.email, name: row.name, role: row.role,
+    user: {
+      id: row.id, orgId: row.org_id, orgName: row.org_name,
+      email: row.email, name: row.name, role: row.role,
+    },
+    cookie: { token, options },
   };
 }
 
-export type LoginResult = { ok: true; user: SessionUser } | { ok: false; error: string };
+async function startSession(
+  row: SessionRow,
+  meta: { ip?: string | null; userAgent?: string | null },
+): Promise<SessionUser> {
+  const { user } = await startSessionWithCookie(row, meta);
+  return user;
+}
+
+export type LoginResult =
+  | { ok: true; user: SessionUser; cookie?: SessionCookieMeta }
+  | { ok: false; error: string };
 
 export async function signIn(
   email: string,
@@ -260,6 +310,89 @@ export async function signIn(
   }
 
   return { ok: true, user: await startSession(row, meta) };
+}
+
+export async function signInWithGoogle(
+  input: { email: string; name?: string | null; companyName?: string | null },
+  meta: { ip?: string | null; userAgent?: string | null } = {},
+): Promise<LoginResult> {
+  const email = input.email.trim().toLowerCase();
+  if (!email) {
+    return { ok: false, error: "Google account did not return an email address." };
+  }
+
+  const existing = await identityQuery<
+    SessionRow & { active: boolean; org_active: boolean }
+  >(
+    `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+            u.active, o.active AS org_active
+       FROM users u JOIN organisations o ON o.id = u.org_id
+      WHERE lower(u.email) = lower($1)`,
+    [email],
+  );
+
+  if (existing.length > 0) {
+    const row = existing[0];
+    if (!row.active || !row.org_active) {
+      return { ok: false, error: "This account or workspace is inactive." };
+    }
+    const started = await startSessionWithCookie(row, meta);
+    return { ok: true, user: started.user, cookie: started.cookie };
+  }
+
+  const displayName = input.name?.trim() || email.split("@")[0] || "Operator";
+  const workspaceName =
+    input.companyName?.trim() || `${displayName}'s Workspace`;
+  const slug = await uniqueOrgSlug(workspaceName);
+  const randomPasswordHash = await hashPassword(
+    randomBytes(32).toString("hex"),
+  );
+
+  let row: SessionRow;
+  try {
+    row = await transaction(async (client) => {
+      const org = await client.query<{ id: string; name: string }>(
+        "INSERT INTO organisations (name, slug) VALUES ($1, $2) RETURNING id, name",
+        [workspaceName, slug],
+      );
+      const user = await client.query<{
+        id: string;
+        email: string;
+        name: string | null;
+        role: Role;
+      }>(
+        `INSERT INTO users (org_id, email, password_hash, role, name)
+         VALUES ($1, $2, $3, 'ADMIN', $4)
+         RETURNING id, email, name, role`,
+        [org.rows[0].id, email, randomPasswordHash, displayName],
+      );
+      return {
+        id: user.rows[0].id,
+        org_id: org.rows[0].id,
+        org_name: org.rows[0].name,
+        email: user.rows[0].email,
+        name: user.rows[0].name,
+        role: user.rows[0].role,
+      };
+    });
+  } catch (err) {
+    if (isUniqueViolation(err, "users_email_idx")) {
+      const retry = await identityQuery<SessionRow>(
+        `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role
+           FROM users u JOIN organisations o ON o.id = u.org_id
+          WHERE lower(u.email) = lower($1) AND u.active AND o.active`,
+        [email],
+      );
+      if (retry[0]) {
+        const started = await startSessionWithCookie(retry[0], meta);
+        return { ok: true, user: started.user, cookie: started.cookie };
+      }
+    }
+    throw err;
+  }
+
+  const started = await startSessionWithCookie(row, meta);
+  return { ok: true, user: started.user, cookie: started.cookie };
 }
 
 // -------------------------------------------------------------- sign up
@@ -406,7 +539,7 @@ export async function requestPasswordReset(
     [token, row.id, expires, meta.ip ?? null],
   );
 
-  const base = (process.env.APP_URL ?? "http://localhost:3002").replace(/\/$/, "");
+  const base = (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "");
   const link = `${base}/reset-password?token=${token}`;
   const hours = RESET_TOKEN_HOURS === 1 ? "1 hour" : `${RESET_TOKEN_HOURS} hours`;
 
@@ -475,7 +608,11 @@ export async function signOut(): Promise<void> {
     // Delete the row, not just the cookie: a copied token must stop working.
     await identityQuery("DELETE FROM sessions WHERE token = $1", [token]);
   }
-  jar.delete(SESSION_COOKIE);
+  const isHttps = isHttpsRequest(await headers());
+  jar.set(SESSION_COOKIE, "", {
+    ...sessionCookieOptions(isHttps, new Date(0)),
+    maxAge: 0,
+  });
 }
 
 // A real hash of a value nobody can supply, so a login against an unknown

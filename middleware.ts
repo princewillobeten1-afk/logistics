@@ -25,6 +25,11 @@ const PUBLIC_PATHS = new Set([
   "/signup",
   "/forgot-password",
   "/reset-password",
+  "/api/auth/google",
+  "/api/auth/session",
+  "/api/webhooks/whatsapp",
+  "/api/webhooks/telegram",
+  "/api/intake/external",
 ]);
 
 // Of those, the ones that make no sense once already signed in. Deliberately
@@ -35,7 +40,7 @@ const PUBLIC_PATHS = new Set([
 const REDIRECT_IF_AUTHENTICATED = new Set(["/login", "/signup"]);
 
 export function middleware(request: NextRequest) {
-  const { pathname, search } = request.nextUrl;
+  const { pathname, search, searchParams } = request.nextUrl;
 
   // The layout needs to know which route it is rendering so it can let the
   // sign-in page through; layouts do not otherwise receive the pathname.
@@ -46,6 +51,12 @@ export function middleware(request: NextRequest) {
   const hasCookie = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
 
   if (!isPublic && !hasCookie) {
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json(
+        { ok: false, error: "Authentication required." },
+        { status: 401 },
+      );
+    }
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     // Come back to where they were headed once they have signed in.
@@ -54,6 +65,31 @@ export function middleware(request: NextRequest) {
   }
 
   if (REDIRECT_IF_AUTHENTICATED.has(pathname) && hasCookie) {
+    if (searchParams.has("expired")) {
+      const res = NextResponse.next({ request: { headers } });
+      const proto = (request.headers.get("x-forwarded-proto") ?? "").toLowerCase();
+      const origin = (request.headers.get("origin") ?? "").toLowerCase();
+      const host = (
+        request.headers.get("x-forwarded-host") ??
+        request.headers.get("host") ??
+        ""
+      ).toLowerCase();
+      const isHttps =
+        proto.includes("https") ||
+        origin.startsWith("https://") ||
+        host.endsWith(".run.app") ||
+        request.nextUrl.protocol === "https:";
+      res.cookies.set(SESSION_COOKIE, "", {
+        httpOnly: true,
+        sameSite: isHttps ? "none" : "lax",
+        secure: isHttps,
+        partitioned: isHttps,
+        path: "/",
+        maxAge: 0,
+      });
+      return res;
+    }
+
     const url = request.nextUrl.clone();
     url.pathname = "/";
     url.search = "";

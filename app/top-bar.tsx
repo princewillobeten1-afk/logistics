@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Monitor, Moon, Search, Sun } from "lucide-react";
 
 const ROUTE_META: Record<string, { group: string; label: string }> = {
   "/": { group: "Operations", label: "Overview" },
@@ -17,7 +18,7 @@ const ROUTE_META: Record<string, { group: string; label: string }> = {
   "/warehouses": { group: "Network", label: "Warehouses" },
   "/customers": { group: "Customer", label: "Customers" },
   "/support": { group: "Customer", label: "Support inbox" },
-  "/track": { group: "Customer", label: "Preview chat" },
+  "/track": { group: "Customer", label: "Customer support" },
   "/communications": { group: "Records", label: "Communications" },
   "/documents": { group: "Records", label: "Documents" },
   "/analytics": { group: "Records", label: "Analytics" },
@@ -45,6 +46,7 @@ export function TopBar() {
   const router = useRouter();
   const [refQuery, setRefQuery] = useState("");
   const [scheme, setScheme] = useState<Scheme>("light dark");
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -69,6 +71,26 @@ export function TopBar() {
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      e.preventDefault();
+      searchInputRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   function selectScheme(next: Scheme) {
@@ -150,17 +172,20 @@ export function TopBar() {
           <label htmlFor="quick-jump-ref" className="visually-hidden">
             Jump to shipment reference
           </label>
-          <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
-            <circle cx="7" cy="7" r="4.5" />
-            <path d="M10.5 10.5L14 14" strokeLinecap="round" />
-          </svg>
+          <Search
+            size={14}
+            strokeWidth={1.75}
+            aria-hidden="true"
+            className="quick-jump-icon"
+          />
           <input
+            ref={searchInputRef}
             id="quick-jump-ref"
             name="reference"
             type="search"
             value={refQuery}
             onChange={(e) => setRefQuery(e.target.value)}
-            placeholder="Find shipment ref…"
+            placeholder="Find ref (press /)…"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
@@ -173,26 +198,31 @@ export function TopBar() {
             type="button"
             aria-pressed={scheme === "light dark"}
             onClick={() => selectScheme("light dark")}
+            title="Match system theme"
           >
-            Auto
+            <Monitor size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>Auto</span>
           </button>
           <button
             type="button"
             aria-pressed={scheme === "light"}
             onClick={() => selectScheme("light")}
+            title="Light theme"
           >
-            Light
+            <Sun size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>Light</span>
           </button>
           <button
             type="button"
             aria-pressed={scheme === "dark"}
             onClick={() => selectScheme("dark")}
+            title="Dark theme"
           >
-            Dark
+            <Moon size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>Dark</span>
           </button>
         </div>
       </div>
     </header>
   );
 }
-

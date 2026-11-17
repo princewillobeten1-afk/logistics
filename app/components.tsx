@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { AlertTriangle, ArrowRight, PackageOpen } from "lucide-react";
 import { toneFor } from "@/lib/format";
+import { formatStateLabel } from "@/lib/view-helpers";
 
 export function Pill({ state }: { state: string }) {
   return (
-    <span className="pill" data-tone={toneFor(state)}>
-      {state.replace(/_/g, " ")}
+    <span className="status-tag" data-tone={toneFor(state)}>
+      {formatStateLabel(state)}
     </span>
   );
 }
@@ -39,21 +41,12 @@ export function Empty({
 }: {
   message: string;
   hint?: string;
-  /** Somewhere in the product to go next.
-   *
-   *  Deliberately a link rather than a shell command. An empty screen should
-   *  offer the person looking at it something they can actually do — printing
-   *  a terminal command tells an operations manager to go and find a
-   *  developer, which is not a feature. */
   action?: { label: string; href: string };
 }) {
   return (
     <div className="empty">
       <span className="empty-icon" aria-hidden="true">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M8 1.75L13.75 4.75V11.25L8 14.25L2.25 11.25V4.75L8 1.75Z" strokeLinejoin="round" />
-          <path d="M2.25 4.75L8 7.75L13.75 4.75M8 7.75V14.25" strokeLinejoin="round" />
-        </svg>
+        <PackageOpen size={18} strokeWidth={1.75} />
       </span>
       <strong>{message}</strong>
       {hint ? <div className="empty-hint">{hint}</div> : null}
@@ -61,7 +54,7 @@ export function Empty({
         <div>
           <Link href={action.href} className="empty-action">
             <span>{action.label}</span>
-            <span aria-hidden="true">→</span>
+            <ArrowRight size={14} strokeWidth={2} aria-hidden="true" />
           </Link>
         </div>
       ) : null}
@@ -72,17 +65,19 @@ export function Empty({
 export function Offline({ error }: { error?: string }) {
   return (
     <div className="banner" role="alert">
-      <strong>This page could not load</strong>
+      <strong className="row-center">
+        <AlertTriangle size={16} strokeWidth={2} aria-hidden="true" />
+        <span>This page could not load</span>
+      </strong>
       <div>
-        The system is temporarily unreachable. It usually recovers on its own —
-        try again in a moment. If it keeps happening, let your administrator
-        know.
+        The system is temporarily unreachable. Try again in a moment, or
+        contact your workspace administrator if the issue persists.
       </div>
-      {/* The underlying fault names hosts, ports and database identifiers.
-          Useful while developing, and no business being on an operator's
-          screen — or in a screenshot they paste into a support thread. */}
       {process.env.NODE_ENV !== "production" && error ? (
-        <div className="font-mono text-xs" style={{ marginTop: "0.5rem", opacity: 0.85 }}>
+        <div
+          className="font-mono text-xs"
+          style={{ marginTop: "0.5rem", opacity: 0.85 }}
+        >
           {error}
         </div>
       ) : null}

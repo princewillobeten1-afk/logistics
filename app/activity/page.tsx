@@ -140,7 +140,7 @@ export default async function Activity({
                     </td>
                     <td>
                       {row.result ? (
-                        <span className="pill" data-tone={toneFor(row)}>
+                        <span className="status-tag" data-tone={toneFor(row)}>
                           {row.result}
                         </span>
                       ) : (
@@ -155,11 +155,11 @@ export default async function Activity({
         )}
       </Panel>
 
-      <Panel title="Model usage, last 24h" hint="the cost thesis, measured" flush>
+      <Panel title="Assistant usage, last 24h" hint="calls, latency, and token output" flush>
         {usage.length === 0 ? (
           <Empty
             message="No model calls in the last 24 hours"
-            hint="Deterministic steps never call a model — that is by design, not an outage."
+            hint="Standard allocation and planning run deterministically without AI calls."
           />
         ) : (
           <div

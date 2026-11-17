@@ -1,4 +1,4 @@
-import { signOutAction } from "@/app/login/actions";
+import { SignOutButton } from "@/app/sign-out-button";
 
 const ROLE_HINT: Record<string, string> = {
   VIEWER: "Read only",
@@ -43,11 +43,7 @@ export function AccountBar({
         <div className="account-role" title={ROLE_HINT[role] ?? role}>
           {role}
         </div>
-        <form action={signOutAction}>
-          <button type="submit" className="account-out">
-            <span>Sign out</span>
-          </button>
-        </form>
+        <SignOutButton />
       </div>
     </div>
   );

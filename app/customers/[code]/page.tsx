@@ -63,15 +63,15 @@ export default async function CustomerDetail({
                 </span>
               )}
             </dd>
-            <dt>payment terms</dt>
+            <dt>Payment terms</dt>
             <dd>{customer.payment_terms ?? "—"}</dd>
-            <dt>currency</dt>
+            <dt>Currency</dt>
             <dd>{customer.default_currency}</dd>
-            <dt>status</dt>
+            <dt>Status</dt>
             <dd>
               <Pill state={customer.active ? "ACTIVE" : "INACTIVE"} />
             </dd>
-            <dt>last shipment</dt>
+            <dt>Last shipment</dt>
             <dd>
               {customer.last_shipment_at
                 ? relative(customer.last_shipment_at)
@@ -83,11 +83,11 @@ export default async function CustomerDetail({
         <Panel title="Contact">
           {contact ? (
             <dl className="kv">
-              <dt>name</dt>
+              <dt>Name</dt>
               <dd>{contact.name ?? "—"}</dd>
-              <dt>email</dt>
+              <dt>Email</dt>
               <dd>{contact.email ?? "—"}</dd>
-              <dt>phone</dt>
+              <dt>Phone</dt>
               <dd>{contact.phone ?? "—"}</dd>
             </dl>
           ) : (
