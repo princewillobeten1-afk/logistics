@@ -54,7 +54,7 @@ export function RoutingRequestForm() {
             id="plan-ref"
             value={reference}
             onChange={(e) => setReference(e.target.value)}
-            placeholder="e.g. LG-82931"
+            placeholder="e.g. LG-00001"
           />
         </label>
 

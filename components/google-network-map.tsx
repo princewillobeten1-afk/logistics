@@ -17,7 +17,8 @@ import { MapsGroundingPanel, type MapsGroundingContext } from "@/components/maps
 import { MapLayersPanel } from "@/components/map-layers-panel";
 import { dispatchQuotaExceeded } from "@/components/maps-quota-banner";
 import { NetworkMap, type MapLane, type MapSitePoint } from "@/components/network-map";
-import { city, relative, toneFor } from "@/lib/format";
+import { ClientRelative } from "@/components/client-time";
+import { city, toneFor } from "@/lib/format";
 import {
   DEFAULT_MAP_LAYERS,
   filterPointsByLayers,
@@ -959,7 +960,7 @@ export function GoogleNetworkMap({
                   </strong>
                 </span>
                 <span>
-                  Last update: <strong>{relative(selectedLane.shipment.updated_at)}</strong>
+                  Last update: <strong><ClientRelative date={selectedLane.shipment.updated_at} /></strong>
                 </span>
               </div>
 

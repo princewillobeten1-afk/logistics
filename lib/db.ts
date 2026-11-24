@@ -4,25 +4,24 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { Pool, type PoolClient, type QueryResult } from "pg";
 
 import {
-  createOperationalSeed,
-  generateMockAssistantTurn,
-  generateMockSupportReplyMessage,
-  reviveSeedDates,
-  type OperationalSeed,
-} from "./mock-data";
+  createEmptyOperationalState,
+  reviveOperationalStateDates,
+  type OperationalState,
+} from "./local-store";
 
 // Next dev reloads modules on every edit; without a global the pool would be
 // recreated per reload and leak connections until Postgres refuses new ones.
 const globalForPg = globalThis as unknown as {
   logisticsPool?: Pool;
-  logisticsMockStore?: MockStore;
-  logisticsMockMtimeMs?: number;
+  logisticsLocalStore?: LocalStore;
+  logisticsLocalMtimeMs?: number;
+  pgUnavailableUntil?: number;
 };
 
-const MOCK_STORE_PATH = "/tmp/logistics-mock-store.json";
+const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
 
-type MockOrg = { id: string; name: string; slug: string; active: boolean };
-type MockUser = {
+type LocalOrg = { id: string; name: string; slug: string; active: boolean };
+type LocalUser = {
   id: string;
   org_id: string;
   email: string;
@@ -32,14 +31,14 @@ type MockUser = {
   active: boolean;
   last_login_at: Date | null;
 };
-type MockSession = {
+type LocalSession = {
   token: string;
   user_id: string;
   expires_at: Date;
   ip_address: string | null;
   user_agent: string | null;
 };
-type MockReset = {
+type LocalReset = {
   token: string;
   user_id: string;
   expires_at: Date;
@@ -48,76 +47,76 @@ type MockReset = {
   ip_address: string | null;
 };
 
-type MockStore = {
-  orgs: MockOrg[];
-  users: MockUser[];
-  sessions: MockSession[];
-  resets: MockReset[];
-  seed: OperationalSeed;
+type LocalStore = {
+  orgs: LocalOrg[];
+  users: LocalUser[];
+  sessions: LocalSession[];
+  resets: LocalReset[];
+  data: OperationalState;
 };
 
-function reviveMockStore(raw: unknown): MockStore {
-  const data = (raw ?? {}) as Partial<MockStore>;
+function reviveLocalStore(raw: unknown): LocalStore {
+  const parsed = (raw ?? {}) as Partial<LocalStore>;
   return {
-    orgs: Array.isArray(data.orgs) ? data.orgs : [],
-    users: Array.isArray(data.users)
-      ? data.users.map((u) => ({
+    orgs: Array.isArray(parsed.orgs) ? parsed.orgs : [],
+    users: Array.isArray(parsed.users)
+      ? parsed.users.map((u) => ({
           ...u,
           last_login_at: u.last_login_at ? new Date(u.last_login_at) : null,
         }))
       : [],
-    sessions: Array.isArray(data.sessions)
-      ? data.sessions.map((s) => ({
+    sessions: Array.isArray(parsed.sessions)
+      ? parsed.sessions.map((s) => ({
           ...s,
           expires_at: new Date(s.expires_at),
         }))
       : [],
-    resets: Array.isArray(data.resets)
-      ? data.resets.map((r) => ({
+    resets: Array.isArray(parsed.resets)
+      ? parsed.resets.map((r) => ({
           ...r,
           expires_at: new Date(r.expires_at),
           created_at: new Date(r.created_at),
           used_at: r.used_at ? new Date(r.used_at) : null,
         }))
       : [],
-    seed: reviveSeedDates(data.seed),
+    data: reviveOperationalStateDates(parsed.data),
   };
 }
 
-function getMockStore(): MockStore {
+function getLocalStore(): LocalStore {
   try {
-    if (existsSync(MOCK_STORE_PATH)) {
-      const mtimeMs = statSync(MOCK_STORE_PATH).mtimeMs;
+    if (existsSync(LOCAL_STORE_PATH)) {
+      const mtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
       if (
-        !globalForPg.logisticsMockStore ||
-        globalForPg.logisticsMockMtimeMs !== mtimeMs
+        !globalForPg.logisticsLocalStore ||
+        globalForPg.logisticsLocalMtimeMs !== mtimeMs
       ) {
-        const parsed = JSON.parse(readFileSync(MOCK_STORE_PATH, "utf8"));
-        globalForPg.logisticsMockStore = reviveMockStore(parsed);
-        globalForPg.logisticsMockMtimeMs = mtimeMs;
+        const parsed = JSON.parse(readFileSync(LOCAL_STORE_PATH, "utf8"));
+        globalForPg.logisticsLocalStore = reviveLocalStore(parsed);
+        globalForPg.logisticsLocalMtimeMs = mtimeMs;
       }
     }
   } catch {
     // Fall back to in-memory store if temp file read fails
   }
 
-  if (!globalForPg.logisticsMockStore) {
-    globalForPg.logisticsMockStore = {
+  if (!globalForPg.logisticsLocalStore) {
+    globalForPg.logisticsLocalStore = {
       orgs: [],
       users: [],
       sessions: [],
       resets: [],
-      seed: createOperationalSeed(),
+      data: createEmptyOperationalState(),
     };
   }
-  return globalForPg.logisticsMockStore;
+  return globalForPg.logisticsLocalStore;
 }
 
-function saveMockStore(store: MockStore): void {
-  globalForPg.logisticsMockStore = store;
+function saveLocalStore(store: LocalStore): void {
+  globalForPg.logisticsLocalStore = store;
   try {
-    writeFileSync(MOCK_STORE_PATH, JSON.stringify(store), "utf8");
-    globalForPg.logisticsMockMtimeMs = statSync(MOCK_STORE_PATH).mtimeMs;
+    writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store), "utf8");
+    globalForPg.logisticsLocalMtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
   } catch {
     // Ignore disk write issues in read-only environments
   }
@@ -132,13 +131,13 @@ const TERMINAL_OR_DELIVERED = new Set([
   "FAILED",
 ]);
 
-function mockQuery(
+function localQuery(
   text: string,
   params: unknown[] = [],
 ): QueryResult<Record<string, unknown>> {
   const sql = text.trim();
-  const store = getMockStore();
-  const seed = store.seed;
+  const store = getLocalStore();
+  const seed = store.data;
 
   const ok = (rows: Record<string, unknown>[], rowCount = rows.length) =>
     ({
@@ -223,14 +222,14 @@ function mockQuery(
 
   // Insert organisation
   if (/INSERT INTO organisations/i.test(sql)) {
-    const org: MockOrg = {
+    const org: LocalOrg = {
       id: randomUUID(),
       name: String(params[0] ?? ""),
       slug: String(params[1] ?? ""),
       active: true,
     };
     store.orgs.push(org);
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id: org.id, name: org.name }], 1);
   }
 
@@ -248,7 +247,7 @@ function mockQuery(
       err.constraint = "users_email_idx";
       throw err;
     }
-    const user: MockUser = {
+    const user: LocalUser = {
       id: randomUUID(),
       org_id: String(params[0] ?? ""),
       email,
@@ -259,7 +258,7 @@ function mockQuery(
       last_login_at: null,
     };
     store.users.push(user);
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok(
       [{ id: user.id, email: user.email, name: user.name, role: user.role }],
       1,
@@ -276,7 +275,7 @@ function mockQuery(
       ip_address: params[3] != null ? String(params[3]) : null,
       user_agent: params[4] != null ? String(params[4]) : null,
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], 1);
   }
 
@@ -285,7 +284,7 @@ function mockQuery(
     const user = store.users.find((u) => u.id === id);
     if (user) {
       user.last_login_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
     }
     return ok([], user ? 1 : 0);
   }
@@ -294,7 +293,7 @@ function mockQuery(
     const token = String(params[0] ?? "");
     const before = store.sessions.length;
     store.sessions = store.sessions.filter((s) => s.token !== token);
-    if (store.sessions.length !== before) saveMockStore(store);
+    if (store.sessions.length !== before) saveLocalStore(store);
     return ok([], before - store.sessions.length);
   }
 
@@ -302,7 +301,7 @@ function mockQuery(
     const userId = String(params[0] ?? "");
     const before = store.sessions.length;
     store.sessions = store.sessions.filter((s) => s.user_id !== userId);
-    if (store.sessions.length !== before) saveMockStore(store);
+    if (store.sessions.length !== before) saveLocalStore(store);
     return ok([], before - store.sessions.length);
   }
 
@@ -327,7 +326,7 @@ function mockQuery(
       created_at: new Date(),
       ip_address: params[3] != null ? String(params[3]) : null,
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], 1);
   }
 
@@ -354,7 +353,7 @@ function mockQuery(
     const user = store.users.find((u) => u.id === userId);
     if (user) {
       user.password_hash = hash;
-      saveMockStore(store);
+      saveLocalStore(store);
     }
     return ok([], user ? 1 : 0);
   }
@@ -364,7 +363,7 @@ function mockQuery(
     const reset = store.resets.find((r) => r.token === token);
     if (reset) {
       reset.used_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
     }
     return ok([], reset ? 1 : 0);
   }
@@ -381,7 +380,7 @@ function mockQuery(
       entity_type: params[3] != null ? String(params[3]) : null,
       created_at: new Date(),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], 1);
   }
 
@@ -515,7 +514,7 @@ function mockQuery(
       next_step: null,
       created_at: new Date(),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id: msgId }], 1);
   }
 
@@ -532,7 +531,7 @@ function mockQuery(
       next_step: null,
       created_at: new Date(Date.now() + 5),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id: msgId }], 1);
   }
 
@@ -544,7 +543,7 @@ function mockQuery(
       msg.state = (String(params[1] ?? "DONE") as "PENDING" | "DONE" | "FAILED");
       msg.confidence = params[2] != null ? String(params[2]) : null;
       msg.next_step = params[3] != null ? String(params[3]) : null;
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
     return ok([], 0);
@@ -559,7 +558,7 @@ function mockQuery(
     seed.assistantMessages = seed.assistantMessages.filter(
       (m) => !(m.shipment_id === s.id && m.user_id === userId),
     );
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], before - seed.assistantMessages.length);
   }
 
@@ -648,8 +647,21 @@ function mockQuery(
     );
   }
 
+  if (/FROM shipment_legs\s+ORDER BY sequence/i.test(sql)) {
+    return ok(
+      [...seed.legs].sort((a, b) => a.sequence - b.sequence) as unknown as Record<
+        string,
+        unknown
+      >[],
+    );
+  }
+
   // 14. Quotes
-  if (/FROM quotes q JOIN carriers c/i.test(sql)) {
+  if (/FROM quotes q\s+LEFT JOIN carriers c/i.test(sql)) {
+    return ok(seed.quotes as unknown as Record<string, unknown>[]);
+  }
+
+  if (/FROM quotes q\s+JOIN carriers c/i.test(sql)) {
     const sid = String(params[0] ?? "");
     const matching = seed.quotes.filter((q) => q.shipment_id === sid);
     const maxRound = matching.reduce((m, q) => Math.max(m, q.round), 0);
@@ -718,7 +730,7 @@ function mockQuery(
         created_at: new Date(),
       });
     }
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok(
       [
         {
@@ -739,7 +751,7 @@ function mockQuery(
     );
     if (pa) {
       pa.state = nextState;
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
     return ok([], 0);
@@ -819,7 +831,7 @@ function mockQuery(
 
   if (/INSERT INTO work_items/i.test(sql)) {
     const now = new Date();
-    // Handle channel configuration mutations directly in mock mode
+    // Handle channel configuration mutations directly in local store mode
     if (/channels\.configure/i.test(sql)) {
       let payload: Record<string, unknown> = {};
       try {
@@ -862,15 +874,57 @@ function mockQuery(
         created_at: now,
         updated_at: now,
       });
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
 
+    // Parse column list & VALUES expressions so queries omitting shipment_id (e.g. (kind, state, payload, ...)) map accurately
+    const colMatch = sql.match(/INSERT INTO work_items\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+?)\)(?:\s*ON CONFLICT|$)/i);
+    const cols = colMatch
+      ? colMatch[1].split(",").map((c) => c.trim().toLowerCase())
+      : [];
+    const valsRaw = colMatch
+      ? colMatch[2].split(",").map((v) => v.trim())
+      : [];
+
+    const readColValue = (colName: string): unknown => {
+      const idx = cols.indexOf(colName);
+      if (idx === -1) return undefined;
+      const expr = valsRaw[idx] ?? "";
+      const paramMatch = expr.match(/^\$(\d+)/);
+      if (paramMatch) {
+        return params[Number(paramMatch[1]) - 1];
+      }
+      const strMatch = expr.match(/^'([^']*)'/);
+      if (strMatch) return strMatch[1];
+      return undefined;
+    };
+
+    const parsedShipmentId = readColValue("shipment_id");
+    const parsedKind = readColValue("kind");
+    const parsedState = readColValue("state");
+
     // If caller already executed inline (e.g. server-side Gemini agent) and inserted DONE, record only the work item
-    if (/VALUES\s*\([^)]*'DONE'/i.test(sql) || /,\s*'DONE'\s*,/i.test(sql)) {
-      const shipmentId = params[0] != null ? String(params[0]) : null;
+    if (
+      String(parsedState ?? "").toUpperCase() === "DONE" ||
+      /VALUES\s*\([^)]*'DONE'/i.test(sql) ||
+      /,\s*'DONE'\s*,/i.test(sql)
+    ) {
+      const shipmentId =
+        cols.length > 0
+          ? parsedShipmentId != null
+            ? String(parsedShipmentId)
+            : null
+          : params[0] != null
+            ? String(params[0])
+            : null;
       const kindMatch = sql.match(/'([a-z0-9_]+\.[a-z0-9_]+)'/i);
-      const kind = kindMatch ? kindMatch[1] : String(params[1] ?? "agent.run");
+      const kind =
+        typeof parsedKind === "string" && parsedKind.trim()
+          ? parsedKind.trim()
+          : kindMatch
+            ? kindMatch[1]
+            : String(params[1] ?? "agent.run");
       seed.workItems.unshift({
         id: `wi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         shipment_id: shipmentId,
@@ -882,11 +936,11 @@ function mockQuery(
         created_at: now,
         updated_at: now,
       });
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
 
-    // Handle planning.optimize_fleet job in fallback mode
+    // Handle planning.optimize_fleet job in local fallback mode
     if (/planning\.optimize_fleet/i.test(sql)) {
       seed.workItems.unshift({
         id: `wi-${Date.now()}`,
@@ -899,109 +953,65 @@ function mockQuery(
         created_at: now,
         updated_at: now,
       });
-      seed.agentRuns.unshift({
-        id: `ar-${Date.now()}`,
-        shipment_id: null,
-        agent: "route-optimizer",
-        job: "Optimize fleet routes",
-        model: "nvidia/cuopt-cvrptw",
-        status: "OK",
-        latency_ms: 340,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        created_at: now,
-        response: { reasoning: "Dispatched CVRPTW matrix optimization across 4 vehicles." },
-      });
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
 
-    // Handle shipment.assist -> immediately compute fallback assistant reply
+    // Queue shipment.assist / support.reply as real pending work items when Gemini is unconfigured
     if (/shipment\.assist/i.test(sql)) {
-      const shipmentId = String(params[0] ?? "");
-      let payload: Record<string, unknown> = {};
-      try {
-        payload = JSON.parse(String(params[1] ?? "{}"));
-      } catch {
-        payload = {};
-      }
-      const pendingId = String(payload.message_id ?? "");
-      const pendingMsg = seed.assistantMessages.find((m) => m.id === pendingId);
-      const lastUser = [...seed.assistantMessages]
-        .reverse()
-        .find((m) => m.shipment_id === shipmentId && m.role === "user");
-      const generated = generateMockAssistantTurn(
-        seed,
-        shipmentId,
-        pendingMsg?.user_id ?? "mock-user",
-        lastUser?.body ?? "",
-      );
-      if (pendingMsg) {
-        pendingMsg.body = generated.body;
-        pendingMsg.state = "DONE";
-        pendingMsg.confidence = generated.confidence;
-        pendingMsg.next_step = generated.next_step;
-      } else {
-        seed.assistantMessages.push(generated);
-      }
-      seed.agentRuns.unshift({
-        id: `ar-${Date.now()}`,
-        shipment_id: shipmentId,
-        agent: "shipment-assistant",
-        job: "Explain shipment state",
-        model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
-        status: "OK",
-        latency_ms: 410,
-        prompt_tokens: 620,
-        completion_tokens: 185,
-        created_at: now,
-        response: { reasoning: generated.next_step },
-      });
-      saveMockStore(store);
-      return ok([], 1);
-    }
-
-    // Handle support.reply -> immediately append fallback support reply
-    if (/support\.reply/i.test(sql)) {
       const shipmentId = params[0] != null ? String(params[0]) : null;
-      let payload: Record<string, unknown> = {};
-      try {
-        payload = JSON.parse(String(params[1] ?? "{}"));
-      } catch {
-        payload = {};
-      }
-      const contactId = String(payload.contact_id ?? "");
-      const commId = String(payload.communication_id ?? "");
-      const inbound = seed.communications.find((c) => c.id === commId);
-      const reply = generateMockSupportReplyMessage(
-        seed,
-        shipmentId,
-        contactId,
-        inbound?.body ?? "",
-      );
-      seed.communications.push(reply);
       seed.workItems.unshift({
-        id: `wi-${Date.now()}`,
+        id: `wi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         shipment_id: shipmentId,
-        kind: "support.reply",
-        state: "DONE",
-        attempts: 1,
+        kind: "shipment.assist",
+        state: "PENDING",
+        attempts: 0,
         last_error: null,
         run_after: now,
         created_at: now,
         updated_at: now,
       });
-      saveMockStore(store);
+      saveLocalStore(store);
+      return ok([], 1);
+    }
+
+    if (/support\.reply/i.test(sql)) {
+      const shipmentId = params[0] != null ? String(params[0]) : null;
+      seed.workItems.unshift({
+        id: `wi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        shipment_id: shipmentId,
+        kind: "support.reply",
+        state: "PENDING",
+        attempts: 0,
+        last_error: null,
+        run_after: now,
+        created_at: now,
+        updated_at: now,
+      });
+      saveLocalStore(store);
       return ok([], 1);
     }
 
     // Generic or explicit work item (e.g. autonomous.*, support.*, agent.*)
-    const shipmentId = params[0] != null ? String(params[0]) : null;
+    const shipmentId =
+      cols.length > 0
+        ? parsedShipmentId != null
+          ? String(parsedShipmentId)
+          : null
+        : params[0] != null
+          ? String(params[0])
+          : null;
     const literalKindMatch = sql.match(/'([a-z0-9_]+\.[a-z0-9_]+)'/i);
-    const kind = literalKindMatch
-      ? literalKindMatch[1]
-      : String(params[1] ?? "work.step");
-    const isDone = /,\s*'DONE'\s*,/i.test(sql) || /\(\s*[^,]+,\s*[^,]+,\s*'DONE'/i.test(sql);
+    const kind =
+      typeof parsedKind === "string" && parsedKind.trim()
+        ? parsedKind.trim()
+        : literalKindMatch
+          ? literalKindMatch[1]
+          : String(params[1] ?? "work.step");
+    const isDone =
+      String(parsedState ?? "").toUpperCase() === "DONE" ||
+      /,\s*'DONE'\s*,/i.test(sql) ||
+      /\(\s*[^,]+,\s*[^,]+,\s*'DONE'/i.test(sql);
     seed.workItems.unshift({
       id: `wi-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       shipment_id: shipmentId,
@@ -1013,7 +1023,7 @@ function mockQuery(
       created_at: now,
       updated_at: now,
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], 1);
   }
 
@@ -1050,7 +1060,7 @@ function mockQuery(
       customer: customerName,
       items: String(rawObj.itemsCount ?? 1),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id, reference }], 1);
   }
 
@@ -1086,20 +1096,22 @@ function mockQuery(
       reference,
       state,
       version: 1,
-      customer_id: seed.customers[0]?.id ?? "cust-1",
+      customer_id: seed.customers[0]?.id ?? null,
       customer_ref: customerRef,
       origin,
       destination,
       cargo,
       deadline,
-      allocation: { warehouse: "LOS-HUB-1", status: "ALLOCATED" },
+      allocation: seed.warehouses[0]
+        ? { warehouse: seed.warehouses[0].code, status: "ALLOCATED" }
+        : null,
       plan,
       booking: null,
       created_via: createdVia,
       created_at: now,
       updated_at: now,
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id, reference }], 1);
   }
 
@@ -1133,7 +1145,7 @@ function mockQuery(
       actor,
       created_at: new Date(),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([], 1);
   }
 
@@ -1165,7 +1177,7 @@ function mockQuery(
       detail,
       created_at: new Date(),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id }], 1);
   }
 
@@ -1197,11 +1209,15 @@ function mockQuery(
       response: parsedResponse ?? {},
       created_at: new Date(),
     });
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id }], 1);
   }
 
   // 17. Agent runs + Model usage + Activity feed
+  if (/SELECT count\(\*\)::text AS n FROM agent_runs/i.test(sql)) {
+    return ok([{ n: String(seed.agentRuns.length) }]);
+  }
+
   if (/FROM agent_runs a/i.test(sql)) {
     const limit = Number(params[0] ?? 50);
     const rows = [...seed.agentRuns]
@@ -1497,6 +1513,10 @@ function mockQuery(
     return ok(rows);
   }
 
+  if (/SELECT count\(\*\)::text AS n FROM communications/i.test(sql)) {
+    return ok([{ n: String(seed.communications.length) }]);
+  }
+
   if (/FROM communications m/i.test(sql) && !/FROM channel_contacts c/i.test(sql)) {
     const rows = [...seed.communications]
       .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
@@ -1527,7 +1547,7 @@ function mockQuery(
     if (ship) {
       ship.plan = { ...(ship.plan ?? {}), ...parsedPlan };
       ship.updated_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([{ id: ship.id, reference: ship.reference }], 1);
     }
     return ok([], 0);
@@ -1571,7 +1591,7 @@ function mockQuery(
         created_at: new Date(),
       });
     }
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok([{ id }], 1);
   }
 
@@ -1582,7 +1602,7 @@ function mockQuery(
     if (c) {
       c.escalated_at = new Date();
       c.escalation_reason = reason;
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
     return ok([], 0);
@@ -1605,7 +1625,7 @@ function mockQuery(
     if (c) {
       c.draft = draftObj;
       c.last_seen_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
     return ok([], 0);
@@ -1621,7 +1641,7 @@ function mockQuery(
         c.draft = null;
       }
       c.last_seen_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
       return ok([], 1);
     }
     return ok([], 0);
@@ -1659,7 +1679,7 @@ function mockQuery(
       };
       seed.contacts.push(existing);
     }
-    saveMockStore(store);
+    saveLocalStore(store);
     return ok(
       [{ id: existing.id, last_shipment_id: existing.last_shipment_id, draft: existing.draft }],
       1,
@@ -1715,7 +1735,6 @@ function mockQuery(
   // 23. Throughput (14-day sparkline)
   if (/FROM generate_series\(/i.test(sql)) {
     const days: { day: string; created: string; closed: string }[] = [];
-    const baseline = [1, 0, 2, 1, 3, 2, 1, 4, 2, 3, 2, 5, 3, 2];
     for (let i = 13; i >= 0; i -= 1) {
       const d = new Date(Date.now() - i * 86_400_000);
       const label = d.toLocaleDateString("en-US", {
@@ -1734,7 +1753,7 @@ function mockQuery(
       ).length;
       days.push({
         day: label,
-        created: String(Math.max(actualCreated, baseline[13 - i] ?? 0)),
+        created: String(actualCreated),
         closed: String(actualClosed),
       });
     }
@@ -1747,7 +1766,7 @@ function mockQuery(
     const ch = seed.channels.find((c) => c.channel === chName);
     if (ch) {
       ch.last_inbound_at = new Date();
-      saveMockStore(store);
+      saveLocalStore(store);
     }
     return ok([], ch ? 1 : 0);
   }
@@ -1764,83 +1783,322 @@ function mockQuery(
   }
 
   if (/FROM policies/i.test(sql)) {
-    return ok([
-      {
-        version: 3,
-        name: "West Africa Corridor Controls v3",
-        created_at: new Date(Date.now() - 14 * 86_400_000),
-        rules: {
-          base_currency: "NGN",
-          fx_max_age_hours: 24,
-          auto_execute_tiers: [1],
-          default_decision: "REQUIRE_APPROVAL",
-          actions: {
-            "carrier.book": {
-              auto_approve_below_minor: 50000000,
-              hard_deny_above_minor: 500000000,
-            },
-            "customs.clear": {
-              auto_approve_below_minor: 25000000,
-              hard_deny_above_minor: 250000000,
-            },
-            "expedite.reroute": {
-              auto_approve_below_minor: 0,
-              hard_deny_above_minor: 300000000,
-            },
-            "claim.settle": {
-              auto_approve_below_minor: null,
-              hard_deny_above_minor: 150000000,
-            },
-          },
-          require_approval_when: {
-            unapproved_carrier: true,
-            hazmat_cargo: true,
-            international_border_leg: true,
-            variance_above_quote_minor: 15000000,
-          },
-        },
-      },
-    ]);
+    return ok(seed.policies as unknown as Record<string, unknown>[]);
   }
 
   if (/FROM currencies/i.test(sql)) {
-    return ok([
-      { code: "EUR", name: "Euro", minor_unit_exponent: 2 },
-      { code: "GBP", name: "Pound Sterling", minor_unit_exponent: 2 },
-      { code: "NGN", name: "Nigerian Naira", minor_unit_exponent: 2 },
-      { code: "USD", name: "US Dollar", minor_unit_exponent: 2 },
-    ]);
+    return ok(seed.currencies as unknown as Record<string, unknown>[]);
   }
 
   if (/FROM fx_rates/i.test(sql)) {
-    const asOf = new Date(Date.now() - 2 * 3_600_000);
-    return ok([
-      { base: "USD", quote: "NGN", rate: "1560", as_of: asOf, source: "CBN / FMDQ" },
-      { base: "EUR", quote: "NGN", rate: "1695", as_of: asOf, source: "ECB / FMDQ" },
-      { base: "GBP", quote: "NGN", rate: "1980", as_of: asOf, source: "BoE / FMDQ" },
-    ]);
+    return ok(seed.fxRates as unknown as Record<string, unknown>[]);
   }
 
   if (/FROM schema_migrations/i.test(sql)) {
-    const appliedAt = new Date(Date.now() - 3 * 86_400_000);
-    return ok(
-      [
-        "001_core",
-        "005_operations",
-        "010_channels",
-        "015_identity",
-        "016_tenancy",
-        "020_assistant",
-        "021_password_resets",
-      ].map((version) => ({ version, applied_at: appliedAt })),
+    return ok(seed.migrations as unknown as Record<string, unknown>[]);
+  }
+
+  // 25. Universal Integrations (connectors, sync events, telemetry, inventory)
+  if (/^CREATE\s+(?:TABLE|INDEX)/i.test(sql)) {
+    return ok([], 0);
+  }
+
+  if (/FROM\s+integration_connectors\s+WHERE\s+api_key_hash\s*=\s*\$1/i.test(sql)) {
+    const hash = String(params[0] ?? "");
+    const found = seed.integrationConnectors.find((c) => c.api_key_hash === hash);
+    return found ? ok([found as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM\s+integration_connectors\s+WHERE\s+id\s*=\s*\$1\s+AND\s+org_id\s*=\s*\$2/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const orgId = String(params[1] ?? "");
+    const found = seed.integrationConnectors.find(
+      (c) => c.id === id && c.org_id === orgId,
     );
+    return found ? ok([found as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM\s+integration_connectors\s+WHERE\s+org_id\s*=\s*\$1/i.test(sql)) {
+    const orgId = String(params[0] ?? "");
+    const rows = seed.integrationConnectors
+      .filter((c) => c.org_id === orgId)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    return ok(rows as unknown as Record<string, unknown>[]);
+  }
+
+  if (/INSERT INTO integration_connectors/i.test(sql)) {
+    const now = new Date();
+    const parseJsonArr = (val: unknown): string[] => {
+      if (Array.isArray(val)) return val.map(String);
+      if (typeof val === "string") {
+        try {
+          const p = JSON.parse(val);
+          return Array.isArray(p) ? p.map(String) : [];
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    };
+    const parseJsonObj = (val: unknown): Record<string, string> => {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        return val as Record<string, string>;
+      }
+      if (typeof val === "string") {
+        try {
+          const p = JSON.parse(val);
+          return p && typeof p === "object" ? (p as Record<string, string>) : {};
+        } catch {
+          return {};
+        }
+      }
+      return {};
+    };
+    const rec = {
+      id: String(params[0] ?? `conn-${Date.now()}`),
+      org_id: String(params[1] ?? ""),
+      name: String(params[2] ?? "Connector"),
+      system_type: String(params[3] ?? "custom_rest_webhook"),
+      category: String(params[4] ?? "CUSTOM"),
+      status: (String(params[5] ?? "ACTIVE") as "ACTIVE" | "PAUSED"),
+      autonomy_mode: (String(params[6] ?? "FULL_AUTONOMOUS") as
+        | "FULL_AUTONOMOUS"
+        | "ASSISTED_APPROVAL"
+        | "SYNC_ONLY"),
+      api_key_prefix: String(params[7] ?? ""),
+      api_key_hash: String(params[8] ?? ""),
+      webhook_secret_hash: String(params[9] ?? ""),
+      outbound_webhook_url: params[10] != null ? String(params[10]) : null,
+      outbound_events: parseJsonArr(params[11]),
+      field_mapping: parseJsonObj(params[12]),
+      created_by: String(params[13] ?? "operator"),
+      created_at: now,
+      updated_at: now,
+      last_sync_at: null,
+      events_processed: 0,
+      errors_count: 0,
+    };
+    seed.integrationConnectors.unshift(rec);
+    saveLocalStore(store);
+    return ok([rec as unknown as Record<string, unknown>], 1);
+  }
+
+  if (/UPDATE\s+integration_connectors\s+SET\s+api_key_prefix\s*=\s*\$1/i.test(sql)) {
+    const id = String(params[3] ?? "");
+    const orgId = String(params[4] ?? "");
+    const c = seed.integrationConnectors.find((x) => x.id === id && x.org_id === orgId);
+    if (!c) return ok([], 0);
+    c.api_key_prefix = String(params[0] ?? c.api_key_prefix);
+    c.api_key_hash = String(params[1] ?? c.api_key_hash);
+    c.webhook_secret_hash = String(params[2] ?? c.webhook_secret_hash);
+    c.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([c as unknown as Record<string, unknown>], 1);
+  }
+
+  if (/UPDATE\s+integration_connectors\s+SET\s+events_processed\s*=\s*events_processed\s*\+\s*\$1/i.test(sql)) {
+    const incProcessed = Number(params[0] ?? 0);
+    const incErrors = Number(params[1] ?? 0);
+    const id = String(params[2] ?? "");
+    const c = seed.integrationConnectors.find((x) => x.id === id);
+    if (!c) return ok([], 0);
+    c.events_processed += incProcessed;
+    c.errors_count += incErrors;
+    c.last_sync_at = new Date();
+    c.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([c as unknown as Record<string, unknown>], 1);
+  }
+
+  if (/UPDATE\s+integration_connectors\s+SET\s+name\s*=\s*\$1/i.test(sql)) {
+    const id = String(params[6] ?? "");
+    const orgId = String(params[7] ?? "");
+    const c = seed.integrationConnectors.find((x) => x.id === id && x.org_id === orgId);
+    if (!c) return ok([], 0);
+    c.name = String(params[0] ?? c.name);
+    c.status = String(params[1] ?? c.status) as "ACTIVE" | "PAUSED";
+    c.autonomy_mode = String(params[2] ?? c.autonomy_mode) as
+      | "FULL_AUTONOMOUS"
+      | "ASSISTED_APPROVAL"
+      | "SYNC_ONLY";
+    c.outbound_webhook_url = params[3] != null ? String(params[3]) : null;
+    try {
+      c.outbound_events =
+        typeof params[4] === "string"
+          ? JSON.parse(params[4])
+          : Array.isArray(params[4])
+            ? (params[4] as string[])
+            : c.outbound_events;
+    } catch {
+      // keep existing
+    }
+    try {
+      c.field_mapping =
+        typeof params[5] === "string"
+          ? JSON.parse(params[5])
+          : ((params[5] as Record<string, string>) ?? c.field_mapping);
+    } catch {
+      // keep existing
+    }
+    c.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([c as unknown as Record<string, unknown>], 1);
+  }
+
+  if (/DELETE\s+FROM\s+integration_connectors\s+WHERE\s+id\s*=\s*\$1\s+AND\s+org_id\s*=\s*\$2/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const orgId = String(params[1] ?? "");
+    const before = seed.integrationConnectors.length;
+    seed.integrationConnectors = seed.integrationConnectors.filter(
+      (c) => !(c.id === id && c.org_id === orgId),
+    );
+    if (seed.integrationConnectors.length !== before) saveLocalStore(store);
+    return ok([], before - seed.integrationConnectors.length);
+  }
+
+  if (/FROM\s+integration_events\s+WHERE\s+org_id\s*=\s*\$1\s+AND\s+connector_id\s*=\s*\$2\s+AND\s+idempotency_key\s*=\s*\$3/i.test(sql)) {
+    const orgId = String(params[0] ?? "");
+    const connectorId = String(params[1] ?? "");
+    const key = String(params[2] ?? "");
+    const found = seed.integrationEvents.find(
+      (e) =>
+        e.org_id === orgId &&
+        e.connector_id === connectorId &&
+        e.idempotency_key === key &&
+        e.status === "PROCESSED",
+    );
+    return found ? ok([found as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM\s+integration_events\s+WHERE\s+org_id\s*=\s*\$1/i.test(sql)) {
+    const orgId = String(params[0] ?? "");
+    const limit = Number(params[1] ?? 50);
+    const rows = seed.integrationEvents
+      .filter((e) => e.org_id === orgId)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
+      .slice(0, limit);
+    return ok(rows as unknown as Record<string, unknown>[]);
+  }
+
+  if (/INSERT INTO integration_events/i.test(sql)) {
+    const parseJson = <T,>(val: unknown, fallback: T): T => {
+      if (val && typeof val === "object") return val as T;
+      if (typeof val === "string") {
+        try {
+          return JSON.parse(val) as T;
+        } catch {
+          return fallback;
+        }
+      }
+      return fallback;
+    };
+    const ev = {
+      id: String(params[0] ?? `iev-${Date.now()}`),
+      org_id: String(params[1] ?? ""),
+      connector_id: String(params[2] ?? ""),
+      connector_name: String(params[3] ?? ""),
+      direction: (String(params[4] ?? "INBOUND") as "INBOUND" | "OUTBOUND"),
+      format: String(params[5] ?? "JSON"),
+      entity_type: String(params[6] ?? "ORDER"),
+      status: (String(params[7] ?? "PROCESSED") as
+        | "PROCESSED"
+        | "DUPLICATE"
+        | "FAILED"
+        | "DELIVERED"),
+      idempotency_key: params[8] != null ? String(params[8]) : null,
+      external_ref: params[9] != null ? String(params[9]) : null,
+      shipment_ref: params[10] != null ? String(params[10]) : null,
+      order_ref: params[11] != null ? String(params[11]) : null,
+      mapped_by: String(params[12] ?? "HEURISTIC"),
+      summary: String(params[13] ?? ""),
+      delegated_agents: parseJson<string[]>(params[14], []),
+      raw_preview: String(params[15] ?? ""),
+      normalized_payload: parseJson<Record<string, unknown>>(params[16], {}),
+      outbound_status: params[17] != null ? String(params[17]) : null,
+      latency_ms: Number(params[18] ?? 0),
+      error: params[19] != null ? String(params[19]) : null,
+      created_at: new Date(),
+    };
+    seed.integrationEvents.unshift(ev);
+    if (seed.integrationEvents.length > 250) {
+      seed.integrationEvents = seed.integrationEvents.slice(0, 250);
+    }
+    saveLocalStore(store);
+    return ok([ev as unknown as Record<string, unknown>], 1);
+  }
+
+  // Telemetry vehicle GPS update
+  if (/UPDATE conveyances[\s\S]*last_lat/i.test(sql)) {
+    const lat = String(params[0] ?? "");
+    const lon = String(params[1] ?? "");
+    const speed = params[2] != null ? String(params[2]) : null;
+    const reg = String(params[3] ?? "").trim().toUpperCase();
+    const conv = seed.conveyances.find((c) => c.registration.toUpperCase() === reg);
+    if (conv) {
+      conv.last_lat = lat;
+      conv.last_lon = lon;
+      conv.last_speed = speed;
+      conv.last_seen_at = new Date();
+      saveLocalStore(store);
+      return ok([{ id: conv.id, registration: conv.registration }], 1);
+    }
+    // Create a tracked external fleet conveyance if unseen so GPS telemetry shows on Fleet immediately
+    const newConv = {
+      id: `conv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      mode: "ROAD",
+      kind: "EXTERNAL_GPS",
+      registration: reg || `TRK-${Date.now().toString().slice(-4)}`,
+      carrier_code: "EXT",
+      carrier_name: "External Connected Fleet",
+      capacity_kg: "15000",
+      capacity_cbm: "45",
+      reefer: false,
+      hazmat_certified: false,
+      active: true,
+      assigned_to: null,
+      leg_state: "IN_TRANSIT",
+      last_seen_at: new Date(),
+      last_lat: lat,
+      last_lon: lon,
+      last_speed: speed,
+    };
+    seed.conveyances.unshift(newConv);
+    saveLocalStore(store);
+    return ok([{ id: newConv.id, registration: newConv.registration }], 1);
+  }
+
+  // Warehouse inventory sync upsert
+  if (/INSERT INTO inventory/i.test(sql)) {
+    const wh = String(params[0] ?? "MAIN-WH").trim().toUpperCase();
+    const sku = String(params[1] ?? "SKU-UNKNOWN").trim().toUpperCase();
+    const onHand = Math.max(0, Math.round(Number(params[2] ?? 0)));
+    const reserved = Math.max(0, Math.round(Number(params[3] ?? 0)));
+    const available = Math.max(0, onHand - reserved);
+    const existing = seed.inventory.find(
+      (i) => i.warehouse.toUpperCase() === wh && i.sku.toUpperCase() === sku,
+    );
+    if (existing) {
+      existing.on_hand = onHand;
+      existing.reserved = reserved;
+      existing.available = available;
+    } else {
+      seed.inventory.unshift({
+        warehouse: wh,
+        sku,
+        on_hand: onHand,
+        reserved,
+        available,
+      });
+    }
+    saveLocalStore(store);
+    return ok([{ warehouse: wh, sku, on_hand: onHand, reserved, available }], 1);
   }
 
   // Fallback for unhandled queries
   return ok([]);
 }
 
-function createMockClient(): PoolClient {
+function createLocalClient(): PoolClient {
   return {
     query: (async (
       textOrConfig: string | { text: string; values?: unknown[] },
@@ -1850,10 +2108,27 @@ function createMockClient(): PoolClient {
         typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
       const params =
         typeof textOrConfig === "string" ? values : textOrConfig.values;
-      return mockQuery(text, params);
+      return localQuery(text, params);
     }) as PoolClient["query"],
     release: () => {},
   } as unknown as PoolClient;
+}
+
+const PG_RETRY_COOLDOWN_MS = 60_000;
+
+function isPgInCooldown(): boolean {
+  return (
+    typeof globalForPg.pgUnavailableUntil === "number" &&
+    Date.now() < globalForPg.pgUnavailableUntil
+  );
+}
+
+function markPgUnavailable(): void {
+  globalForPg.pgUnavailableUntil = Date.now() + PG_RETRY_COOLDOWN_MS;
+}
+
+function clearPgCooldown(): void {
+  globalForPg.pgUnavailableUntil = undefined;
 }
 
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL?.trim());
@@ -1872,16 +2147,26 @@ if (hasDatabaseUrl) {
     if (process.env.NODE_ENV !== "production") {
       globalForPg.logisticsPool = realPool;
     }
-  } catch (err) {
-    console.warn("[AI Studio] Database pool init failed — using in-memory mock", err);
+  } catch {
     realPool = null;
   }
-} else {
-  console.warn("[AI Studio] DATABASE_URL is not set — using in-memory mock store");
 }
 
-export const pool = (realPool ?? {
-  connect: async () => createMockClient(),
+export const pool = {
+  connect: async (): Promise<PoolClient> => {
+    if (!realPool || isPgInCooldown()) return createLocalClient();
+    try {
+      const client = await realPool.connect();
+      clearPgCooldown();
+      return client;
+    } catch (err) {
+      if (isConnectionError(err)) {
+        markPgUnavailable();
+        return createLocalClient();
+      }
+      throw err;
+    }
+  },
   query: async (
     textOrConfig: string | { text: string; values?: unknown[] },
     values?: unknown[],
@@ -1890,9 +2175,20 @@ export const pool = (realPool ?? {
       typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
     const params =
       typeof textOrConfig === "string" ? values : textOrConfig.values;
-    return mockQuery(text, params);
+    if (!realPool || isPgInCooldown()) return localQuery(text, params);
+    try {
+      const res = await realPool.query(textOrConfig as string, values);
+      clearPgCooldown();
+      return res;
+    } catch (err) {
+      if (isConnectionError(err)) {
+        markPgUnavailable();
+        return localQuery(text, params);
+      }
+      throw err;
+    }
   },
-}) as unknown as Pool;
+} as unknown as Pool;
 
 // The role application queries run as. It owns nothing and has no BYPASSRLS,
 // which is the only reason migration 016's policies apply at all — the
@@ -1901,13 +2197,21 @@ export const pool = (realPool ?? {
 const APP_ROLE = "logistics_app";
 
 function isConnectionError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
   const code = (err as { code?: string })?.code;
-  return (
+  if (
     code === "ECONNREFUSED" ||
     code === "ENOTFOUND" ||
     code === "ETIMEDOUT" ||
-    err instanceof AggregateError
-  );
+    code === "ECONNRESET"
+  ) {
+    return true;
+  }
+  if (err instanceof AggregateError) {
+    return true;
+  }
+  const cause = (err as { cause?: unknown }).cause;
+  return cause ? isConnectionError(cause) : false;
 }
 
 /**
@@ -1921,19 +2225,18 @@ async function withScope<T>(
   orgId: string | null,
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  if (!realPool) {
-    return fn(createMockClient());
+  if (!realPool || isPgInCooldown()) {
+    return fn(createLocalClient());
   }
 
   let client: PoolClient;
   try {
     client = await realPool.connect();
+    clearPgCooldown();
   } catch (err) {
     if (isConnectionError(err)) {
-      console.warn(
-        "[AI Studio] Database unreachable — falling back to in-memory mock",
-      );
-      return fn(createMockClient());
+      markPgUnavailable();
+      return fn(createLocalClient());
     }
     throw err;
   }
@@ -2064,11 +2367,15 @@ export async function identityQuery<T = Record<string, unknown>>(
 /** True when Postgres is reachable — lets pages show a real message instead
  *  of a stack trace when the container is not running. */
 export async function isReachable(): Promise<boolean> {
-  if (!realPool) return false;
+  if (!realPool || isPgInCooldown()) return false;
   try {
     await realPool.query("SELECT 1");
+    clearPgCooldown();
     return true;
-  } catch {
+  } catch (err) {
+    if (isConnectionError(err)) {
+      markPgUnavailable();
+    }
     return false;
   }
 }

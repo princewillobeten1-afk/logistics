@@ -174,6 +174,10 @@ export async function runBackgroundOperationsSweep({
     requiresHumanApproval: boolean;
     latencyMs: number;
   }>;
+  failed?: Array<{
+    workflow: BackendWorkflow;
+    error: string;
+  }>;
   skippedReason?: string;
 }> {
   if (!getServerGeminiKey()) {
@@ -192,25 +196,41 @@ export async function runBackgroundOperationsSweep({
     requiresHumanApproval: boolean;
     latencyMs: number;
   }> = [];
+  const failed: Array<{ workflow: BackendWorkflow; error: string }> = [];
 
-  for (const wf of workflows) {
-    const out = await runBackendAgentWorkflow({
-      workflow: wf,
-      orgId,
-      reference,
-      actorEmail,
-      workKind: `sweep.${wf}`,
-    });
-    if (out) {
-      executed.push({
+  for (let i = 0; i < workflows.length; i += 1) {
+    const wf = workflows[i];
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+    }
+    try {
+      const out = await runBackendAgentWorkflow({
         workflow: wf,
-        agentId: out.agent.id,
-        summary: out.result.summary,
-        requiresHumanApproval: out.result.requiresHumanApproval,
-        latencyMs: out.meta.latencyMs,
+        orgId,
+        reference,
+        actorEmail,
+        workKind: `sweep.${wf}`,
+      });
+      if (out) {
+        executed.push({
+          workflow: wf,
+          agentId: out.agent.id,
+          summary: out.result.summary,
+          requiresHumanApproval: out.result.requiresHumanApproval,
+          latencyMs: out.meta.latencyMs,
+        });
+      }
+    } catch (err) {
+      failed.push({
+        workflow: wf,
+        error: err instanceof Error ? err.message : String(err ?? "Sweep workflow failed"),
       });
     }
   }
 
-  return { scope, executed };
+  return {
+    scope,
+    executed,
+    ...(failed.length > 0 ? { failed } : {}),
+  };
 }

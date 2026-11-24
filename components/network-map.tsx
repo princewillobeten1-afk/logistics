@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowRight, MapPin, Navigation } from "lucide-react";
-import { city, relative, toneFor } from "@/lib/format";
+import { ClientRelative } from "@/components/client-time";
+import { city, toneFor } from "@/lib/format";
 import { filterPointsByLayers, type MapLayerVisibility } from "@/lib/map-layers";
 import { formatStateLabel } from "@/lib/view-helpers";
 
@@ -443,7 +444,7 @@ export function NetworkMap({
                 </strong>
               </span>
               <span>
-                Last update: <strong>{relative(selectedLane.shipment.updated_at)}</strong>
+                Last update: <strong><ClientRelative date={selectedLane.shipment.updated_at} /></strong>
               </span>
             </div>
           </div>

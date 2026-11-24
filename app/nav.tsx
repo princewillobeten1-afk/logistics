@@ -19,6 +19,7 @@ import {
   Menu,
   MessageSquare,
   Package,
+  Plug,
   Route,
   Settings,
   ShieldCheck,
@@ -48,6 +49,7 @@ const ICONS: Record<string, ReactNode> = {
   "/analytics": <BarChart3 size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/activity": <Activity size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/queue": <Layers size={16} strokeWidth={1.75} aria-hidden="true" />,
+  "/integrations": <Plug size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/settings": <Settings size={16} strokeWidth={1.75} aria-hidden="true" />,
 };
 
@@ -91,6 +93,7 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
   {
     group: "System",
     items: [
+      { href: "/integrations", label: "Integrations" },
       { href: "/activity", label: "Activity" },
       { href: "/queue", label: "Work queue" },
       { href: "/settings", label: "Settings" },

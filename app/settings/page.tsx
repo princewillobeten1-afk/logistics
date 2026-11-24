@@ -1,8 +1,11 @@
+import Link from "next/link";
 import { headers } from "next/headers";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { ChannelCards } from "@/app/settings/channels";
 import { listChannels } from "@/app/settings/channel-actions";
+import { currentUser } from "@/lib/auth";
 import { money, relative, when } from "@/lib/format";
+import { listOrgConnectors } from "@/lib/integrations/store";
 import { activePolicy, currencies, latestRates, migrations } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -27,15 +30,8 @@ const AI_USES: [string, string, boolean][] = [
   ["Weekly analysis", "Explains what the numbers did and what changed.", true],
 ];
 
-const INTEGRATIONS: [string, string, boolean][] = [
-  ["AI assistant", "Handles exceptions, customer replies and document reading", true],
-  ["Telegram", "Carriers and customers message your bot directly", true],
-  ["Carrier booking", "Book straight into carriers that offer a direct connection", false],
-  ["WhatsApp Business", "Meta must approve your message templates first", false],
-  ["Vehicle tracking", "Live positions fed from your carriers' tracking systems", false],
-  ["Address lookup", "Turns written addresses into map positions automatically", false],
-  ["Accounting and warehouse systems", "Keep orders and stock in step with your existing systems", false],
-];
+// Integration status flags are evaluated dynamically per deployment and
+// verified channel connector state inside the Settings page component.
 
 export default async function Settings() {
   // The widget snippet must point at wherever this dashboard is actually
@@ -46,14 +42,16 @@ export default async function Settings() {
   }`;
   const keyConfigured = Boolean(process.env.CREDENTIALS_KEY);
 
-  let policy, currencyList, rates, applied, channels;
+  const user = await currentUser();
+  let policy, currencyList, rates, applied, channels, connectedSystems;
   try {
-    [policy, currencyList, rates, applied, channels] = await Promise.all([
+    [policy, currencyList, rates, applied, channels, connectedSystems] = await Promise.all([
       activePolicy(),
       currencies(),
       latestRates(),
       migrations(),
       listChannels(),
+      user ? listOrgConnectors(user.orgId) : Promise.resolve([]),
     ]);
   } catch (error) {
     return (
@@ -71,6 +69,43 @@ export default async function Settings() {
   const triggers = (rules.require_approval_when ?? {}) as Record<string, unknown>;
   const base = (rules.base_currency as string) ?? "NGN";
   const maxAge = Number(rules.fx_max_age_hours ?? 24);
+  const activeConnectors = connectedSystems.filter((c) => c.status === "ACTIVE");
+
+  const integrations: [string, string, boolean][] = [
+    [
+      "AI assistant",
+      "Handles exceptions, customer replies and document reading",
+      Boolean(process.env.GEMINI_API_KEY),
+    ],
+    [
+      "External ERP / TMS / WMS connectors",
+      activeConnectors.length > 0
+        ? `${activeConnectors.length} active company system connector(s) feeding the autonomous agent`
+        : "Connect SAP, NetSuite, CargoWise, Shopify, EDI X12, CSV, or custom APIs",
+      activeConnectors.length > 0,
+    ],
+    [
+      "Telegram",
+      "Carriers and customers message your bot directly",
+      channels.some((c) => c.channel === "TELEGRAM" && c.state === "VERIFIED"),
+    ],
+    [
+      "WhatsApp Business",
+      "Meta must approve your message templates first",
+      channels.some((c) => c.channel === "WHATSAPP" && c.state === "VERIFIED"),
+    ],
+    [
+      "Vehicle tracking",
+      "Live positions fed from your carriers' tracking systems",
+      Boolean(process.env.TELEMETRY_WEBHOOK_SECRET) ||
+        activeConnectors.some((c) => c.category === "TELEMATICS"),
+    ],
+    [
+      "Address lookup",
+      "Turns written addresses into map positions automatically",
+      Boolean(process.env.GOOGLE_MAPS_API_KEY || process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY),
+    ],
+  ];
 
   return (
     <>
@@ -78,7 +113,12 @@ export default async function Settings() {
         <h1>Settings and integrations</h1>
         <p>
           Configure customer support channels, versioned spending thresholds,
-          supported currencies, and FX staleness rules.
+          supported currencies, and FX staleness rules. To connect external company
+          ERP, TMS, WMS, EDI, or webhook feeds, open{" "}
+          <Link href="/integrations" className="auth-link">
+            System integrations
+          </Link>
+          .
         </p>
       </div>
 
@@ -139,90 +179,111 @@ export default async function Settings() {
 
       <div className="grid-2">
         <Panel title="Spend caps" hint="per action" flush>
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Spend caps"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Action</th>
-                  <th scope="col">Auto-approve below</th>
-                  <th scope="col">Hard ceiling</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(actions).map(([action, rule]) => (
-                  <tr key={action}>
-                    <td className="ref">{action}</td>
-                    <td className="num">
-                      {rule.auto_approve_below_minor === null ? (
-                        <span className="text-warn">never automatic</span>
-                      ) : rule.auto_approve_below_minor === 0 ? (
-                        <span className="text-warn">always approved by a human</span>
-                      ) : (
-                        money(rule.auto_approve_below_minor, base)
-                      )}
-                    </td>
-                    <td className="num">
-                      {rule.hard_deny_above_minor
-                        ? money(rule.hard_deny_above_minor, base)
-                        : "—"}
-                    </td>
+          {Object.keys(actions).length === 0 ? (
+            <Empty
+              message="No spend caps configured"
+              hint="Per-action spending limits will appear once an active policy is published."
+            />
+          ) : (
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Spend caps"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Action</th>
+                    <th scope="col">Auto-approve below</th>
+                    <th scope="col">Hard ceiling</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {Object.entries(actions).map(([action, rule]) => (
+                    <tr key={action}>
+                      <td className="ref">{action}</td>
+                      <td className="num">
+                        {rule.auto_approve_below_minor === null ? (
+                          <span className="text-warn">never automatic</span>
+                        ) : rule.auto_approve_below_minor === 0 ? (
+                          <span className="text-warn">always approved by a human</span>
+                        ) : (
+                          money(rule.auto_approve_below_minor, base)
+                        )}
+                      </td>
+                      <td className="num">
+                        {rule.hard_deny_above_minor
+                          ? money(rule.hard_deny_above_minor, base)
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
 
         <Panel title="Non-monetary approval triggers" hint="apply regardless of amount">
-          <dl className="kv">
-            {Object.entries(triggers).map(([key, value]) => (
-              <div key={key} style={{ display: "contents" }}>
-                <dt>{key.replace(/_/g, " ")}</dt>
-                <dd>
-                  {typeof value === "boolean" ? (
-                    <Pill state={value ? "OK" : "PENDING"} />
-                  ) : (
-                    <span className="num">{money(Number(value), base)}</span>
-                  )}
-                </dd>
-              </div>
-            ))}
-          </dl>
+          {Object.keys(triggers).length === 0 ? (
+            <Empty
+              message="No approval triggers configured"
+              hint="Rule-based escalation triggers appear here once a policy is active."
+            />
+          ) : (
+            <dl className="kv">
+              {Object.entries(triggers).map(([key, value]) => (
+                <div key={key} style={{ display: "contents" }}>
+                  <dt>{key.replace(/_/g, " ")}</dt>
+                  <dd>
+                    {typeof value === "boolean" ? (
+                      <Pill state={value ? "OK" : "PENDING"} />
+                    ) : (
+                      <span className="num">{money(Number(value), base)}</span>
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
         </Panel>
       </div>
 
       <div className="grid-2">
         <Panel title="Currencies" hint="minor units are per-currency" flush>
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Currencies"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Code</th>
-                  <th scope="col">Name</th>
-                  <th scope="col">Minor units</th>
-                </tr>
-              </thead>
-              <tbody>
-                {currencyList.map((c) => (
-                  <tr key={c.code}>
-                    <td className="ref">{c.code}</td>
-                    <td>{c.name}</td>
-                    <td className="num">10^{c.minor_unit_exponent}</td>
+          {currencyList.length === 0 ? (
+            <Empty
+              message="No currencies configured"
+              hint="Supported operating currencies appear once configured in the database."
+            />
+          ) : (
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Currencies"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Code</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Minor units</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {currencyList.map((c) => (
+                    <tr key={c.code}>
+                      <td className="ref">{c.code}</td>
+                      <td>{c.name}</td>
+                      <td className="num">10^{c.minor_unit_exponent}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
 
         <Panel title="FX rates" hint={`stale after ${maxAge}h`} flush>
@@ -327,7 +388,7 @@ export default async function Settings() {
                 </tr>
               </thead>
               <tbody>
-                {INTEGRATIONS.map(([name, note, live]) => (
+                {integrations.map(([name, note, live]) => (
                   <tr key={name}>
                     <td className="ref">{name}</td>
                     <td>
@@ -342,31 +403,38 @@ export default async function Settings() {
         </Panel>
 
         <Panel title="Schema" hint={`${applied.length} migrations applied`} flush>
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Schema migrations"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Migration</th>
-                  <th scope="col">Applied</th>
-                </tr>
-              </thead>
-              <tbody>
-                {applied.map((m) => (
-                  <tr key={m.version}>
-                    <td className="ref">{m.version}</td>
-                    <td className="num text-faint">
-                      {relative(m.applied_at)}
-                    </td>
+          {applied.length === 0 ? (
+            <Empty
+              message="No migrations recorded"
+              hint="Database migration history appears once connected to PostgreSQL."
+            />
+          ) : (
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Schema migrations"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Migration</th>
+                    <th scope="col">Applied</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {applied.map((m) => (
+                    <tr key={m.version}>
+                      <td className="ref">{m.version}</td>
+                      <td className="num text-faint">
+                        {relative(m.applied_at)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
       </div>
     </>

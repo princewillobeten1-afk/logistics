@@ -4,9 +4,10 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Monitor, Moon, Search, Sun } from "lucide-react";
+import { LiveVoiceWidget } from "@/components/live-voice-widget";
 
 const ROUTE_META: Record<string, { group: string; label: string }> = {
-  "/": { group: "Operations", label: "Overview" },
+  "/": { group: "Dashboard", label: "Control Tower" },
   "/map": { group: "Operations", label: "Shipments map" },
   "/orders": { group: "Operations", label: "Orders" },
   "/shipments": { group: "Operations", label: "Shipments" },
@@ -112,14 +113,18 @@ export function TopBar() {
     const trimmed = refQuery.trim();
     if (!trimmed) return;
     setRefQuery("");
-    router.push(`/shipments/${encodeURIComponent(trimmed)}`);
+    if (/^[a-z]{2,4}[-_]?\d{3,}$/i.test(trimmed)) {
+      router.push(`/shipments/${encodeURIComponent(trimmed.toUpperCase())}`);
+    } else {
+      router.push(`/shipments?q=${encodeURIComponent(trimmed)}`);
+    }
   }
 
   const exact = ROUTE_META[pathname];
-  let group = exact?.group ?? "Operations";
+  let group = exact?.group ?? "Dashboard";
   let parentHref: string | null = null;
   let parentLabel: string | null = null;
-  let currentLabel = exact?.label ?? "Overview";
+  let currentLabel = exact?.label ?? "Control Tower";
 
   if (!exact && pathname.startsWith("/shipments/")) {
     group = "Operations";
@@ -141,7 +146,7 @@ export function TopBar() {
             <span className="crumb-group">{group}</span>
           </li>
           <li aria-hidden="true" className="crumb-sep">
-            /
+            &rsaquo;
           </li>
           {parentHref && parentLabel ? (
             <>
@@ -149,7 +154,7 @@ export function TopBar() {
                 <Link href={parentHref}>{parentLabel}</Link>
               </li>
               <li aria-hidden="true" className="crumb-sep">
-                /
+                &rsaquo;
               </li>
               <li>
                 <span className="crumb-current font-mono" aria-current="page">
@@ -170,7 +175,7 @@ export function TopBar() {
       <div className="topbar-controls">
         <form onSubmit={onQuickJump} className="quick-jump" role="search">
           <label htmlFor="quick-jump-ref" className="visually-hidden">
-            Jump to shipment reference
+            Search by shipment ref, customer, or route
           </label>
           <Search
             size={14}
@@ -185,13 +190,15 @@ export function TopBar() {
             type="search"
             value={refQuery}
             onChange={(e) => setRefQuery(e.target.value)}
-            placeholder="Find ref (press /)…"
+            placeholder="Search by cargo, ref, route (press /)…"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
-            enterKeyHint="go"
+            enterKeyHint="search"
           />
         </form>
+
+        <LiveVoiceWidget />
 
         <div className="theme-switch" role="group" aria-label="Color theme">
           <button

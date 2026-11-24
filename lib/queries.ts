@@ -835,3 +835,293 @@ export async function openExceptions() {
                e.created_at DESC`,
   );
 }
+
+export type ControlTowerKpis = {
+  activeShipments: number;
+  totalShipments: number;
+  quotesGenerated: number;
+  quotesSelected: number;
+  aiConversations: number;
+  delayedOrAttention: number;
+  conversionRatePct: number;
+  freightValueMinor: number;
+  currency: string;
+};
+
+export type QuoteBookingPoint = {
+  label: string;
+  bookings: number;
+  quotes: number;
+};
+
+export type ModeVolumePoint = {
+  label: string;
+  sea: number;
+  air: number;
+  road: number;
+};
+
+export type ControlTowerShipmentItem = ShipmentRow & {
+  carrier_name: string | null;
+  carrier_code: string | null;
+  primary_mode: "SEA" | "AIR" | "ROAD" | "RAIL";
+  distance_km: number | null;
+  transit_hours: number | null;
+  last_lat: number | null;
+  last_lon: number | null;
+  last_speed: number | null;
+  vehicle_label: string | null;
+};
+
+export async function controlTowerSummary(): Promise<{
+  kpis: ControlTowerKpis;
+  quoteBookingTrend: QuoteBookingPoint[];
+  modeVolumeTrend: ModeVolumePoint[];
+  todayQuoteBookingTrend: QuoteBookingPoint[];
+  todayModeVolumeTrend: ModeVolumePoint[];
+  shipments: ControlTowerShipmentItem[];
+  locations: Awaited<ReturnType<typeof listLocations>>;
+}> {
+  const [stats, counts, shipments, locations, conveyances, legRows, quoteRows, commsCountRows, agentRows] =
+    await Promise.all([
+      overviewStats(),
+      shipmentCounts(),
+      listShipments(),
+      listLocations(),
+      listConveyances(),
+      query<{
+        shipment_id: string;
+        sequence: number;
+        mode: string;
+        state: string;
+        distance_km: string | null;
+        cost_minor: string | null;
+        currency: string | null;
+      }>(
+        `SELECT shipment_id, sequence, mode, state, distance_km, cost_minor, currency
+           FROM shipment_legs
+          ORDER BY sequence`,
+      ),
+      query<{
+        id: string;
+        shipment_id: string;
+        state: string;
+        amount_minor: string | null;
+        currency: string | null;
+        carrier_name: string | null;
+      }>(
+        `SELECT q.id, q.shipment_id, q.state, q.amount_minor, q.currency, c.name AS carrier_name
+           FROM quotes q
+           LEFT JOIN carriers c ON c.id = q.carrier_id`,
+      ),
+      query<{ n: string }>(`SELECT count(*)::text AS n FROM communications`),
+      query<{ n: string }>(`SELECT count(*)::text AS n FROM agent_runs`),
+    ]);
+
+  const totalShipments = Object.values(counts).reduce((a, b) => a + b, 0);
+  const quotesGenerated = quoteRows.length;
+  const quotesSelected = quoteRows.filter((q) => q.state === "SELECTED").length;
+  const aiConversations =
+    Number(commsCountRows[0]?.n ?? 0) + Number(agentRows[0]?.n ?? 0);
+  const delayedOrAttention =
+    stats.inException + stats.deadlineAtRisk + stats.awaitingApproval;
+
+  const convertedStates = new Set([
+    "BOOKED",
+    "IN_TRANSIT",
+    "DELIVERED",
+    "POD_VERIFIED",
+    "CLOSED",
+  ]);
+  const convertedCount = shipments.filter((s) =>
+    convertedStates.has(s.state),
+  ).length;
+  const conversionRatePct =
+    totalShipments > 0 ? Math.round((convertedCount / totalShipments) * 100) : 0;
+
+  let freightValueMinor = 0;
+  for (const s of shipments) {
+    const est = Number((s.plan as Record<string, unknown> | null)?.estimated_cost_minor ?? 0);
+    if (Number.isFinite(est) && est > 0) {
+      freightValueMinor += est;
+    }
+  }
+  if (freightValueMinor === 0) {
+    for (const q of quoteRows) {
+      freightValueMinor += Number(q.amount_minor ?? 0) || 0;
+    }
+  }
+
+  const legsByShipment = new Map<string, typeof legRows>();
+  for (const leg of legRows) {
+    const arr = legsByShipment.get(leg.shipment_id) ?? [];
+    arr.push(leg);
+    legsByShipment.set(leg.shipment_id, arr);
+  }
+
+  const conveyanceByRef = new Map(
+    conveyances
+      .filter((c) => c.assigned_to)
+      .map((c) => [c.assigned_to as string, c]),
+  );
+
+  const quoteCountByShipment = new Map<string, number>();
+  const selectedQuoteByShipment = new Map<string, (typeof quoteRows)[number]>();
+  for (const q of quoteRows) {
+    quoteCountByShipment.set(
+      q.shipment_id,
+      (quoteCountByShipment.get(q.shipment_id) ?? 0) + 1,
+    );
+    if (!selectedQuoteByShipment.has(q.shipment_id) || q.state === "SELECTED") {
+      selectedQuoteByShipment.set(q.shipment_id, q);
+    }
+  }
+
+  const enrichedShipments: ControlTowerShipmentItem[] = shipments.map((s) => {
+    const plan = s.plan as Record<string, unknown> | null;
+    const booking = s.booking as Record<string, unknown> | null;
+    const sLegs = legsByShipment.get(s.id) ?? [];
+    const conv = conveyanceByRef.get(s.reference);
+    const quote = selectedQuoteByShipment.get(s.id);
+
+    const planModes = Array.isArray(plan?.modes)
+      ? (plan.modes as string[])
+      : sLegs.map((l) => l.mode);
+    const rawMode = String(
+      planModes.find((m) => m === "SEA" || m === "AIR") ??
+        planModes[0] ??
+        sLegs[0]?.mode ??
+        "ROAD",
+    ).toUpperCase();
+    const primaryMode = (
+      ["SEA", "AIR", "ROAD", "RAIL"].includes(rawMode) ? rawMode : "ROAD"
+    ) as "SEA" | "AIR" | "ROAD" | "RAIL";
+
+    const carrierCode =
+      (booking?.carrier_code as string | undefined) ??
+      conv?.carrier_code ??
+      null;
+    const carrierName =
+      conv?.carrier_name ??
+      quote?.carrier_name ??
+      carrierCode ??
+      null;
+
+    const legKm = sLegs.reduce((sum, l) => sum + (Number(l.distance_km) || 0), 0);
+    const distanceKm =
+      Number(plan?.distance_km ?? 0) || (legKm > 0 ? Math.round(legKm) : null);
+    const transitHours = Number(plan?.transit_hours ?? 0) || null;
+
+    return {
+      ...s,
+      carrier_name: carrierName,
+      carrier_code: carrierCode,
+      primary_mode: primaryMode,
+      distance_km: distanceKm,
+      transit_hours: transitHours,
+      last_lat: conv?.last_lat ? Number(conv.last_lat) : null,
+      last_lon: conv?.last_lon ? Number(conv.last_lon) : null,
+      last_speed: conv?.last_speed ? Number(conv.last_speed) : null,
+      vehicle_label:
+        (plan?.assigned_vehicle as string | undefined) ??
+        conv?.registration ??
+        (plan?.vehicle as string | undefined) ??
+        null,
+    };
+  });
+
+  // 14-day daily operational trend derived strictly from real shipment & quote records
+  const now = new Date();
+  const quoteBookingTrend: QuoteBookingPoint[] = [];
+  const modeVolumeTrend: ModeVolumePoint[] = [];
+  for (let i = 13; i >= 0; i -= 1) {
+    const d = new Date(now.getTime() - i * 86_400_000);
+    const label = d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+    const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    const dayEnd = dayStart + 86_400_000;
+
+    const dayShips = enrichedShipments.filter((s) => {
+      const t = new Date(s.created_at).getTime();
+      return t >= dayStart && t < dayEnd;
+    });
+    const bookingsOnDay = dayShips.filter((s) => convertedStates.has(s.state)).length;
+    const quotesOnDay = dayShips.reduce(
+      (sum, s) => sum + (quoteCountByShipment.get(s.id) ?? 0),
+      0,
+    );
+
+    quoteBookingTrend.push({
+      label,
+      bookings: bookingsOnDay,
+      quotes: quotesOnDay,
+    });
+
+    modeVolumeTrend.push({
+      label,
+      sea: dayShips.filter((s) => s.primary_mode === "SEA").length,
+      air: dayShips.filter((s) => s.primary_mode === "AIR").length,
+      road: dayShips.filter(
+        (s) => s.primary_mode === "ROAD" || s.primary_mode === "RAIL",
+      ).length,
+    });
+  }
+
+  // Today's 6 four-hour UTC buckets derived strictly from today's records
+  const todayStart = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  );
+  const todayQuoteBookingTrend: QuoteBookingPoint[] = [];
+  const todayModeVolumeTrend: ModeVolumePoint[] = [];
+  for (let slot = 0; slot < 6; slot += 1) {
+    const startMs = todayStart + slot * 4 * 3_600_000;
+    const endMs = startMs + 4 * 3_600_000;
+    const hourStr = `${String(slot * 4).padStart(2, "0")}:00`;
+    const slotShips = enrichedShipments.filter((s) => {
+      const t = new Date(s.created_at).getTime();
+      return t >= startMs && t < endMs;
+    });
+    todayQuoteBookingTrend.push({
+      label: hourStr,
+      bookings: slotShips.filter((s) => convertedStates.has(s.state)).length,
+      quotes: slotShips.reduce(
+        (sum, s) => sum + (quoteCountByShipment.get(s.id) ?? 0),
+        0,
+      ),
+    });
+    todayModeVolumeTrend.push({
+      label: hourStr,
+      sea: slotShips.filter((s) => s.primary_mode === "SEA").length,
+      air: slotShips.filter((s) => s.primary_mode === "AIR").length,
+      road: slotShips.filter(
+        (s) => s.primary_mode === "ROAD" || s.primary_mode === "RAIL",
+      ).length,
+    });
+  }
+
+  return {
+    kpis: {
+      activeShipments: stats.active,
+      totalShipments,
+      quotesGenerated,
+      quotesSelected,
+      aiConversations,
+      delayedOrAttention,
+      conversionRatePct,
+      freightValueMinor,
+      currency: "NGN",
+    },
+    quoteBookingTrend,
+    modeVolumeTrend,
+    todayQuoteBookingTrend,
+    todayModeVolumeTrend,
+    shipments: enrichedShipments,
+    locations,
+  };
+}
+

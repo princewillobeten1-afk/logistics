@@ -51,6 +51,7 @@ export function money(minor: string | number | null, currency = "NGN"): string {
 export function when(date: Date | string | null): string {
   if (!date) return "—";
   const d = typeof date === "string" ? new Date(date) : date;
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString(undefined, {
     month: "short",
     day: "numeric",
@@ -59,9 +60,23 @@ export function when(date: Date | string | null): string {
   });
 }
 
+export function whenUtc(date: Date | string | null): string {
+  if (!date) return "—";
+  const d = typeof date === "string" ? new Date(date) : date;
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+  });
+}
+
 export function relative(date: Date | string | null): string {
   if (!date) return "—";
   const d = typeof date === "string" ? new Date(date) : date;
+  if (Number.isNaN(d.getTime())) return "—";
   const seconds = (Date.now() - d.getTime()) / 1000;
   const future = seconds < 0;
   const s = Math.abs(seconds);

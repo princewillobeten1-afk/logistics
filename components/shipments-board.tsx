@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { ArrowRight, PackageOpen, Search, X } from "lucide-react";
-import { toneFor, city, relative, when } from "@/lib/format";
+import { ClientRelative, ClientWhen } from "@/components/client-time";
+import { toneFor, city } from "@/lib/format";
 import {
   filterShipments,
   formatStateLabel,
@@ -19,12 +20,14 @@ export function ShipmentsBoard({
   shipments,
   counts,
   initialState,
+  initialQuery = "",
 }: {
   shipments: ShipmentsBoardItem[];
   counts: Record<string, number>;
   initialState?: string;
+  initialQuery?: string;
 }) {
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [activeState, setActiveState] = useState<string>(initialState ?? "");
 
   const states = useMemo(
@@ -44,10 +47,11 @@ export function ShipmentsBoard({
   function selectState(next: string) {
     setActiveState(next);
     if (typeof window !== "undefined") {
-      const url = next
-        ? `/shipments?state=${encodeURIComponent(next)}`
-        : "/shipments";
-      window.history.replaceState(null, "", url);
+      const params = new URLSearchParams();
+      if (next) params.set("state", next);
+      if (query.trim()) params.set("q", query.trim());
+      const qs = params.toString();
+      window.history.replaceState(null, "", qs ? `/shipments?${qs}` : "/shipments");
     }
   }
 
@@ -62,14 +66,20 @@ export function ShipmentsBoard({
             className="search-field-icon"
           />
           <label htmlFor="shipments-search" className="visually-hidden">
-            Search shipments by reference, customer, city, or cargo
+            Search shipments by reference, customer name, or route origin and destination
           </label>
           <input
             id="shipments-search"
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search reference, customer, city, or cargo…"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && query) {
+                e.preventDefault();
+                setQuery("");
+              }
+            }}
+            placeholder="Search reference, customer name, or route (origin → destination)…"
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
@@ -85,7 +95,7 @@ export function ShipmentsBoard({
             </button>
           ) : null}
         </div>
-        <div className="board-summary">
+        <div className="board-summary" aria-live="polite">
           Showing <strong>{filtered.length}</strong> of{" "}
           <strong>{shipments.length}</strong> shipments
         </div>
@@ -201,9 +211,11 @@ export function ShipmentsBoard({
                       {(s.cargo?.quantity as number) ?? "—"} ×{" "}
                       {(s.cargo?.weight_kg as number) ?? "—"}kg
                     </td>
-                    <td className="num">{when(s.deadline)}</td>
+                    <td className="num">
+                      <ClientWhen date={s.deadline} />
+                    </td>
                     <td className="num text-faint">
-                      {relative(s.updated_at)}
+                      <ClientRelative date={s.updated_at} />
                     </td>
                   </tr>
                 ))}

@@ -1,5 +1,6 @@
 import { Type, type Schema } from "@google/genai";
 import { query } from "@/lib/db";
+import { matchBestConveyance } from "@/lib/planning";
 import {
   AGENT_DOMAINS,
   CORE_AGENTS,
@@ -273,11 +274,13 @@ export async function executeAgentTask({
   task,
   reference,
   actorEmail,
+  timeoutMs,
 }: {
   agentId: CoreAgentId;
   task: string;
   reference?: string;
   actorEmail?: string | null;
+  timeoutMs?: number;
 }): Promise<ExecuteAgentTaskOutput> {
   const agent = getAgentById(agentId);
   if (!agent) {
@@ -297,11 +300,15 @@ export async function executeAgentTask({
     const pendingApp = Array.isArray(snapshot.pendingApprovals) ? snapshot.pendingApprovals.length : 0;
     const stalled = Array.isArray(snapshot.stalledDeadWork) ? snapshot.stalledDeadWork.length : 0;
 
-    const plannedSpecialists = selectOrchestratorSpecialists(trimmedTask, {
-      openExceptions: openExc,
-      pendingApprovals: pendingApp,
-      stalledWork: stalled,
-    });
+    const plannedSpecialists = selectOrchestratorSpecialists(
+      trimmedTask,
+      {
+        openExceptions: openExc,
+        pendingApprovals: pendingApp,
+        stalledWork: stalled,
+      },
+      4,
+    );
 
     const uniqueSpecialists = plannedSpecialists
       .map((item) => ({
@@ -324,26 +331,46 @@ export async function executeAgentTask({
       }),
     );
 
-    const orchestrationRes = await generateAgentJson<Record<string, unknown>>({
-      thinkingDepth: "LOW",
-      systemInstruction: [
-        buildSpecialistSystemInstruction(agent),
-        "In the delegations array, include one structured report for every assigned specialist agent using their exact agentId, agentName, and task, grounded strictly in the operational snapshot.",
-      ].join("\n"),
-      prompt: JSON.stringify({
-        operatorRequest: trimmedTask,
-        focusReference: resolvedReference,
-        assignedSpecialists: specialistContexts.map(({ def, subtask, subCtx }) => ({
-          agentId: def.id,
-          agentName: def.name,
-          primaryRole: def.primaryRole,
-          assignedSubtask: subtask,
-          ...(subCtx.snapshot ? { domainSnapshot: subCtx.snapshot } : {}),
-        })),
-        operationalSnapshot: snapshot,
-      }),
-      responseSchema: ORCHESTRATED_RESPONSE_SCHEMA,
-    });
+    let orchestrationRes;
+    try {
+      orchestrationRes = await generateAgentJson<Record<string, unknown>>({
+        thinkingDepth: "LOW",
+        timeoutMs,
+        systemInstruction: [
+          buildSpecialistSystemInstruction(agent),
+          `You are coordinating ${specialistContexts.length} assigned specialist agents in parallel.`,
+          "In the delegations array, include one structured report for EVERY assigned specialist agent using their exact agentId, agentName, and assignedSubtask as task, grounded strictly in their domainSnapshot and the operationalSnapshot.",
+          "Synthesize cross-domain dependencies and trade-offs (for example: cold-chain exceptions, hazmat/spend compliance gates, route/fleet capacity, warehouse readiness, and customer outreach) into prioritized recommendedActions with matching ownerAgentId values.",
+        ].join("\n"),
+        prompt: JSON.stringify({
+          operatorRequest: trimmedTask,
+          focusReference: resolvedReference,
+          assignedSpecialists: specialistContexts.map(({ def, subtask, subCtx }) => ({
+            agentId: def.id,
+            agentName: def.name,
+            primaryRole: def.primaryRole,
+            assignedSubtask: subtask,
+            ...(subCtx.snapshot ? { domainSnapshot: subCtx.snapshot } : {}),
+          })),
+          operationalSnapshot: snapshot,
+        }),
+        responseSchema: ORCHESTRATED_RESPONSE_SCHEMA,
+      });
+    } catch (err) {
+      await recordAgentRun({
+        shipmentId,
+        agent: agent.id,
+        job: trimmedTask.slice(0, 96),
+        model: AGENT_GEMINI_MODEL,
+        status: "ERROR",
+        latencyMs: Math.max(1, Date.now() - startedAt),
+        promptTokens: null,
+        completionTokens: null,
+        reasoning: err instanceof Error ? err.message.slice(0, 800) : "Orchestrator execution failed",
+        text: null,
+      });
+      throw err;
+    }
 
     const finalResult = normalizeAgentRunOutput(orchestrationRes.data, agent.id);
     if (!finalResult.delegations || finalResult.delegations.length === 0) {
@@ -359,6 +386,8 @@ export async function executeAgentTask({
     const totalPromptTokens = orchestrationRes.meta.promptTokens ?? null;
     const totalCompletionTokens = orchestrationRes.meta.completionTokens ?? null;
 
+    const executedModel = orchestrationRes.meta.model;
+
     await Promise.all([
       ...finalResult.delegations.map((del) => {
         const match = specialistContexts.find((s) => s.def.id === del.agentId);
@@ -366,7 +395,7 @@ export async function executeAgentTask({
           shipmentId: match?.subCtx.shipmentId ?? shipmentId,
           agent: del.agentId,
           job: `Delegated: ${del.task.slice(0, 72)}`,
-          model: AGENT_GEMINI_MODEL,
+          model: executedModel,
           status: "OK",
           latencyMs: totalLatency,
           promptTokens: null,
@@ -379,7 +408,7 @@ export async function executeAgentTask({
         shipmentId,
         agent: agent.id,
         job: trimmedTask.slice(0, 96),
-        model: AGENT_GEMINI_MODEL,
+        model: executedModel,
         status: "OK",
         latencyMs: totalLatency,
         promptTokens: totalPromptTokens,
@@ -405,7 +434,7 @@ export async function executeAgentTask({
       agent,
       result: finalResult,
       meta: {
-        model: AGENT_GEMINI_MODEL,
+        model: executedModel,
         latencyMs: totalLatency,
         promptTokens: totalPromptTokens,
         completionTokens: totalCompletionTokens,
@@ -415,17 +444,36 @@ export async function executeAgentTask({
   }
 
   // Single specialist agent execution
-  const res = await generateAgentJson<Record<string, unknown>>({
-    thinkingDepth: agent.thinkingDepth,
-    systemInstruction: buildSpecialistSystemInstruction(agent),
-    prompt: JSON.stringify({
-      task: trimmedTask,
-      focusReference: resolvedReference,
-      domainsCovered: AGENT_DOMAINS.length,
-      operationalData: snapshot,
-    }),
-    responseSchema: AGENT_RESPONSE_SCHEMA,
-  });
+  const singleStartedAt = Date.now();
+  let res;
+  try {
+    res = await generateAgentJson<Record<string, unknown>>({
+      thinkingDepth: agent.thinkingDepth,
+      timeoutMs,
+      systemInstruction: buildSpecialistSystemInstruction(agent),
+      prompt: JSON.stringify({
+        task: trimmedTask,
+        focusReference: resolvedReference,
+        domainsCovered: AGENT_DOMAINS.length,
+        operationalData: snapshot,
+      }),
+      responseSchema: AGENT_RESPONSE_SCHEMA,
+    });
+  } catch (err) {
+    await recordAgentRun({
+      shipmentId,
+      agent: agent.id,
+      job: trimmedTask.slice(0, 96),
+      model: AGENT_GEMINI_MODEL,
+      status: "ERROR",
+      latencyMs: Math.max(1, Date.now() - singleStartedAt),
+      promptTokens: null,
+      completionTokens: null,
+      reasoning: err instanceof Error ? err.message.slice(0, 800) : "Specialist execution failed",
+      text: null,
+    });
+    throw err;
+  }
 
   const normalized = normalizeAgentRunOutput(res.data, agent.id);
 
@@ -851,29 +899,45 @@ export async function runFleetOptimizationWithGemini(): Promise<{
   }
 
   // Deterministically match idle compliant vehicles for any eligible shipment still missing a vehicle
-  const idleVehicles = conveyances.filter((c) => c.active && !c.assigned_to && c.registration);
-  let idleIdx = 0;
+  const usedRegistrations = new Set<string>();
+  for (const plan of plannedWrites.values()) {
+    const reg =
+      typeof plan.assigned_vehicle === "string" ? plan.assigned_vehicle.trim().toUpperCase() : "";
+    if (reg) usedRegistrations.add(reg);
+  }
+
   for (const ship of eligible) {
     const existingPlan = plannedWrites.get(ship.id) ?? ship.plan ?? {};
     const hasVehicle = Boolean(
       existingPlan.assigned_vehicle || existingPlan.recommended_vehicle || existingPlan.vehicle,
     );
-    if (!hasVehicle && idleIdx < idleVehicles.length) {
+    if (!hasVehicle) {
       const needsHazmat = Boolean(ship.cargo?.hazmat);
       const needsReefer = Boolean(ship.cargo?.reefer || ship.cargo?.temperature_c);
-      const match =
-        idleVehicles.find(
-          (v, idx) =>
-            idx >= idleIdx &&
-            (!needsHazmat || v.hazmat_certified) &&
-            (!needsReefer || v.reefer),
-        ) ?? idleVehicles[idleIdx];
+      const weightKg = typeof ship.cargo?.weight_kg === "number" ? ship.cargo.weight_kg : null;
+      const modes = Array.isArray(existingPlan.modes) ? existingPlan.modes : [];
+      const match = matchBestConveyance(
+        {
+          weightKg,
+          hazmat: needsHazmat,
+          reefer: needsReefer,
+          preferredMode: typeof modes[0] === "string" ? modes[0] : null,
+        },
+        conveyances,
+        usedRegistrations,
+      );
       if (match?.registration) {
-        idleIdx += 1;
+        usedRegistrations.add(match.registration.trim().toUpperCase());
         plannedWrites.set(ship.id, {
           ...existingPlan,
           assigned_vehicle: match.registration,
           routing_solver: "route-fleet-optimizer",
+          optimized_at: new Date().toISOString(),
+        });
+      } else if (!plannedWrites.has(ship.id)) {
+        plannedWrites.set(ship.id, {
+          ...existingPlan,
+          routing_solver: (existingPlan.routing_solver as string) || "route-fleet-optimizer",
           optimized_at: new Date().toISOString(),
         });
       }
@@ -933,7 +997,7 @@ export async function runFleetOptimizationWithGemini(): Promise<{
   return {
     result: normalized,
     meta: {
-      model: AGENT_GEMINI_MODEL,
+      model: res.meta.model,
       latencyMs: totalLatency,
       promptTokens: res.meta.promptTokens,
       completionTokens: res.meta.completionTokens,

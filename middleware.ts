@@ -30,6 +30,8 @@ const PUBLIC_PATHS = new Set([
   "/api/webhooks/whatsapp",
   "/api/webhooks/telegram",
   "/api/intake/external",
+  "/api/v1/ingest",
+  "/api/v1/shipments",
 ]);
 
 // Of those, the ones that make no sense once already signed in. Deliberately

@@ -1,7 +1,16 @@
 "use client";
 
-import { useState } from "react";
-import { googleSignIn } from "@/lib/google-auth";
+import { useEffect, useState } from "react";
+import { googleSignIn, prewarmGoogleAuth } from "@/lib/google-auth";
+
+function isEmbeddedIframe(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
 
 function formatGoogleAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code;
@@ -10,7 +19,13 @@ function formatGoogleAuthError(err: unknown): string {
     case "auth/cancelled-popup-request":
       return "Google sign-in was cancelled before completing.";
     case "auth/popup-blocked":
-      return "Your browser blocked the Google sign-in popup. Allow popups for this site and try again.";
+      return isEmbeddedIframe()
+        ? "The embedded preview blocked the Google sign-in popup. Allow popups or open sign-in in a new tab."
+        : "Your browser blocked the Google sign-in popup. Allow popups for this site and try again.";
+    case "auth/web-storage-unsupported":
+      return isEmbeddedIframe()
+        ? "Browser storage is blocked inside this embedded preview. Open sign-in in a new tab to continue."
+        : "Your browser has third-party storage or cookies disabled. Enable storage for this site and try again.";
     case "auth/unauthorized-domain":
       return `Google sign-in is not authorized for ${typeof window !== "undefined" ? window.location.hostname : "this domain"}.`;
     case "auth/operation-not-allowed":
@@ -37,11 +52,15 @@ export function GoogleSignInButton({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [cookieBlockedUrl, setCookieBlockedUrl] = useState<string | null>(null);
+  const [newTabUrl, setNewTabUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    void prewarmGoogleAuth();
+  }, []);
 
   async function handleClick() {
     setError(null);
-    setCookieBlockedUrl(null);
+    setNewTabUrl(null);
     setPending(true);
     try {
       const { idToken } = await googleSignIn({ includeGmailScopes });
@@ -57,7 +76,7 @@ export function GoogleSignInButton({
           next,
         }),
       });
-      const data = (await res.json()) as {
+      const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
         redirectTo?: string;
@@ -72,9 +91,11 @@ export function GoogleSignInButton({
         credentials: "same-origin",
         cache: "no-store",
       });
-      const checkData = (await checkRes.json()) as { authenticated?: boolean };
+      const checkData = (await checkRes.json().catch(() => ({}))) as {
+        authenticated?: boolean;
+      };
       if (!checkData.authenticated) {
-        setCookieBlockedUrl(window.location.href);
+        setNewTabUrl(window.location.href);
         setError(
           "Your browser blocked session cookies inside this embedded preview.",
         );
@@ -84,7 +105,14 @@ export function GoogleSignInButton({
 
       window.location.assign(data.redirectTo ?? "/");
     } catch (err) {
-      console.error("[GoogleSignInButton] sign-in failed", err);
+      const code = (err as { code?: string })?.code;
+      if (
+        (code === "auth/popup-blocked" ||
+          code === "auth/web-storage-unsupported") &&
+        isEmbeddedIframe()
+      ) {
+        setNewTabUrl(window.location.href);
+      }
       setError(formatGoogleAuthError(err));
       setPending(false);
     }
@@ -138,10 +166,10 @@ export function GoogleSignInButton({
       {error ? (
         <div className="auth-error" role="alert">
           <span>{error}</span>
-          {cookieBlockedUrl ? (
+          {newTabUrl ? (
             <div style={{ marginTop: "0.35rem" }}>
               <a
-                href={cookieBlockedUrl}
+                href={newTabUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="auth-link"

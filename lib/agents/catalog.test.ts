@@ -49,13 +49,30 @@ test("all 15 core agents route to backend workflows and zero expose /agents fron
   assert.equal(mappedAgents.size, 15);
 });
 
-test("selectOrchestratorSpecialists delegates cleanly to matching domain specialists", () => {
+test("selectOrchestratorSpecialists delegates cleanly across up to 4 matching domain specialists", () => {
   const picked = selectOrchestratorSpecialists(
     "Audit active exceptions and pending approvals across corridors",
   );
-  assert.equal(picked.length, 2);
+  assert.equal(picked.length, 3);
   assert.equal(picked[0].agentId, "exception-resolution");
   assert.equal(picked[1].agentId, "human-escalation");
+  assert.equal(picked[2].agentId, "route-optimization");
+
+  const multiDomain = selectOrchestratorSpecialists(
+    "Triage cold-chain exceptions, hazmat approvals, corridor reroutes, and proactive customer updates",
+  );
+  assert.equal(multiDomain.length, 4);
+  assert.deepEqual(
+    multiDomain.map((item) => item.agentId),
+    ["exception-resolution", "human-escalation", "route-optimization", "customer-communication"],
+  );
+
+  const capped = selectOrchestratorSpecialists(
+    "Audit active exceptions and pending approvals across corridors",
+    undefined,
+    2,
+  );
+  assert.equal(capped.length, 2);
 
   const fallback = selectOrchestratorSpecialists("General floor check", {
     openExceptions: 1,

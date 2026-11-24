@@ -179,7 +179,7 @@ export function CustomerSupportWidget() {
                 className="support-ref-input"
                 value={reference}
                 onChange={(e) => setReference(e.target.value)}
-                placeholder="Optional shipment ref (e.g. LG-82931)"
+                placeholder="Optional shipment ref (e.g. LG-00001)"
                 aria-label="Shipment reference"
               />
             </div>
@@ -205,9 +205,13 @@ export function CustomerSupportWidget() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => sendMessage("Where is shipment LG-82931?")}
+                      onClick={() =>
+                        sendMessage(
+                          "Route 20 pallets of retail cargo (600 kg) from Port Harcourt to Kano",
+                        )
+                      }
                     >
-                      Track shipment LG-82931
+                      Plan corridor (Port Harcourt → Kano)
                     </button>
                   </div>
                 </div>

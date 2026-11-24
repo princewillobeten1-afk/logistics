@@ -49,10 +49,10 @@ export default async function RootLayout({
     return (
       <html lang="en" className={fontVars} suppressHydrationWarning>
         <head>
-          <meta name="color-scheme" content="light dark" />
+          <meta name="color-scheme" content="light dark" suppressHydrationWarning />
           <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         </head>
-        <body>
+        <body suppressHydrationWarning>
           <MotionProvider>
             <MapsQuotaBanner />
             {children}
@@ -67,10 +67,10 @@ export default async function RootLayout({
   return (
     <html lang="en" className={fontVars} suppressHydrationWarning>
       <head>
-        <meta name="color-scheme" content="light dark" />
+        <meta name="color-scheme" content="light dark" suppressHydrationWarning />
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
-      <body>
+      <body suppressHydrationWarning>
         <MotionProvider>
           <MapsQuotaBanner />
           <a href="#main-content" className="skip-link visually-hidden">

@@ -19,7 +19,7 @@ const TRACK_SUGGESTIONS = [
 
 const BOOKING_SUGGESTIONS = [
   "Book 45 cartons of electronics (450 kg) from Lagos to Abuja by Friday",
-  "Where is shipment LG-82931?",
+  "Request urgent cold-chain road freight from Port Harcourt to Kano",
 ];
 
 type ChannelMode = "WEBSITE_CHAT" | "WHATSAPP" | "TELEGRAM";
@@ -167,7 +167,7 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
           id="track-reference"
           value={reference}
           onChange={(e) => setReference(e.target.value)}
-          placeholder="Shipment reference (e.g. LG-82931) — or chat with AI Customer Support below"
+          placeholder="Shipment reference (e.g. LG-00001) — or chat with AI Customer Support below"
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}

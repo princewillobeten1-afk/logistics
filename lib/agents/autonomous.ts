@@ -8,6 +8,7 @@ import {
 } from "./orchestrator";
 import { recordAudit } from "@/lib/audit";
 import { identityQuery, query, runWithOrgScope } from "@/lib/db";
+import { calculateShipmentPlan } from "@/lib/planning";
 
 export type IntakeSourceChannel =
   | "WEBSITE_CHAT"
@@ -69,30 +70,7 @@ export interface AutonomousDispatchResult {
   aiWarning: string | null;
 }
 
-const KNOWN_HUB_KM: Record<string, number> = {
-  "lagos->abuja": 755,
-  "abuja->lagos": 755,
-  "lagos->kano": 1030,
-  "kano->lagos": 1030,
-  "lagos->port harcourt": 620,
-  "port harcourt->lagos": 620,
-  "lagos->ibadan": 130,
-  "ibadan->lagos": 130,
-  "lagos->accra": 470,
-  "accra->lagos": 470,
-  "lagos->abidjan": 985,
-  "lagos->tema": 445,
-  "lagos->cotonou": 120,
-  "kano->abuja": 420,
-  "abuja->port harcourt": 610,
-};
 
-function estimateLaneKm(origin?: string | null, destination?: string | null): number {
-  if (!origin || !destination) return 450;
-  const key = `${origin.trim().toLowerCase()}->${destination.trim().toLowerCase()}`;
-  if (KNOWN_HUB_KM[key]) return KNOWN_HUB_KM[key];
-  return 520;
-}
 
 export function mapIntakeToSourceAndVia(sourceChannel: IntakeSourceChannel): {
   orderSource: "API" | "ERP" | "CRM" | "EMAIL" | "WHATSAPP" | "CSV" | "PORTAL" | "MANUAL";
@@ -167,7 +145,7 @@ export function extractOrderFieldsFromText(message: string): Partial<AutonomousS
   }
 
   const fromToMatch = message.match(
-    /\bfrom\s+([A-Za-z][A-Za-z\s,-]{1,38}?)\s+to\s+([A-Za-z][A-Za-z\s,-]{1,38}?)(?=[.,;!\n]|(?:\s+(?:by|before|with|weight|cargo|on|for)\b)|$)/i,
+    /\bfrom\s+([A-Za-z][A-Za-z\s,-]{1,38}?)\s+to\s+([A-Za-z][A-Za-z\s,-]{1,38}?)(?=[.,;!\n]|(?:\s+(?:by|before|with|weight|cargo|on|for|urgently|immediately|today|tomorrow|asap|please|now)\b)|$)/i,
   );
   if (fromToMatch) {
     out.originCity = fromToMatch[1].trim().replace(/,+$/, "");
@@ -184,7 +162,7 @@ export function extractOrderFieldsFromText(message: string): Partial<AutonomousS
     out.quantity = Number(qtyMatch[1]);
   }
 
-  if (/\b(reefer|refrigerat|cold chain|frozen|chilled|temperature)\b/i.test(message)) {
+  if (/\b(reefer|refrigerat|cold[- ]chain|frozen|chilled|temperature)\b/i.test(message)) {
     out.reefer = true;
   }
   if (/\b(hazmat|hazardous|flammable|chemical|dangerous goods)\b/i.test(message)) {
@@ -320,18 +298,15 @@ export async function dispatchToAutonomousAgent(
     if (canCreateOrderAndShipment) {
       orderReference = generateOrderRef();
       const candidateShipRef = generateShipmentRef();
-      const distanceKm = estimateLaneKm(structured.originCity, structured.destinationCity);
-      const preferredMode = structured.preferredMode?.trim().toUpperCase() || "ROAD";
-      const weightKg = structured.weightKg ?? 250;
       const quantity = structured.quantity ?? 1;
-      const deadlineDate = structured.deadlineIso
-        ? new Date(structured.deadlineIso)
-        : new Date(Date.now() + 72 * 3_600_000);
-      const validDeadline = Number.isNaN(deadlineDate.getTime())
-        ? new Date(Date.now() + 72 * 3_600_000)
-        : deadlineDate;
-      const estimatedCostMinor = Math.round((distanceKm * 850 + weightKg * 120) * 100);
-      const co2eKg = Math.round(distanceKm * (weightKg / 1000) * 62 * 10) / 10;
+      const planEstimate = calculateShipmentPlan({
+        originCity: structured.originCity,
+        destinationCity: structured.destinationCity,
+        weightKg: structured.weightKg,
+        preferredMode: structured.preferredMode,
+        deadlineIso: structured.deadlineIso,
+        currency: structured.currency,
+      });
 
       const rawOrder = {
         channel: input.sourceChannel,
@@ -344,7 +319,7 @@ export async function dispatchToAutonomousAgent(
         originCity: structured.originCity,
         destinationCity: structured.destinationCity,
         cargoDescription: structured.cargoDescription || input.message.slice(0, 120),
-        weightKg,
+        weightKg: planEstimate.weightKg,
         quantity,
         itemsCount: quantity,
         notes: structured.notes || input.message.slice(0, 400),
@@ -358,8 +333,8 @@ export async function dispatchToAutonomousAgent(
           orderReference,
           "VALIDATED",
           orderSource,
-          structured.currency?.toUpperCase() || "NGN",
-          validDeadline.toISOString(),
+          planEstimate.currency,
+          planEstimate.deadlineIso,
           JSON.stringify(rawOrder),
         ],
       );
@@ -369,18 +344,17 @@ export async function dispatchToAutonomousAgent(
 
       const planPayload = {
         lane_label: `${structured.originCity} → ${structured.destinationCity}`,
-        modes: [preferredMode],
-        distance_km: distanceKm,
-        estimated_cost_minor: estimatedCostMinor,
-        currency: structured.currency?.toUpperCase() || "NGN",
-        co2e_kg: co2eKg,
-        meets_deadline: true,
+        modes: [planEstimate.mode],
+        distance_km: planEstimate.distanceKm,
+        transit_hours: planEstimate.transitHours,
+        estimated_cost_minor: planEstimate.estimatedCostMinor,
+        currency: planEstimate.currency,
+        co2e_kg: planEstimate.co2eKg,
+        meets_deadline: planEstimate.meetsDeadline,
         routing_solver: "autonomous-orchestrator",
         requested_via: input.sourceChannel,
         notes: structured.notes || null,
-        projected_delivery: new Date(
-          Date.now() + Math.max(8, Math.round(distanceKm / 55)) * 3_600_000,
-        ).toISOString(),
+        projected_delivery: planEstimate.projectedDeliveryIso,
       };
 
       const shipRows = await query<{ id: string; reference: string }>(
@@ -396,12 +370,12 @@ export async function dispatchToAutonomousAgent(
           JSON.stringify({ city: structured.destinationCity }),
           JSON.stringify({
             description: structured.cargoDescription || input.message.slice(0, 120),
-            weight_kg: weightKg,
+            weight_kg: planEstimate.weightKg,
             quantity,
             hazmat: Boolean(structured.hazmat),
             reefer: Boolean(structured.reefer),
           }),
-          validDeadline.toISOString(),
+          planEstimate.deadlineIso,
           JSON.stringify(planPayload),
           shipmentCreatedVia,
           input.contactId ?? null,
@@ -614,6 +588,7 @@ export async function dispatchToAutonomousAgent(
           task: orchestratorPrompt,
           reference: shipmentReference ?? undefined,
           actorEmail: input.actorEmail ?? "autonomous@control-tower",
+          timeoutMs: 45_000,
         });
         orchestrationSummary = execOut.result.summary;
       } catch (err) {

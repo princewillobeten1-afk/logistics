@@ -115,6 +115,7 @@ export function isQuotaErrorMessage(message: unknown, status?: number): boolean 
   if (!text) return false;
   return (
     text.includes("overquotamaperror") ||
+    text.includes("billingnotenabledmaperror") ||
     text.includes("quotaexceedederror") ||
     text.includes("over_query_limit") ||
     text.includes("resource_exhausted") ||

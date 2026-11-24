@@ -89,7 +89,7 @@ export default async function Carriers() {
                 }, {}),
               )
                 .map(([k, v]) => `${v} ${k.toLowerCase()}`)
-                .join(" · ")}
+                .join(" · ") || "—"}
             </dd>
             <dt>by mode</dt>
             <dd>
@@ -100,7 +100,7 @@ export default async function Carriers() {
                 }, {}),
               )
                 .map(([k, v]) => `${v} ${k.toLowerCase()}`)
-                .join(" · ")}
+                .join(" · ") || "—"}
             </dd>
           </dl>
         </Panel>
@@ -189,12 +189,11 @@ export default async function Carriers() {
 
       <Panel title="Why this ordering" hint="cost vs. reliability trade-off">
         <p className="prose">
-          The cheapest carrier is frequently not the right one. Quickmove
-          Ventures shows near-perfect availability and the worst damage rate in
-          the fleet — on a shipment with a hard deadline and fragile cargo, the
-          score ranks it last despite being available when nobody else is. That
-          reasoning is a weighted sum here, reproducible on every shipment,
-          rather than a sentence a model produced once.
+          The cheapest carrier is frequently not the right one. A carrier with
+          high availability but a high historical damage rate ranks lower on a
+          shipment with a tight deadline or fragile cargo — because the weighted
+          score penalises damage and late deliveries consistently on every
+          shipment, rather than relying on an ad-hoc summary.
         </p>
       </Panel>
     </>

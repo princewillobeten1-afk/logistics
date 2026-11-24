@@ -33,9 +33,16 @@ export type CarrierSignals = {
   costScore?: number | null;
 };
 
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
 /** Route experience from volume: 200+ shipments on a lane is full marks. */
 export function experienceScore(shipments: number | null): number {
-  if (!shipments || shipments <= 0) return 0;
+  if (shipments === null || shipments === undefined || !Number.isFinite(shipments) || shipments <= 0) {
+    return 0;
+  }
   return Math.min(1, shipments / 200);
 }
 
@@ -44,6 +51,9 @@ export function costScores(amounts: number[]): number[] {
   if (amounts.length === 0) return [];
   const min = Math.min(...amounts);
   const max = Math.max(...amounts);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return amounts.map(() => 0);
+  }
   if (max === min) return amounts.map(() => 1);
   return amounts.map((a) => (max - a) / (max - min));
 }
@@ -64,9 +74,10 @@ export function scoreCarrier(signals: CarrierSignals): ScoreBreakdown {
   let applied = 0;
 
   const add = (label: string, weight: number, value: number | null | undefined) => {
-    if (value === null || value === undefined) return;
-    const contribution = weight * value;
-    parts.push({ label, weight, value, contribution });
+    if (value === null || value === undefined || !Number.isFinite(value)) return;
+    const clamped = clampUnit(value);
+    const contribution = weight * clamped;
+    parts.push({ label, weight, value: clamped, contribution });
     total += contribution;
     applied += weight;
   };
@@ -78,24 +89,32 @@ export function scoreCarrier(signals: CarrierSignals): ScoreBreakdown {
   add(
     "Damage",
     WEIGHTS.damage,
-    signals.damageRate === null || signals.damageRate === undefined
+    signals.damageRate === null ||
+      signals.damageRate === undefined ||
+      !Number.isFinite(signals.damageRate)
       ? null
-      : 1 - signals.damageRate,
+      : 1 - clampUnit(signals.damageRate),
   );
   add("Route experience", WEIGHTS.routeExperience, experienceScore(signals.shipmentsCount));
   add("Service", WEIGHTS.service, signals.serviceScore);
+
+  const costApplied =
+    signals.costScore !== null &&
+    signals.costScore !== undefined &&
+    Number.isFinite(signals.costScore);
 
   return {
     total,
     normalised: applied > 0 ? total / applied : 0,
     applied,
     parts,
-    costApplied: signals.costScore !== null && signals.costScore !== undefined,
+    costApplied,
   };
 }
 
-export function num(value: string | number | null): number | null {
+export function num(value: string | number | null | undefined): number | null {
   if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }

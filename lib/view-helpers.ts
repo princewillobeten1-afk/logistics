@@ -3,6 +3,7 @@ export interface ShipmentFilterable {
   reference: string;
   state: string;
   customer_ref: string | null;
+  customer_name?: string | null;
   origin: Record<string, unknown>;
   destination: Record<string, unknown>;
   cargo: Record<string, unknown>;
@@ -83,6 +84,15 @@ export function extractCity(loc: Record<string, unknown> | null | undefined): st
   return String(loc.city ?? loc.warehouse ?? loc.address ?? "").trim();
 }
 
+function locationSearchText(loc: Record<string, unknown> | null | undefined): string {
+  if (!loc) return "";
+  return [loc.city, loc.warehouse, loc.address, loc.country, loc.code]
+    .filter((v) => v !== null && v !== undefined && String(v).trim() !== "")
+    .map((v) => String(v).trim())
+    .join(" ")
+    .toLowerCase();
+}
+
 export function filterShipments<T extends ShipmentFilterable>(
   shipments: T[],
   options: { query?: string; state?: string },
@@ -96,114 +106,41 @@ export function filterShipments<T extends ShipmentFilterable>(
     }
     if (!q) return true;
 
+    const originText = locationSearchText(s.origin);
+    const destinationText = locationSearchText(s.destination);
+
+    // Support directional route queries like "Lagos -> Abuja" or "Lagos → Abuja"
+    const arrowMatch = q.match(/^(.*?)\s*(?:->|→)\s*(.*)$/);
+    if (arrowMatch) {
+      const fromTerm = arrowMatch[1].trim();
+      const toTerm = arrowMatch[2].trim();
+      const fromOk = !fromTerm || originText.includes(fromTerm);
+      const toOk = !toTerm || destinationText.includes(toTerm);
+      return fromOk && toOk;
+    }
+
+    const originCity = extractCity(s.origin);
+    const destCity = extractCity(s.destination);
+    const routePhrase = originCity && destCity ? `${originCity} to ${destCity}` : "";
+
     const haystack = [
       s.reference,
       s.state,
       formatStateLabel(s.state),
       s.customer_ref ?? "",
-      extractCity(s.origin),
-      extractCity(s.destination),
-      String(s.origin?.address ?? ""),
-      String(s.destination?.address ?? ""),
+      s.customer_name ?? "",
+      originText,
+      destinationText,
+      routePhrase,
       String(s.cargo?.description ?? ""),
       String(s.cargo?.sku ?? ""),
     ]
       .join(" ")
       .toLowerCase();
 
-    return haystack.includes(q);
+    if (haystack.includes(q)) return true;
+
+    const tokens = q.split(/\s+/).filter(Boolean);
+    return tokens.length > 1 && tokens.every((token) => haystack.includes(token));
   });
-}
-
-export function buildMockAssistantReply(params: {
-  reference: string;
-  question: string;
-  state: string;
-  originCity: string;
-  destinationCity: string;
-  customer: string | null;
-  exceptionSummary?: string | null;
-  quoteSummary?: string | null;
-}): { body: string; next_step: string; confidence: string } {
-  const q = params.question.toLowerCase();
-  const lane = `${params.originCity || "Origin"} → ${params.destinationCity || "Destination"}`;
-
-  if (q.includes("delay") || q.includes("why") || q.includes("exception")) {
-    if (params.exceptionSummary) {
-      return {
-        body: `${params.reference} (${lane}) is currently flagged under ${formatStateLabel(params.state)}: ${params.exceptionSummary}`,
-        next_step: "Review the active exception and confirm reroute or revised ETA with the carrier.",
-        confidence: "0.92",
-      };
-    }
-    return {
-      body: `${params.reference} (${lane}) is in ${formatStateLabel(params.state)}. No active delay exceptions are raised on this corridor.`,
-      next_step: "Monitor the next carrier milestone update on the timeline.",
-      confidence: "0.89",
-    };
-  }
-
-  if (q.includes("alternative") || q.includes("carrier") || q.includes("quote") || q.includes("option")) {
-    return {
-      body: params.quoteSummary
-        ? `Available carrier options for ${params.reference} (${lane}): ${params.quoteSummary}. Quotes are ranked deterministically using cost, on-time history, and damage rate.`
-        : `No live carrier quotes have closed for ${params.reference} yet; deterministic routing is evaluating approved road and multimodal carriers on ${lane}.`,
-      next_step: "Compare the scored carrier quotes below or approve the top-ranked proposal.",
-      confidence: "0.90",
-    };
-  }
-
-  if (q.includes("customer") || q.includes("told") || q.includes("notify")) {
-    return {
-      body: `Customer notifications for ${params.customer ?? "this account"} on ${params.reference} are synced through the outbound communications log. Latest shipment status exposed to the customer is "${formatStateLabel(params.state)}".`,
-      next_step: "Send a proactive update via Support Inbox or Gmail if an ETA shift exceeds SLA.",
-      confidence: "0.87",
-    };
-  }
-
-  return {
-    body: `${params.reference} for ${params.customer ?? "the customer"} (${lane}) is currently ${formatStateLabel(params.state)}. ${params.exceptionSummary ? `Active note: ${params.exceptionSummary}` : "All validation and allocation checks passed."}`,
-    next_step:
-      params.state === "AWAITING_APPROVAL"
-        ? "Open Approvals to authorize or reject the pending carrier spend."
-        : "Check the itinerary legs and event timeline below for the next scheduled handoff.",
-    confidence: "0.91",
-  };
-}
-
-export function buildMockSupportReply(params: {
-  reference: string | null;
-  question: string;
-  status?: string;
-  origin?: string | null;
-  destination?: string | null;
-  promisedBy?: string | null;
-  carrier?: string | null;
-  delayed?: boolean;
-}): string {
-  const q = params.question.toLowerCase();
-  if (!params.reference) {
-    if (q.includes("book") || q.includes("send") || q.includes("carton")) {
-      return "I can help set up a new shipment booking. Share the pickup address, delivery destination, cargo weight (kg), and target delivery date — or enter an existing shipment reference above (such as LG-82931 or LG-90014) to inspect live tracking.";
-    }
-    return "Enter a shipment reference above (for example LG-82931, LG-82932, or LG-90014) to view its live status, or tell me the origin, destination, and cargo details for a new shipment request.";
-  }
-
-  const lane = `${params.origin ?? "origin"} to ${params.destination ?? "destination"}`;
-  if (q.includes("delay") || q.includes("why")) {
-    return params.delayed
-      ? `Shipment ${params.reference} (${lane}) is currently experiencing a schedule delay while awaiting clearance/rerouting. Our operations team is actively coordinating the next milestone.`
-      : `Shipment ${params.reference} (${lane}) is currently ${params.status ?? "in progress"} with no active delays reported.`;
-  }
-  if (q.includes("who") || q.includes("carrier") || q.includes("deliver")) {
-    return params.carrier
-      ? `Shipment ${params.reference} is being handled by carrier ${params.carrier}.`
-      : `Carrier assignment for ${params.reference} is currently being finalized by our dispatch team.`;
-  }
-  if (q.includes("when") || q.includes("arrive") || q.includes("eta")) {
-    return params.promisedBy
-      ? `Shipment ${params.reference} (${lane}) is targeted for delivery by ${new Date(params.promisedBy).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}. Current stage: ${params.status ?? "In progress"}.`
-      : `Delivery timing for ${params.reference} (${lane}) is being confirmed. Current stage: ${params.status ?? "In progress"}.`;
-  }
-  return `Shipment ${params.reference} (${lane}) is currently "${params.status ?? "In progress"}". Let me know if you need the expected arrival window or carrier update.`;
 }

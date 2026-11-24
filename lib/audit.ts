@@ -1,4 +1,4 @@
-import { pool } from "./db";
+import { queryAs } from "./db";
 
 /**
  * Writes to `audit_logs` — what a *principal* did, as distinct from what the
@@ -25,70 +25,34 @@ export async function recordAudit(entry: {
   // the record of an approval is bad, but refusing an approval that already
   // happened is worse.
   try {
-    if (!process.env.DATABASE_URL?.trim()) {
-      if (entry.orgId) {
-        await pool.query(
-          `INSERT INTO audit_logs
-             (actor, actor_type, action, entity_type, entity_id,
-              before, after, ip_address, user_agent)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [
-            entry.actor,
-            entry.actorType ?? "USER",
-            entry.action,
-            entry.entityType ?? null,
-            entry.entityId ?? null,
-            entry.before ? JSON.stringify(entry.before) : null,
-            entry.after ? JSON.stringify(entry.after) : null,
-            entry.ip ?? null,
-            entry.userAgent?.slice(0, 500) ?? null,
-          ],
-        );
-      }
+    // A failed sign-in has no organisation, so it has no row to belong to.
+    // Recording it in the application log is the honest outcome — inventing
+    // an org for it would put one tenant's noise in another's audit trail.
+    if (!entry.orgId) {
+      console.warn(
+        `audit: ${entry.action} by ${entry.actor} (no organisation resolved)`,
+      );
       return;
     }
-    const client = await pool.connect();
-    try {
-      await client.query("SET ROLE logistics_app");
-      await client.query("SELECT set_config('app.current_org', $1, false)", [
-        entry.orgId ?? "",
-      ]);
-      // A failed sign-in has no organisation, so it has no row to belong to.
-      // Recording it in the application log is the honest outcome — inventing
-      // an org for it would put one tenant's noise in another's audit trail.
-      if (!entry.orgId) {
-        console.warn(
-          `audit: ${entry.action} by ${entry.actor} (no organisation resolved)`,
-        );
-        return;
-      }
-      await client.query(
-        `INSERT INTO audit_logs
-           (actor, actor_type, action, entity_type, entity_id,
-            before, after, ip_address, user_agent)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          entry.actor,
-          entry.actorType ?? "USER",
-          entry.action,
-          entry.entityType ?? null,
-          entry.entityId ?? null,
-          entry.before ? JSON.stringify(entry.before) : null,
-          entry.after ? JSON.stringify(entry.after) : null,
-          entry.ip ?? null,
-          entry.userAgent?.slice(0, 500) ?? null,
-        ],
-      );
-    } finally {
-      try {
-        await client.query(
-          "RESET ROLE; SELECT set_config('app.current_org', '', false)",
-        );
-        client.release();
-      } catch (err) {
-        client.release(err as Error);
-      }
-    }
+
+    await queryAs(
+      entry.orgId,
+      `INSERT INTO audit_logs
+         (actor, actor_type, action, entity_type, entity_id,
+          before, after, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        entry.actor,
+        entry.actorType ?? "USER",
+        entry.action,
+        entry.entityType ?? null,
+        entry.entityId ?? null,
+        entry.before ? JSON.stringify(entry.before) : null,
+        entry.after ? JSON.stringify(entry.after) : null,
+        entry.ip ?? null,
+        entry.userAgent?.slice(0, 500) ?? null,
+      ],
+    );
   } catch (err) {
     console.error("audit: write failed", entry.action, err);
   }

@@ -6,6 +6,7 @@ import {
   browserPopupRedirectResolver,
   browserSessionPersistence,
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   indexedDBLocalPersistence,
   initializeAuth,
@@ -24,6 +25,7 @@ export const SCOPES = [
 ] as const;
 
 let authInstance: Auth | null = null;
+let prewarmPromise: Promise<void> | null = null;
 
 function getFirebaseAuth(): Auth {
   if (typeof window === "undefined") {
@@ -48,6 +50,27 @@ function getFirebaseAuth(): Auth {
   return authInstance;
 }
 
+/**
+ * Pre-initializes Firebase Auth and the popup/redirect iframe resolver on mount
+ * so clicking Sign in with Google does not have to await iframe setup before
+ * opening the popup window (prevents Safari/WebKit and iframe popup blocking).
+ */
+export function prewarmGoogleAuth(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (!prewarmPromise) {
+    prewarmPromise = (async () => {
+      try {
+        const auth = getFirebaseAuth();
+        await auth.authStateReady();
+        await getRedirectResult(auth, browserPopupRedirectResolver);
+      } catch {
+        // Non-fatal: signInWithPopup initializes on demand if prewarm fails.
+      }
+    })();
+  }
+  return prewarmPromise;
+}
+
 // In-memory cache ONLY (never localStorage or sessionStorage).
 let isSigningIn = false;
 let cachedAccessToken: string | null = null;
@@ -58,6 +81,7 @@ export function initGoogleAuth(
   onAuthFailure?: () => void,
 ) {
   const auth = getFirebaseAuth();
+  void prewarmGoogleAuth();
   return onAuthStateChanged(auth, (user: User | null) => {
     if (user && cachedAccessToken) {
       onAuthSuccess?.(user, cachedAccessToken);

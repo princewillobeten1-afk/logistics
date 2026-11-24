@@ -1,11 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  buildMockAssistantReply,
-  buildMockSupportReply,
-  filterShipments,
-  formatStateLabel,
-} from "./view-helpers";
+import { filterShipments, formatStateLabel } from "./view-helpers";
 
 test("formatStateLabel formats uppercase enum tokens cleanly", () => {
   assert.equal(formatStateLabel("AWAITING_APPROVAL"), "Awaiting approval");
@@ -19,7 +14,7 @@ test("filterShipments filters by state and query case-insensitively", () => {
   const sample = [
     {
       id: "1",
-      reference: "LG-82931",
+      reference: "LG-10421",
       state: "IN_TRANSIT",
       customer_ref: "ABC Retail Ltd",
       origin: { city: "Lagos", address: "Plot 14 Acme Way, Ikeja" },
@@ -30,7 +25,7 @@ test("filterShipments filters by state and query case-insensitively", () => {
     },
     {
       id: "2",
-      reference: "LG-90014",
+      reference: "LG-10422",
       state: "AWAITING_APPROVAL",
       customer_ref: "Tema Trading Co",
       origin: { city: "Lagos" },
@@ -43,44 +38,13 @@ test("filterShipments filters by state and query case-insensitively", () => {
 
   assert.equal(filterShipments(sample, {}).length, 2);
   assert.equal(filterShipments(sample, { state: "AWAITING_APPROVAL" }).length, 1);
-  assert.equal(filterShipments(sample, { query: "abuja" })[0]?.reference, "LG-82931");
-  assert.equal(filterShipments(sample, { query: "tema" })[0]?.reference, "LG-90014");
+  assert.equal(filterShipments(sample, { query: "lg-10421" })[0]?.reference, "LG-10421");
+  assert.equal(filterShipments(sample, { query: "abuja" })[0]?.reference, "LG-10421");
+  assert.equal(filterShipments(sample, { query: "tema" })[0]?.reference, "LG-10422");
+  assert.equal(filterShipments(sample, { query: "abc retail" })[0]?.reference, "LG-10421");
+  assert.equal(filterShipments(sample, { query: "Lagos -> Abuja" }).length, 1);
+  assert.equal(filterShipments(sample, { query: "Lagos → Tema" })[0]?.reference, "LG-10422");
+  assert.equal(filterShipments(sample, { query: "Abuja -> Lagos" }).length, 0);
+  assert.equal(filterShipments(sample, { query: "Lagos to Abuja" })[0]?.reference, "LG-10421");
   assert.equal(filterShipments(sample, { state: "EXCEPTION", query: "abuja" }).length, 0);
-});
-
-test("buildMockAssistantReply adapts to delay and quote questions", () => {
-  const delayReply = buildMockAssistantReply({
-    reference: "LG-82931",
-    question: "Why is this delayed?",
-    state: "EXCEPTION",
-    originCity: "Lagos",
-    destinationCity: "Abuja",
-    customer: "ABC Retail Ltd",
-    exceptionSummary: "Lokoja bridge checkpoint congestion (+4h)",
-  });
-  assert.match(delayReply.body, /Lokoja bridge/);
-  assert.ok(delayReply.next_step.length > 0);
-
-  const quoteReply = buildMockAssistantReply({
-    reference: "LG-90014",
-    question: "What alternatives do we have?",
-    state: "AWAITING_APPROVAL",
-    originCity: "Lagos",
-    destinationCity: "Tema",
-    customer: "Tema Trading Co",
-    quoteSummary: "GIG Logistics ₦485,000 (28h)",
-  });
-  assert.match(quoteReply.body, /GIG Logistics/);
-});
-
-test("buildMockSupportReply answers customer tracking questions safely", () => {
-  const reply = buildMockSupportReply({
-    reference: "LG-82931",
-    question: "Who is delivering it?",
-    status: "In transit",
-    origin: "Lagos",
-    destination: "Abuja",
-    carrier: "KOBO360",
-  });
-  assert.match(reply, /KOBO360/);
 });

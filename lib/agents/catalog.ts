@@ -260,7 +260,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/shipments",
     targetLabel: "Shipments",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Audit active shipments for missing allocations, unscheduled legs, or incomplete international paperwork.",
       "Classify active shipments by urgency, special handling requirements, and next lifecycle transition.",
@@ -320,7 +320,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/fleet",
     targetLabel: "Fleet",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Audit driver licence expirations, hazmat certifications, and idle vehicles ready for immediate dispatch.",
       "Check assigned trucks with stale GPS telemetry and recommend fleet rebalancing actions.",
@@ -340,7 +340,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/carriers",
     targetLabel: "Carriers",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Rank carriers by quality score vs. risk for urgent fragile or temperature-controlled shipments.",
       "Identify unapproved or high-damage carriers and recommend lane allocation adjustments.",
@@ -360,7 +360,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/orders",
     targetLabel: "Orders",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Review pending orders and DRAFT shipments for missing consignee info or tight deadlines.",
       "Summarize intake channel volume and highlight orders at risk of validation hold.",
@@ -380,7 +380,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/warehouses",
     targetLabel: "Warehouses",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Identify SKUs above 75% reservation utilization or at risk of stockout across hubs.",
       "Compare warehouse dispatch lead times against open demand and recommend stock balancing.",
@@ -460,7 +460,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/analytics",
     targetLabel: "Analytics",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Audit current planned costs, carrier quotes, and FX exposure against active spending caps.",
       "Identify mode-shift or consolidation opportunities to lower cost per tonne-km.",
@@ -480,7 +480,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/analytics",
     targetLabel: "Analytics",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Produce an executive operations briefing covering throughput, OTIF risks, and emissions intensity.",
       "Analyze lane bottlenecks and recommend capacity adjustments for the next 7 days.",
@@ -501,7 +501,7 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     ],
     targetRoute: "/documents",
     targetLabel: "Documents",
-    thinkingDepth: "MEDIUM",
+    thinkingDepth: "LOW",
     quickPrompts: [
       "Audit unverified documents, held customs declarations, and dead-letter queue items for recovery.",
       "Review channel connector readiness and highlight automation gaps across intake and POD.",
@@ -696,7 +696,10 @@ export function selectOrchestratorSpecialists(
     pendingApprovals?: number;
     stalledWork?: number;
   },
+  maxSpecialists = 4,
 ): Array<{ agentId: CoreAgentId; subtask: string }> {
+  const cap = Math.max(1, Math.min(6, Math.round(maxSpecialists)));
+  const minFallback = Math.min(2, cap);
   const picked: Array<{ agentId: CoreAgentId; subtask: string }> = [];
   const seen = new Set<CoreAgentId>();
 
@@ -705,31 +708,31 @@ export function selectOrchestratorSpecialists(
       seen.add(rule.agentId);
       picked.push({ agentId: rule.agentId, subtask: rule.defaultSubtask });
     }
-    if (picked.length >= 2) return picked;
+    if (picked.length >= cap) return picked;
   }
 
-  if ((hints?.openExceptions ?? 0) > 0 && !seen.has("exception-resolution")) {
+  if (picked.length < minFallback && (hints?.openExceptions ?? 0) > 0 && !seen.has("exception-resolution")) {
     seen.add("exception-resolution");
     picked.push({
       agentId: "exception-resolution",
       subtask: "Triage active operational exceptions and SLA risks.",
     });
   }
-  if (picked.length < 2 && (hints?.pendingApprovals ?? 0) > 0 && !seen.has("human-escalation")) {
+  if (picked.length < minFallback && (hints?.pendingApprovals ?? 0) > 0 && !seen.has("human-escalation")) {
     seen.add("human-escalation");
     picked.push({
       agentId: "human-escalation",
       subtask: "Assess pending spending approvals and policy compliance gates.",
     });
   }
-  if (picked.length < 2 && !seen.has("shipment-management")) {
+  if (picked.length < minFallback && !seen.has("shipment-management")) {
     seen.add("shipment-management");
     picked.push({
       agentId: "shipment-management",
       subtask: "Audit active shipment states, deadlines, and lifecycle blockers.",
     });
   }
-  if (picked.length < 2 && !seen.has("route-optimization")) {
+  if (picked.length < minFallback && !seen.has("route-optimization")) {
     seen.add("route-optimization");
     picked.push({
       agentId: "route-optimization",
@@ -737,7 +740,7 @@ export function selectOrchestratorSpecialists(
     });
   }
 
-  return picked.slice(0, 2);
+  return picked.slice(0, cap);
 }
 
 export function normalizeAgentRunOutput(raw: unknown, fallbackAgentId: string): AgentRunStructuredResult {
@@ -881,12 +884,13 @@ export function classifyGeminiError(err: unknown): {
 
   if (
     statusNum === 503 ||
+    statusNum === 504 ||
     statusNum === 500 ||
-    /UNAVAILABLE|overloaded|DEADLINE_EXCEEDED|ETIMEDOUT|fetch failed/i.test(message)
+    /UNAVAILABLE|overloaded|DEADLINE_EXCEEDED|ETIMEDOUT|TimeoutError|AbortError|timed out|aborted|fetch failed/i.test(message)
   ) {
     return {
-      status: 503,
-      message: `Gemini model service is temporarily unreachable (${statusNum ?? "network"}). Please retry shortly.`,
+      status: statusNum === 504 || /TimeoutError|AbortError|timed out|aborted/i.test(message) ? 504 : 503,
+      message: `Gemini model service is temporarily unreachable (${statusNum ?? "timeout"}). Please retry shortly.`,
       quotaExceeded: false,
     };
   }

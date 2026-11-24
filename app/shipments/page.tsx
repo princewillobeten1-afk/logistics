@@ -7,9 +7,9 @@ export const dynamic = "force-dynamic";
 export default async function Shipments({
   searchParams,
 }: {
-  searchParams: Promise<{ state?: string }>;
+  searchParams: Promise<{ state?: string; q?: string }>;
 }) {
-  const { state } = await searchParams;
+  const { state, q } = await searchParams;
 
   let shipments, counts;
   try {
@@ -42,6 +42,7 @@ export default async function Shipments({
         shipments={shipments}
         counts={counts}
         initialState={state}
+        initialQuery={q}
       />
     </>
   );

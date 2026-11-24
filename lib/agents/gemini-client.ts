@@ -1,6 +1,7 @@
 import { GoogleGenAI, ThinkingLevel, type Schema } from "@google/genai";
 
 export const AGENT_GEMINI_MODEL = "gemini-4-hydrogen";
+export const AGENT_GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 export interface GeminiGenerationMeta {
   model: string;
@@ -43,26 +44,100 @@ function mapThinkingLevel(depth: "LOW" | "MEDIUM" | "HIGH"): ThinkingLevel {
   return ThinkingLevel.MEDIUM;
 }
 
-function isTransientError(err: unknown): boolean {
+export function parseRetryDelayMs(err: unknown): number | null {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  const match =
+    msg.match(/retry in\s+(\d+(?:\.\d+)?)\s*s/i) ??
+    msg.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i);
+  if (!match) return null;
+  const secs = Number(match[1]);
+  return Number.isFinite(secs) && secs > 0 ? Math.ceil(secs * 1000) : null;
+}
+
+export function isDailyQuotaExhausted(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (/PerDay|GenerateRequestsPerDay|requests?\s+per\s+day|daily.*(quota|limit)/i.test(msg)) {
+    return true;
+  }
+  const hinted = parseRetryDelayMs(err);
+  return hinted !== null && hinted > 60_000;
+}
+
+export function isRateLimitError(err: unknown): boolean {
   const status = (err as { status?: unknown })?.status;
-  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+  if (status === 429) return true;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /RESOURCE_EXHAUSTED|rate limit|quota|429/i.test(msg);
+}
+
+export function isTransientError(err: unknown): boolean {
+  if (isDailyQuotaExhausted(err)) return false;
+  if (isRateLimitError(err)) return true;
+  const status = (err as { status?: unknown })?.status;
+  if (status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+  const name = err instanceof Error ? err.name : "";
+  if (name === "TimeoutError" || name === "AbortError") {
     return true;
   }
   const msg = err instanceof Error ? err.message : String(err ?? "");
-  return /ECONNRESET|ETIMEDOUT|UNAVAILABLE|RESOURCE_EXHAUSTED|overloaded/i.test(msg);
+  return /ECONNRESET|ETIMEDOUT|UNAVAILABLE|DEADLINE_EXCEEDED|overloaded|timed out|aborted|fetch failed/i.test(
+    msg,
+  );
 }
 
-async function withBackoff<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+export async function withBackoff<T>(
+  fn: (attemptSignal: AbortSignal) => Promise<T>,
+  {
+    maxAttempts = 4,
+    totalTimeoutMs = 65_000,
+    perAttemptTimeoutMs = 25_000,
+    sleepFn = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  }: {
+    maxAttempts?: number;
+    totalTimeoutMs?: number;
+    perAttemptTimeoutMs?: number;
+    sleepFn?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<T> {
+  const deadline = Date.now() + totalTimeoutMs;
   let lastErr: unknown;
+
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 1_500) {
+      throw lastErr ?? new Error("Gemini request timed out.");
+    }
+
+    const attemptBudget = Math.min(perAttemptTimeoutMs, remainingMs);
+    const attemptSignal = AbortSignal.timeout(attemptBudget);
+
     try {
-      return await fn();
+      return await fn(attemptSignal);
     } catch (err) {
       lastErr = err;
-      if (attempt + 1 >= maxAttempts || !isTransientError(err)) {
+      const timeLeftAfterErr = deadline - Date.now();
+      if (
+        attempt + 1 >= maxAttempts ||
+        !isTransientError(err) ||
+        timeLeftAfterErr <= 5_000
+      ) {
         throw err;
       }
-      await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+
+      const hintedDelay = parseRetryDelayMs(err);
+      if (hintedDelay && hintedDelay > timeLeftAfterErr - 5_000) {
+        throw err;
+      }
+
+      const rawDelay = hintedDelay
+        ? hintedDelay + Math.floor(Math.random() * 500)
+        : isRateLimitError(err)
+          ? Math.min(14_000, 3_000 * 2 ** attempt) + Math.floor(Math.random() * 600)
+          : Math.min(6_000, 1_200 * 2 ** attempt) + Math.floor(Math.random() * 400);
+      const boundedDelay = Math.min(rawDelay, Math.max(500, timeLeftAfterErr - 5_000));
+      await sleepFn(boundedDelay);
     }
   }
   throw lastErr;
@@ -74,31 +149,56 @@ export async function generateAgentJson<T>({
   responseSchema,
   thinkingDepth = "LOW",
   seed,
+  timeoutMs = 65_000,
+  perAttemptTimeoutMs = 25_000,
 }: {
   systemInstruction: string;
   prompt: string;
   responseSchema: Schema;
   thinkingDepth?: "LOW" | "MEDIUM" | "HIGH";
   seed?: number;
+  timeoutMs?: number;
+  perAttemptTimeoutMs?: number;
 }): Promise<{ data: T; meta: GeminiGenerationMeta }> {
   const ai = getGeminiClient();
   const startedAt = Date.now();
 
-  const response = await withBackoff(() =>
-    ai.models.generateContent({
-      model: AGENT_GEMINI_MODEL,
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
-        thinkingConfig: {
-          thinkingLevel: mapThinkingLevel(thinkingDepth),
-        },
-        ...(typeof seed === "number" ? { seed } : {}),
+  const invokeModel = (modelName: string) =>
+    withBackoff(
+      (attemptSignal) =>
+        ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            abortSignal: attemptSignal,
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema,
+            thinkingConfig: {
+              thinkingLevel: mapThinkingLevel(thinkingDepth),
+            },
+            ...(typeof seed === "number" ? { seed } : {}),
+          },
+        }),
+      {
+        maxAttempts: 4,
+        totalTimeoutMs: timeoutMs,
+        perAttemptTimeoutMs,
       },
-    }),
-  );
+    );
+
+  let usedModel = AGENT_GEMINI_MODEL;
+  let response;
+  try {
+    response = await invokeModel(AGENT_GEMINI_MODEL);
+  } catch (err) {
+    if (isDailyQuotaExhausted(err)) {
+      usedModel = AGENT_GEMINI_FALLBACK_MODEL;
+      response = await invokeModel(AGENT_GEMINI_FALLBACK_MODEL);
+    } else {
+      throw err;
+    }
+  }
 
   const latencyMs = Math.max(1, Date.now() - startedAt);
   const rawText = (response.text ?? "{}").trim();
@@ -119,7 +219,7 @@ export async function generateAgentJson<T>({
   return {
     data: parsed,
     meta: {
-      model: AGENT_GEMINI_MODEL,
+      model: usedModel,
       latencyMs,
       promptTokens: response.usageMetadata?.promptTokenCount ?? null,
       completionTokens: response.usageMetadata?.candidatesTokenCount ?? null,

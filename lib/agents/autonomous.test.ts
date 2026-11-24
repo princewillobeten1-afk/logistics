@@ -14,11 +14,11 @@ test("classifyAutonomousIntent classifies orders, planning, exceptions, customs,
     "NEW_ORDER",
   );
   assert.equal(
-    classifyAutonomousIntent("Please reroute LG-82931 via road freight due to congestion"),
+    classifyAutonomousIntent("Please reroute LG-00001 via road freight due to congestion"),
     "PLANNING_ROUTING",
   );
   assert.equal(
-    classifyAutonomousIntent("Shipment LG-82931 arrived with damaged cartons"),
+    classifyAutonomousIntent("Shipment LG-00001 arrived with damaged cartons"),
     "EXCEPTION_REPORT",
   );
   assert.equal(
@@ -33,14 +33,14 @@ test("classifyAutonomousIntent classifies orders, planning, exceptions, customs,
 
 test("extractOrderFieldsFromText extracts shipment references, cities, weight, quantity, and handling flags", () => {
   const parsed = extractOrderFieldsFromText(
-    "Book 50 cartons of frozen seafood (450 kg) from Lagos to Abuja before Friday on shipment LG-82931",
+    "Book 50 cartons of frozen seafood (450 kg) from Lagos to Abuja before Friday on shipment LG-00001",
   );
   assert.equal(parsed.originCity, "Lagos");
   assert.equal(parsed.destinationCity, "Abuja");
   assert.equal(parsed.weightKg, 450);
   assert.equal(parsed.quantity, 50);
   assert.equal(parsed.reefer, true);
-  assert.equal(parsed.shipmentReference, "LG-82931");
+  assert.equal(parsed.shipmentReference, "LG-00001");
 });
 
 test("mapIntakeToSourceAndVia aligns all omnichannel and web form inputs to schema constraints", () => {
@@ -103,8 +103,8 @@ test("dispatchToAutonomousAgent creates orders, shipments, and delegates immedia
     const planOut = await dispatchToAutonomousAgent({
       sourceChannel: "EXTERNAL_API",
       intentHint: "PLANNING_ROUTING",
-      message: "External route planning for LG-82931",
-      reference: "LG-82931",
+      message: `External route planning for ${orderOut.shipmentReference}`,
+      reference: orderOut.shipmentReference ?? undefined,
       orgId: null,
       structured: {
         preferredMode: "ROAD",

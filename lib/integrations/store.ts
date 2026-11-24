@@ -1,0 +1,488 @@
+import { randomUUID } from "node:crypto";
+import { identityQuery, pool } from "@/lib/db";
+import type {
+  IntegrationConnectorRecord,
+  IntegrationEventRecord,
+} from "@/lib/local-store";
+import {
+  getConnectorTemplate,
+  type AutonomyMode,
+  type SystemCategory,
+} from "./catalog";
+import {
+  generateConnectorApiKey,
+  generateWebhookSecret,
+  hashSecret,
+  timingSafeHexEquals,
+  validateOutboundWebhookUrlSyntax,
+} from "./security";
+
+export interface PublicConnector {
+  id: string;
+  orgId: string;
+  name: string;
+  systemType: string;
+  category: SystemCategory;
+  status: "ACTIVE" | "PAUSED";
+  autonomyMode: AutonomyMode;
+  apiKeyPrefix: string;
+  outboundWebhookUrl: string | null;
+  outboundEvents: string[];
+  fieldMapping: Record<string, string>;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  lastSyncAt: string | null;
+  eventsProcessed: number;
+  errorsCount: number;
+}
+
+export interface PublicIntegrationEvent {
+  id: string;
+  connectorId: string;
+  connectorName: string;
+  direction: "INBOUND" | "OUTBOUND";
+  format: string;
+  entityType: string;
+  status: "PROCESSED" | "DUPLICATE" | "FAILED" | "DELIVERED";
+  idempotencyKey: string | null;
+  externalRef: string | null;
+  shipmentRef: string | null;
+  orderRef: string | null;
+  mappedBy: string;
+  summary: string;
+  delegatedAgents: string[];
+  rawPreview: string;
+  normalizedPayload: Record<string, unknown>;
+  outboundStatus: string | null;
+  latencyMs: number;
+  error: string | null;
+  createdAt: string;
+}
+
+let tablesInitialized = false;
+
+async function ensureIntegrationTables(): Promise<void> {
+  if (tablesInitialized) return;
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS integration_connectors (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        system_type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE',
+        autonomy_mode TEXT NOT NULL DEFAULT 'FULL_AUTONOMOUS',
+        api_key_prefix TEXT NOT NULL,
+        api_key_hash TEXT NOT NULL UNIQUE,
+        webhook_secret_hash TEXT NOT NULL,
+        outbound_webhook_url TEXT,
+        outbound_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+        field_mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_sync_at TIMESTAMPTZ,
+        events_processed INTEGER NOT NULL DEFAULT 0,
+        errors_count INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS integration_events (
+        id TEXT PRIMARY KEY,
+        org_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        connector_name TEXT NOT NULL,
+        direction TEXT NOT NULL DEFAULT 'INBOUND',
+        format TEXT NOT NULL DEFAULT 'JSON',
+        entity_type TEXT NOT NULL DEFAULT 'ORDER',
+        status TEXT NOT NULL DEFAULT 'PROCESSED',
+        idempotency_key TEXT,
+        external_ref TEXT,
+        shipment_ref TEXT,
+        order_ref TEXT,
+        mapped_by TEXT NOT NULL DEFAULT 'HEURISTIC',
+        summary TEXT NOT NULL DEFAULT '',
+        delegated_agents JSONB NOT NULL DEFAULT '[]'::jsonb,
+        raw_preview TEXT NOT NULL DEFAULT '',
+        normalized_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        outbound_status TEXT,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    tablesInitialized = true;
+  } catch {
+    // Local fallback store handles queries without DDL
+  }
+}
+
+function toPublicConnector(row: IntegrationConnectorRecord): PublicConnector {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    name: row.name,
+    systemType: row.system_type,
+    category: (row.category as SystemCategory) || "CUSTOM",
+    status: row.status === "PAUSED" ? "PAUSED" : "ACTIVE",
+    autonomyMode: row.autonomy_mode || "FULL_AUTONOMOUS",
+    apiKeyPrefix: row.api_key_prefix,
+    outboundWebhookUrl: row.outbound_webhook_url ?? null,
+    outboundEvents: Array.isArray(row.outbound_events) ? row.outbound_events : [],
+    fieldMapping:
+      row.field_mapping && typeof row.field_mapping === "object"
+        ? row.field_mapping
+        : {},
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    lastSyncAt: row.last_sync_at ? new Date(row.last_sync_at).toISOString() : null,
+    eventsProcessed: Number(row.events_processed) || 0,
+    errorsCount: Number(row.errors_count) || 0,
+  };
+}
+
+function toPublicEvent(row: IntegrationEventRecord): PublicIntegrationEvent {
+  return {
+    id: row.id,
+    connectorId: row.connector_id,
+    connectorName: row.connector_name,
+    direction: row.direction === "OUTBOUND" ? "OUTBOUND" : "INBOUND",
+    format: row.format,
+    entityType: row.entity_type,
+    status: row.status,
+    idempotencyKey: row.idempotency_key ?? null,
+    externalRef: row.external_ref ?? null,
+    shipmentRef: row.shipment_ref ?? null,
+    orderRef: row.order_ref ?? null,
+    mappedBy: row.mapped_by,
+    summary: row.summary,
+    delegatedAgents: Array.isArray(row.delegated_agents) ? row.delegated_agents : [],
+    rawPreview: row.raw_preview,
+    normalizedPayload:
+      row.normalized_payload && typeof row.normalized_payload === "object"
+        ? row.normalized_payload
+        : {},
+    outboundStatus: row.outbound_status ?? null,
+    latencyMs: Number(row.latency_ms) || 0,
+    error: row.error ?? null,
+    createdAt: new Date(row.created_at).toISOString(),
+  };
+}
+
+export async function listOrgConnectors(orgId: string): Promise<PublicConnector[]> {
+  await ensureIntegrationTables();
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `SELECT * FROM integration_connectors WHERE org_id = $1 ORDER BY created_at DESC`,
+    [orgId],
+  );
+  return rows.map(toPublicConnector);
+}
+
+export async function getOrgConnector(
+  id: string,
+  orgId: string,
+): Promise<IntegrationConnectorRecord | null> {
+  await ensureIntegrationTables();
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `SELECT * FROM integration_connectors WHERE id = $1 AND org_id = $2 LIMIT 1`,
+    [id, orgId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function authenticateConnectorApiKey(
+  rawApiKey: string | null | undefined,
+): Promise<IntegrationConnectorRecord | null> {
+  if (!rawApiKey) return null;
+  const trimmed = rawApiKey.trim();
+  if (trimmed.length < 16 || trimmed.length > 256) return null;
+  await ensureIntegrationTables();
+  const keyHash = hashSecret(trimmed);
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `SELECT * FROM integration_connectors WHERE api_key_hash = $1 LIMIT 1`,
+    [keyHash],
+  );
+  const found = rows[0];
+  if (!found) return null;
+  if (!timingSafeHexEquals(found.api_key_hash, keyHash)) return null;
+  return found;
+}
+
+export async function createOrgConnector(input: {
+  orgId: string;
+  name: string;
+  systemType: string;
+  autonomyMode?: AutonomyMode;
+  outboundWebhookUrl?: string | null;
+  outboundEvents?: string[];
+  fieldMapping?: Record<string, string>;
+  createdBy: string;
+}): Promise<{
+  connector: PublicConnector;
+  apiKey: string;
+  webhookSecret: string;
+}> {
+  await ensureIntegrationTables();
+  const template = getConnectorTemplate(input.systemType);
+  const name = input.name.trim() || template?.name || "External Logistics System";
+  const category = template?.category ?? "CUSTOM";
+  const autonomyMode: AutonomyMode =
+    input.autonomyMode ?? template?.defaultAutonomy ?? "FULL_AUTONOMOUS";
+
+  let normalizedWebhookUrl: string | null = null;
+  if (input.outboundWebhookUrl?.trim()) {
+    const check = validateOutboundWebhookUrlSyntax(input.outboundWebhookUrl);
+    if (!check.ok) {
+      throw new Error(check.error ?? "Invalid outbound webhook URL.");
+    }
+    normalizedWebhookUrl = check.normalizedUrl ?? null;
+  }
+
+  const key = generateConnectorApiKey();
+  const secret = generateWebhookSecret();
+  const id = `conn_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const fieldMapping =
+    input.fieldMapping && Object.keys(input.fieldMapping).length > 0
+      ? input.fieldMapping
+      : (template?.defaultFieldMapping ?? {});
+  const outboundEvents =
+    Array.isArray(input.outboundEvents) && input.outboundEvents.length > 0
+      ? input.outboundEvents
+      : ["shipment.created", "shipment.planned", "exception.detected", "approval.decided"];
+
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `INSERT INTO integration_connectors
+       (id, org_id, name, system_type, category, status, autonomy_mode,
+        api_key_prefix, api_key_hash, webhook_secret_hash,
+        outbound_webhook_url, outbound_events, field_mapping, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14)
+     RETURNING *`,
+    [
+      id,
+      input.orgId,
+      name,
+      input.systemType || "custom_rest_webhook",
+      category,
+      "ACTIVE",
+      autonomyMode,
+      key.prefix,
+      key.hash,
+      secret.sealed,
+      normalizedWebhookUrl,
+      JSON.stringify(outboundEvents),
+      JSON.stringify(fieldMapping),
+      input.createdBy,
+    ],
+  );
+
+  return {
+    connector: toPublicConnector(rows[0]),
+    apiKey: key.plaintext,
+    webhookSecret: secret.plaintext,
+  };
+}
+
+export async function updateOrgConnector(
+  id: string,
+  orgId: string,
+  patch: {
+    name?: string;
+    status?: "ACTIVE" | "PAUSED";
+    autonomyMode?: AutonomyMode;
+    outboundWebhookUrl?: string | null;
+    outboundEvents?: string[];
+    fieldMapping?: Record<string, string>;
+  },
+): Promise<PublicConnector | null> {
+  const existing = await getOrgConnector(id, orgId);
+  if (!existing) return null;
+
+  let nextWebhookUrl = existing.outbound_webhook_url;
+  if (patch.outboundWebhookUrl !== undefined) {
+    if (!patch.outboundWebhookUrl || !patch.outboundWebhookUrl.trim()) {
+      nextWebhookUrl = null;
+    } else {
+      const check = validateOutboundWebhookUrlSyntax(patch.outboundWebhookUrl);
+      if (!check.ok) {
+        throw new Error(check.error ?? "Invalid outbound webhook URL.");
+      }
+      nextWebhookUrl = check.normalizedUrl ?? null;
+    }
+  }
+
+  const nextName = patch.name?.trim() || existing.name;
+  const nextStatus = patch.status === "PAUSED" ? "PAUSED" : patch.status === "ACTIVE" ? "ACTIVE" : existing.status;
+  const nextAutonomy = patch.autonomyMode ?? existing.autonomy_mode;
+  const nextOutboundEvents = patch.outboundEvents ?? existing.outbound_events;
+  const nextMapping = patch.fieldMapping ?? existing.field_mapping;
+
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `UPDATE integration_connectors
+        SET name = $1,
+            status = $2,
+            autonomy_mode = $3,
+            outbound_webhook_url = $4,
+            outbound_events = $5::jsonb,
+            field_mapping = $6::jsonb,
+            updated_at = now()
+      WHERE id = $7 AND org_id = $8
+      RETURNING *`,
+    [
+      nextName,
+      nextStatus,
+      nextAutonomy,
+      nextWebhookUrl,
+      JSON.stringify(nextOutboundEvents),
+      JSON.stringify(nextMapping),
+      id,
+      orgId,
+    ],
+  );
+  return rows[0] ? toPublicConnector(rows[0]) : null;
+}
+
+export async function rotateOrgConnectorKey(
+  id: string,
+  orgId: string,
+): Promise<{
+  connector: PublicConnector;
+  apiKey: string;
+  webhookSecret: string;
+} | null> {
+  const existing = await getOrgConnector(id, orgId);
+  if (!existing) return null;
+
+  const key = generateConnectorApiKey();
+  const secret = generateWebhookSecret();
+  const rows = await identityQuery<IntegrationConnectorRecord>(
+    `UPDATE integration_connectors
+        SET api_key_prefix = $1,
+            api_key_hash = $2,
+            webhook_secret_hash = $3,
+            updated_at = now()
+      WHERE id = $4 AND org_id = $5
+      RETURNING *`,
+    [key.prefix, key.hash, secret.sealed, id, orgId],
+  );
+  if (!rows[0]) return null;
+  return {
+    connector: toPublicConnector(rows[0]),
+    apiKey: key.plaintext,
+    webhookSecret: secret.plaintext,
+  };
+}
+
+export async function deleteOrgConnector(id: string, orgId: string): Promise<boolean> {
+  await ensureIntegrationTables();
+  const existing = await getOrgConnector(id, orgId);
+  if (!existing) return false;
+  await identityQuery(
+    `DELETE FROM integration_connectors WHERE id = $1 AND org_id = $2`,
+    [id, orgId],
+  );
+  return true;
+}
+
+export async function bumpConnectorStats(
+  connectorId: string,
+  processedDelta: number,
+  errorsDelta: number,
+): Promise<void> {
+  await ensureIntegrationTables();
+  await identityQuery(
+    `UPDATE integration_connectors
+        SET events_processed = events_processed + $1,
+            errors_count = errors_count + $2,
+            last_sync_at = now(),
+            updated_at = now()
+      WHERE id = $3`,
+    [processedDelta, errorsDelta, connectorId],
+  );
+}
+
+export async function findDuplicateEvent(
+  orgId: string,
+  connectorId: string,
+  idempotencyKey: string,
+): Promise<PublicIntegrationEvent | null> {
+  await ensureIntegrationTables();
+  const rows = await identityQuery<IntegrationEventRecord>(
+    `SELECT * FROM integration_events
+      WHERE org_id = $1 AND connector_id = $2 AND idempotency_key = $3
+      LIMIT 1`,
+    [orgId, connectorId, idempotencyKey],
+  );
+  return rows[0] ? toPublicEvent(rows[0]) : null;
+}
+
+export async function recordIntegrationEvent(input: {
+  orgId: string;
+  connectorId: string;
+  connectorName: string;
+  direction: "INBOUND" | "OUTBOUND";
+  format: string;
+  entityType: string;
+  status: "PROCESSED" | "DUPLICATE" | "FAILED" | "DELIVERED";
+  idempotencyKey?: string | null;
+  externalRef?: string | null;
+  shipmentRef?: string | null;
+  orderRef?: string | null;
+  mappedBy: string;
+  summary: string;
+  delegatedAgents: string[];
+  rawPreview: string;
+  normalizedPayload: Record<string, unknown>;
+  outboundStatus?: string | null;
+  latencyMs: number;
+  error?: string | null;
+}): Promise<PublicIntegrationEvent> {
+  await ensureIntegrationTables();
+  const id = `iev_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const rows = await identityQuery<IntegrationEventRecord>(
+    `INSERT INTO integration_events
+       (id, org_id, connector_id, connector_name, direction, format, entity_type,
+        status, idempotency_key, external_ref, shipment_ref, order_ref, mapped_by,
+        summary, delegated_agents, raw_preview, normalized_payload, outbound_status,
+        latency_ms, error)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,$20)
+     RETURNING *`,
+    [
+      id,
+      input.orgId,
+      input.connectorId,
+      input.connectorName,
+      input.direction,
+      input.format,
+      input.entityType,
+      input.status,
+      input.idempotencyKey ?? null,
+      input.externalRef ?? null,
+      input.shipmentRef ?? null,
+      input.orderRef ?? null,
+      input.mappedBy,
+      input.summary,
+      JSON.stringify(input.delegatedAgents),
+      input.rawPreview.slice(0, 800),
+      JSON.stringify(input.normalizedPayload),
+      input.outboundStatus ?? null,
+      Math.max(1, Math.round(input.latencyMs)),
+      input.error ?? null,
+    ],
+  );
+  return toPublicEvent(rows[0]);
+}
+
+export async function listOrgIntegrationEvents(
+  orgId: string,
+  limit = 60,
+): Promise<PublicIntegrationEvent[]> {
+  await ensureIntegrationTables();
+  const rows = await identityQuery<IntegrationEventRecord>(
+    `SELECT * FROM integration_events WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    [orgId, limit],
+  );
+  return rows.map(toPublicEvent);
+}
