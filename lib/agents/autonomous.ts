@@ -70,8 +70,6 @@ export interface AutonomousDispatchResult {
   aiWarning: string | null;
 }
 
-
-
 export function mapIntakeToSourceAndVia(sourceChannel: IntakeSourceChannel): {
   orderSource: "API" | "ERP" | "CRM" | "EMAIL" | "WHATSAPP" | "CSV" | "PORTAL" | "MANUAL";
   shipmentCreatedVia: "API" | "CHAT" | "CSV" | "EMAIL" | "ERP" | "MANUAL";
@@ -139,9 +137,37 @@ export function extractOrderFieldsFromText(message: string): Partial<AutonomousS
   shipmentReference?: string;
 } {
   const out: Partial<AutonomousStructuredInput> & { shipmentReference?: string } = {};
-  const refMatch = message.match(/\b(LG-\d{3,8}|PO-\d{4}-\d{3,6})\b/i);
-  if (refMatch) {
-    out.shipmentReference = refMatch[1].toUpperCase();
+  // Support internal, WPCargo, and major international carrier reference formats:
+  // LG-xxxxx, CX-xxxxxx, PO-YYYY-xxxx, DEMO-xxx, SHP-xxx, WPC-xxx, WP-TRK-xxx,
+  // AWB/DHL/FX/UPS/FLT/TEST prefixed refs, ISO-6346 containers (e.g. MSKU1234567),
+  // and explicit tracking/shipment numeric codes (e.g. "shipment 0576420").
+  const prefixedRefMatch = message.match(
+    /\b((?:LG|CX|DEMO|SHP|WPC|WP-TRK|AWB|DHL|FX|UPS|FLT|TEST)-[A-Z0-9]{2,12}|PO-\d{4}-\d{3,6}|[A-Z]{3}[UJZ]\d{7})\b/i,
+  );
+  if (prefixedRefMatch) {
+    out.shipmentReference = prefixedRefMatch[1].toUpperCase();
+  } else {
+    const unitSuffixLookahead =
+      "(?!\\s*(?:kg|kgs|kilograms?|g|lbs?|km|miles?|cartons?|boxes?|pallets?|units?|crates?|bags?|drums?|usd|ngn|eur)\\b)";
+    const labeledRefMatch = message.match(
+      new RegExp(
+        `\\b(?:shipment|tracking(?:\\s+(?:number|no|id))?|waybill|awb|bol|ref(?:erence)?)\\s*(?:#|:|is)?\\s*([A-Z0-9][A-Z0-9-]{4,21})\\b${unitSuffixLookahead}`,
+        "i",
+      ),
+    );
+    if (labeledRefMatch && /\d/.test(labeledRefMatch[1])) {
+      out.shipmentReference = labeledRefMatch[1].toUpperCase();
+    } else {
+      const actionRefMatch = message.match(
+        new RegExp(
+          `\\b(?:track|locate|find|status(?:\\s+of)?|check|where\\s+is)\\s*(?:#|:|is)?\\s*([A-Z0-9][A-Z0-9-]{5,21})\\b${unitSuffixLookahead}`,
+          "i",
+        ),
+      );
+      if (actionRefMatch && /\d/.test(actionRefMatch[1])) {
+        out.shipmentReference = actionRefMatch[1].toUpperCase();
+      }
+    }
   }
 
   const fromToMatch = message.match(
@@ -264,8 +290,9 @@ export async function dispatchToAutonomousAgent(
   const delegatedAgents = selectDelegatedSpecialistsForIntent(intent, input.message);
 
   let orderReference: string | null = null;
-  let shipmentReference: string | null =
+  const requestedReference: string | null =
     input.reference?.trim().toUpperCase() || textExtracted.shipmentReference || null;
+  let shipmentReference: string | null = requestedReference;
   let shipmentId: string | null = null;
   let draftSaved = false;
   let startedWork = false;
@@ -273,19 +300,25 @@ export async function dispatchToAutonomousAgent(
   let aiWarning: string | null = null;
 
   await runWithOrgScope(effectiveOrgId, async () => {
-    // Resolve existing shipment if reference is provided
-    if (shipmentReference && shipmentReference.startsWith("LG-")) {
+    // Resolve existing shipment for ANY reference format (LG-, CX-, WPCargo numeric,
+    // DEMO-, ISO-6346 container, carrier AWB, or customer PO reference).
+    if (shipmentReference) {
       try {
         const existing = await query<{ id: string; reference: string }>(
-          `SELECT id, reference FROM shipments WHERE upper(reference) = $1 LIMIT 1`,
+          `SELECT id, reference
+             FROM shipments
+            WHERE upper(reference) = $1 OR upper(customer_ref) = $1
+            LIMIT 1`,
           [shipmentReference],
         );
         if (existing[0]) {
           shipmentId = existing[0].id;
           shipmentReference = existing[0].reference;
+        } else {
+          shipmentReference = null;
         }
       } catch {
-        // Continue cleanly
+        shipmentReference = null;
       }
     }
 
@@ -404,6 +437,39 @@ export async function dispatchToAutonomousAgent(
             "agent:orchestrator",
           ],
         );
+
+        // Bridge directly into the autonomous Python worker pipeline:
+        // 1. planning.plan -> NVIDIA cuOpt VRP + Nemotron advisory -> PLANNED -> carrier.source -> quotes -> book -> track -> POD -> close
+        // 2. wpcargo.sync  -> publishes shipment on configured WordPress WPCargo portal asynchronously
+        await query(
+          `INSERT INTO work_items (shipment_id, kind, state, payload, priority, dedupe_key)
+           VALUES ($1, 'planning.plan', 'PENDING', $2::jsonb, 10, $3)
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+          [
+            shipmentId,
+            JSON.stringify({
+              sourceChannel: input.sourceChannel,
+              orderReference,
+              shipmentReference,
+            }),
+            `plan:${shipmentId}`,
+          ],
+        );
+        await query(
+          `INSERT INTO work_items (shipment_id, kind, state, payload, priority, dedupe_key)
+           VALUES ($1, 'wpcargo.sync', 'PENDING', $2::jsonb, 20, $3)
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+          [
+            shipmentId,
+            JSON.stringify({
+              sourceChannel: input.sourceChannel,
+              orderReference,
+              customerName: rawOrder.customerName,
+              customerEmail: rawOrder.customerEmail,
+            }),
+            `wpcargo:${shipmentId}`,
+          ],
+        );
       }
 
       if (input.contactId && shipmentId) {
@@ -442,13 +508,16 @@ export async function dispatchToAutonomousAgent(
         reroute_requested: intent === "PLANNING_ROUTING",
         action_requested: intent === "SHIPMENT_ACTION",
         requested_via: input.sourceChannel,
-        preferred_mode: structured.preferredMode ?? undefined,
+        ...(structured.preferredMode ? { preferred_mode: structured.preferredMode } : {}),
         routing_notes: structured.notes || input.message.slice(0, 240),
         routing_solver: "autonomous-orchestrator",
         requested_at: new Date().toISOString(),
       };
       await query(
-        `UPDATE shipments SET plan = $1::jsonb, updated_at = now() WHERE id = $2`,
+        `UPDATE shipments
+            SET plan = COALESCE(plan, '{}'::jsonb) || $1::jsonb,
+                updated_at = now()
+          WHERE id = $2`,
         [JSON.stringify(planUpdate), shipmentId],
       );
       await query(
@@ -474,21 +543,43 @@ export async function dispatchToAutonomousAgent(
           "agent:orchestrator",
         ],
       );
+      if (intent === "PLANNING_ROUTING") {
+        await query(
+          `INSERT INTO work_items (shipment_id, kind, state, payload, priority, dedupe_key)
+           VALUES ($1, 'planning.plan', 'PENDING', $2::jsonb, 10, $3)
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+          [
+            shipmentId,
+            JSON.stringify({
+              sourceChannel: input.sourceChannel,
+              preferredMode: structured.preferredMode ?? null,
+              notes: structured.notes || input.message.slice(0, 240),
+            }),
+            `replan:${shipmentId}:${Math.floor(Date.now() / 15000)}`,
+          ],
+        );
+      }
       startedWork = true;
     }
 
     if (intent === "EXCEPTION_REPORT" && shipmentId) {
+      const summary = input.message.slice(0, 300);
       await query(
-        `INSERT INTO exceptions (shipment_id, kind, severity, detected_by, detail)
-         VALUES ($1, $2, $3, $4, $5::jsonb)`,
+        `INSERT INTO exceptions (shipment_id, kind, severity, detected_by, summary, detail)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         ON CONFLICT (shipment_id, kind) WHERE state NOT IN ('RESOLVED', 'ABANDONED')
+         DO UPDATE SET summary = EXCLUDED.summary,
+                       detail = EXCLUDED.detail,
+                       updated_at = now()`,
         [
           shipmentId,
           "CUSTOMER_REPORTED",
           "HIGH",
           "autonomous_intake",
+          summary,
           JSON.stringify({
             sourceChannel: input.sourceChannel,
-            summary: input.message.slice(0, 300),
+            summary,
           }),
         ],
       );
@@ -507,24 +598,42 @@ export async function dispatchToAutonomousAgent(
           null,
           JSON.stringify({
             sourceChannel: input.sourceChannel,
-            message: input.message.slice(0, 300),
+            message: summary,
           }),
           "agent:orchestrator",
+        ],
+      );
+      await query(
+        `INSERT INTO work_items (shipment_id, kind, state, payload, priority, dedupe_key)
+         VALUES ($1, 'exception.investigate', 'PENDING', $2::jsonb, 5, $3)
+         ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+        [
+          shipmentId,
+          JSON.stringify({
+            sourceChannel: input.sourceChannel,
+            kind: "CUSTOMER_REPORTED",
+            summary,
+          }),
+          `exc-inv:${shipmentId}:${Math.floor(Date.now() / 15000)}`,
         ],
       );
       startedWork = true;
     }
 
+    const hasUnresolvedTargetReference = Boolean(requestedReference && !shipmentId);
+
     // Record work delegation ledger items for the queue & support delegation views
     const shouldCreateDelegationWork =
-      startedWork || intent !== "TRACKING_INQUIRY" || input.sourceChannel !== "WIDGET";
+      startedWork ||
+      (!hasUnresolvedTargetReference && intent !== "TRACKING_INQUIRY") ||
+      (input.sourceChannel !== "WIDGET" && Boolean(shipmentId));
     if (shouldCreateDelegationWork) {
       startedWork = true;
       const workKind =
         input.sourceChannel === "WHATSAPP" ||
-        input.sourceChannel === "TELEGRAM" ||
-        input.sourceChannel === "WIDGET" ||
-        input.sourceChannel === "WEBSITE_CHAT"
+          input.sourceChannel === "TELEGRAM" ||
+          input.sourceChannel === "WIDGET" ||
+          input.sourceChannel === "WEBSITE_CHAT"
           ? `support.delegated_${intent.toLowerCase()}`
           : `autonomous.${intent.toLowerCase()}`;
 
@@ -551,8 +660,8 @@ export async function dispatchToAutonomousAgent(
       actor: input.actorEmail || input.externalId || input.sourceChannel.toLowerCase(),
       actorType:
         input.sourceChannel === "EXTERNAL_API" ||
-        input.sourceChannel === "WHATSAPP" ||
-        input.sourceChannel === "TELEGRAM"
+          input.sourceChannel === "WHATSAPP" ||
+          input.sourceChannel === "TELEGRAM"
           ? "INTEGRATION"
           : "AGENT",
       orgId: effectiveOrgId,
@@ -603,7 +712,10 @@ export async function dispatchToAutonomousAgent(
           cooldownMs: 30_000,
         });
       }
-    } else if (getServerGeminiKey() && (startedWork || intent !== "TRACKING_INQUIRY")) {
+    } else if (
+      getServerGeminiKey() &&
+      (startedWork || (!hasUnresolvedTargetReference && intent !== "TRACKING_INQUIRY"))
+    ) {
       scheduleBackgroundAgent({
         workflow: "background.orchestrate",
         orgId: effectiveOrgId,
@@ -678,20 +790,28 @@ export async function processOmnichannelSupportTurn({
     let shipmentId: string | null = null;
     let resolvedRef: string | null = trimmedRef;
 
-    // Auto-detect shipment reference in message if none passed explicitly
+    // Auto-detect shipment reference in message; explicit reference in message overrides sticky session ref
     const extracted = extractOrderFieldsFromText(trimmed);
-    const refCandidate = resolvedRef || extracted.shipmentReference || null;
+    const refCandidate = extracted.shipmentReference || resolvedRef || null;
+    const callerPassedExplicitRef =
+      Boolean(trimmedRef) &&
+      (!extracted.shipmentReference || extracted.shipmentReference === trimmedRef);
 
-    if (refCandidate && refCandidate.startsWith("LG-")) {
+    if (refCandidate) {
       const found = await query<{ id: string; reference: string }>(
-        `SELECT id, reference FROM shipments WHERE upper(reference) = $1 LIMIT 1`,
+        `SELECT id, reference
+           FROM shipments
+          WHERE upper(reference) = $1 OR upper(customer_ref) = $1
+          LIMIT 1`,
         [refCandidate],
       );
       if (found[0]) {
         shipmentId = found[0].id;
         resolvedRef = found[0].reference;
-      } else if (trimmedRef) {
+      } else if (callerPassedExplicitRef) {
         return { ok: false, error: "We could not find that shipment reference." };
+      } else {
+        resolvedRef = null;
       }
     }
 
@@ -711,7 +831,8 @@ export async function processOmnichannelSupportTurn({
     );
 
     const contactId = contactRes[0]?.id;
-    const effectiveShipmentId = shipmentId ?? contactRes[0]?.last_shipment_id ?? null;
+    const effectiveShipmentId =
+      shipmentId ?? (!refCandidate ? (contactRes[0]?.last_shipment_id ?? null) : null);
 
     if (!resolvedRef && effectiveShipmentId) {
       const refRow = await query<{ reference: string }>(
@@ -740,13 +861,13 @@ export async function processOmnichannelSupportTurn({
 
     const historyRows = contactId
       ? await query<{ direction: string; body: string }>(
-          `SELECT direction, body
+        `SELECT direction, body
              FROM communications
             WHERE contact_id = $1
             ORDER BY created_at ASC
             LIMIT 12`,
-          [contactId],
-        )
+        [contactId],
+      )
       : [];
 
     const history = historyRows.map((r) => ({
@@ -761,7 +882,7 @@ export async function processOmnichannelSupportTurn({
     let aiError: string | null = null;
 
     if (!getServerGeminiKey()) {
-      aiError = "GEMINI_API_KEY is not configured for AI Customer Support.";
+      aiError = "No server AI provider key (NVIDIA_API_KEY / GEMINI_API_KEY) is configured.";
     } else {
       try {
         const aiRes = await runCustomerSupportWithGemini({
@@ -815,59 +936,28 @@ export async function processOmnichannelSupportTurn({
           `• Track a shipment (send a reference like LG-10421)\n` +
           `• Book a shipment (e.g. "Ship 500kg electronics from Rotterdam to Munich")\n` +
           `• Report a delay, damage, or customs issue${activeNote}`;
-      } else if (fallbackIntent === "TRACKING_INQUIRY") {
-        if (effectiveShipmentId) {
-          const rows = await query<{
-            reference: string;
-            state: string;
-            origin: Record<string, unknown>;
-            destination: Record<string, unknown>;
-            cargo: Record<string, unknown>;
-            deadline: Date | null;
-            plan: Record<string, unknown> | null;
-          }>(
-            `SELECT reference, state, origin, destination, cargo, deadline, plan FROM shipments WHERE id = $1 LIMIT 1`,
-            [effectiveShipmentId],
-          );
-          if (rows[0]) {
-            const s = rows[0];
-            const o = String(s.origin?.city ?? "origin");
-            const d = String(s.destination?.city ?? "destination");
-            const cargoDesc = s.cargo?.description ? ` (${String(s.cargo.description)})` : "";
-            const eta = s.plan?.projected_delivery
-              ? ` Projected delivery: ${new Date(String(s.plan.projected_delivery)).toLocaleDateString("en-US", { month: "short", day: "numeric" })}.`
-              : s.deadline
-                ? ` Promised deadline: ${new Date(s.deadline).toLocaleDateString("en-US", { month: "short", day: "numeric" })}.`
-                : "";
-            fallbackReply = `Shipment ${s.reference}: currently ${s.state.replace(/_/g, " ")} on route ${o} → ${d}${cargoDesc}.${eta}`;
-          }
+      } else if (fallbackIntent === "TRACKING_INQUIRY" && !refCandidate && !effectiveShipmentId) {
+        const recent = await query<{
+          reference: string;
+          state: string;
+          origin: Record<string, unknown>;
+          destination: Record<string, unknown>;
+        }>(
+          `SELECT reference, state, origin, destination FROM shipments ORDER BY updated_at DESC LIMIT 3`,
+        );
+        if (recent.length > 0) {
+          const list = recent
+            .map(
+              (r) =>
+                `• ${r.reference} (${String(r.origin?.city ?? "?")} → ${String(r.destination?.city ?? "?")}): ${r.state.replace(/_/g, " ")}`,
+            )
+            .join("\n");
+          fallbackReply = `Please share a shipment reference (like ${recent[0].reference}) so I can check exact details. Recent active shipments:\n${list}`;
         } else {
-          const recent = await query<{
-            reference: string;
-            state: string;
-            origin: Record<string, unknown>;
-            destination: Record<string, unknown>;
-          }>(
-            `SELECT reference, state, origin, destination FROM shipments ORDER BY updated_at DESC LIMIT 3`,
-          );
-          if (recent.length > 0) {
-            const list = recent
-              .map(
-                (r) =>
-                  `• ${r.reference} (${String(r.origin?.city ?? "?")} → ${String(r.destination?.city ?? "?")}): ${r.state.replace(/_/g, " ")}`,
-              )
-              .join("\n");
-            fallbackReply = `Please share a shipment reference (like ${recent[0].reference}) so I can check exact details. Recent active shipments:\n${list}`;
-          } else {
-            fallbackReply =
-              "I'm connected and ready to help. Share a shipment reference (e.g. LG-10421) to track cargo, or tell me your origin and destination cities to book a new shipment.";
-          }
+          fallbackReply =
+            "I'm connected and ready to help. Share a shipment reference (e.g. LG-10421) to track cargo, or tell me your origin and destination cities to book a new shipment.";
         }
       }
-    }
-
-    if (aiError && !isActionableFallback && !fallbackReply) {
-      return { ok: false, error: aiError };
     }
 
     // Hand off directly to the Autonomous Agent (creates orders/shipments/events/exceptions & delegates work immediately)
@@ -876,59 +966,98 @@ export async function processOmnichannelSupportTurn({
     const autonomousResult =
       isGreeting || (aiError && fallbackReply && !isActionableFallback)
         ? {
-            intent: "TRACKING_INQUIRY" as AutonomousIntent,
-            startedWork: false,
-            orderReference: null,
-            shipmentReference: resolvedRef,
-            shipmentId: effectiveShipmentId,
-            delegatedAgents: [] as CoreAgentId[],
-            draftSaved: false,
-            orchestrationSummary: null,
-            aiWarning: aiError,
-          }
+          intent: "TRACKING_INQUIRY" as AutonomousIntent,
+          startedWork: false,
+          orderReference: null,
+          shipmentReference: resolvedRef,
+          shipmentId: effectiveShipmentId,
+          delegatedAgents: [] as CoreAgentId[],
+          draftSaved: false,
+          orchestrationSummary: null,
+          aiWarning: aiError,
+        }
         : await dispatchToAutonomousAgent({
-            sourceChannel,
-            intentHint: handoff?.intent ?? (aiError ? fallbackIntent : undefined),
-            message: handoff?.taskSummary || trimmed,
-            reference: handoff?.shipmentReference ?? resolvedRef,
-            contactId: contactId ?? null,
-            externalId,
-            displayName: displayName ?? null,
-            orgId: effectiveOrgId,
-            actorEmail: actorEmail ?? null,
-            mode: "background_orchestrate",
-            structured: {
-              originCity: handoff?.originCity ?? extracted.originCity ?? draftOrigin,
-              destinationCity: handoff?.destinationCity ?? extracted.destinationCity ?? draftDest,
-              cargoDescription: handoff?.cargoDescription ?? null,
-              weightKg: handoff?.weightKg ?? extracted.weightKg ?? null,
-              quantity: handoff?.quantity ?? extracted.quantity ?? null,
-              deadlineIso: handoff?.deadlineIso ?? null,
-              customerName: handoff?.customerName ?? displayName ?? null,
-              hazmat: handoff?.hazmat ?? extracted.hazmat ?? false,
-              reefer: handoff?.reefer ?? extracted.reefer ?? false,
-              missingFields: handoff?.missingFields ?? [],
-            },
-          });
+          sourceChannel,
+          intentHint: handoff?.intent ?? (aiError ? fallbackIntent : undefined),
+          message: handoff?.taskSummary || trimmed,
+          reference: handoff?.shipmentReference ?? resolvedRef ?? refCandidate,
+          contactId: contactId ?? null,
+          externalId,
+          displayName: displayName ?? null,
+          orgId: effectiveOrgId,
+          actorEmail: actorEmail ?? null,
+          mode: "background_orchestrate",
+          structured: {
+            originCity: handoff?.originCity ?? extracted.originCity ?? draftOrigin,
+            destinationCity: handoff?.destinationCity ?? extracted.destinationCity ?? draftDest,
+            cargoDescription: handoff?.cargoDescription ?? null,
+            weightKg: handoff?.weightKg ?? extracted.weightKg ?? null,
+            quantity: handoff?.quantity ?? extracted.quantity ?? null,
+            deadlineIso: handoff?.deadlineIso ?? null,
+            customerName: handoff?.customerName ?? displayName ?? null,
+            hazmat: handoff?.hazmat ?? extracted.hazmat ?? false,
+            reefer: handoff?.reefer ?? extracted.reefer ?? false,
+            missingFields: handoff?.missingFields ?? [],
+          },
+        });
 
-    const finalRef = autonomousResult.shipmentReference ?? resolvedRef;
+    const lookupRef = autonomousResult.shipmentReference ?? resolvedRef ?? refCandidate;
     const finalShipmentId = autonomousResult.shipmentId ?? effectiveShipmentId;
+    const finalRef = finalShipmentId
+      ? (autonomousResult.shipmentReference ?? resolvedRef ?? null)
+      : null;
     let outboundReply: string;
     if (aiReplyText) {
       outboundReply =
         autonomousResult.orderReference &&
-        finalRef &&
-        !aiReplyText.includes(finalRef)
+          finalRef &&
+          !aiReplyText.includes(finalRef)
           ? `${aiReplyText} Your request has been queued under shipment ${finalRef} (order ${autonomousResult.orderReference}).`
           : aiReplyText;
-    } else if (autonomousResult.orderReference && finalRef) {
-      outboundReply = `Request accepted for fulfillment as shipment ${finalRef} (order ${autonomousResult.orderReference}). Our operations team is planning your route now.`;
-    } else if (autonomousResult.startedWork) {
-      outboundReply = `Operations intake logged (${autonomousResult.intent.toLowerCase().replace(/_/g, " ")}) and queued for immediate handling.${finalRef ? ` Reference: ${finalRef}.` : ""}`;
     } else if (fallbackReply) {
       outboundReply = fallbackReply;
+    } else if (autonomousResult.orderReference && finalRef) {
+      outboundReply = `Your booking has been accepted and queued for dispatch under shipment ${finalRef} (order ${autonomousResult.orderReference}). Route planning and carrier allocation are underway.`;
+    } else if (lookupRef) {
+      // Deterministic allowlisted tracking fallback — never exposes buy rates/margins or internal errors.
+      const tracked = await query<{
+        reference: string;
+        state: string;
+        origin: Record<string, unknown> | null;
+        destination: Record<string, unknown> | null;
+        plan: Record<string, unknown> | null;
+        booking: Record<string, unknown> | null;
+      }>(
+        `SELECT reference, state, origin, destination, plan, booking
+           FROM shipments
+          WHERE upper(reference) = $1
+          LIMIT 1`,
+        [lookupRef.toUpperCase()],
+      ).catch(() => []);
+      const row = tracked[0];
+      if (row) {
+        const fromCity = String(row.origin?.city ?? row.origin?.address ?? "origin");
+        const toCity = String(row.destination?.city ?? row.destination?.address ?? "destination");
+        const eta = typeof row.plan?.projected_delivery === "string"
+          ? ` Estimated arrival: ${row.plan.projected_delivery}.`
+          : "";
+        const carrier = typeof row.booking?.carrier_code === "string"
+          ? ` Assigned carrier: ${row.booking.carrier_code}.`
+          : "";
+        outboundReply =
+          autonomousResult.intent === "EXCEPTION_REPORT"
+            ? `We have logged your issue report for shipment ${row.reference} (${fromCity} to ${toCity}, currently ${row.state.toLowerCase().replace(/_/g, " ")}) and alerted our operations team for immediate review.`
+            : `Shipment ${row.reference} (${fromCity} to ${toCity}) is currently ${row.state.toLowerCase().replace(/_/g, " ")}.${carrier}${eta}`;
+      } else if (autonomousResult.startedWork && autonomousResult.intent !== "TRACKING_INQUIRY") {
+        outboundReply = `Your request (${autonomousResult.intent.toLowerCase().replace(/_/g, " ")}) for shipment ${lookupRef} has been logged and routed to our operations team.`;
+      } else {
+        outboundReply = `I could not locate shipment ${lookupRef}. Please verify the reference number or share your pickup and delivery cities to start a new booking.`;
+      }
+    } else if (autonomousResult.startedWork) {
+      outboundReply = `Your request (${autonomousResult.intent.toLowerCase().replace(/_/g, " ")}) has been logged and routed to our operations team.`;
     } else {
-      return { ok: false, error: aiError ?? "Unable to process support request." };
+      outboundReply =
+        "Please share your shipment tracking reference (for example LG-82931 or your WPCargo tracking number), or tell me the pickup city, destination city, cargo, and weight to book a new shipment.";
     }
 
     await query(

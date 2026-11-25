@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -181,7 +182,7 @@ async def gather_facts(db: Database, *, days: int = 7) -> Facts:
             """,
             (start, end),
         )
-        carriers = [dict(r) for r in await cur.fetchall()]
+        carriers = [_json_safe_row(r) for r in await cur.fetchall()]
 
         cur = await conn.execute(
             "SELECT kind, severity, count(*) AS n FROM exceptions"
@@ -189,7 +190,7 @@ async def gather_facts(db: Database, *, days: int = 7) -> Facts:
             " GROUP BY kind, severity ORDER BY count(*) DESC LIMIT 10",
             (start, end),
         )
-        exceptions = [dict(r) for r in await cur.fetchall()]
+        exceptions = [_json_safe_row(r) for r in await cur.fetchall()]
 
         cur = await conn.execute(
             """
@@ -205,7 +206,7 @@ async def gather_facts(db: Database, *, days: int = 7) -> Facts:
             """,
             (start, end),
         )
-        lanes = [dict(r) for r in await cur.fetchall()]
+        lanes = [_json_safe_row(r) for r in await cur.fetchall()]
 
         cur = await conn.execute(
             "SELECT job, count(*) AS calls, round(avg(latency_ms)) AS avg_latency"
@@ -213,7 +214,7 @@ async def gather_facts(db: Database, *, days: int = 7) -> Facts:
             " GROUP BY job ORDER BY count(*) DESC",
             (start, end),
         )
-        model_usage = [dict(r) for r in await cur.fetchall()]
+        model_usage = [_json_safe_row(r) for r in await cur.fetchall()]
 
     return Facts(
         period_start=start,
@@ -225,6 +226,15 @@ async def gather_facts(db: Database, *, days: int = 7) -> Facts:
         lanes=lanes,
         model_usage=model_usage,
     )
+
+
+def _json_safe_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert Postgres `Decimal` values (e.g. from `round(numeric)`) to `float`
+    so `Facts` rows serialize cleanly inside `Jsonb(...)`."""
+    return {
+        k: (float(v) if isinstance(v, Decimal) else v)
+        for k, v in row.items()
+    }
 
 
 async def write_report(

@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, unstable_rethrow } from "next/navigation";
 import { Assistant } from "./assistant";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { MapsGroundingPanel } from "@/components/maps-grounding-panel";
@@ -16,11 +16,27 @@ export default async function ShipmentDetail({
   params: Promise<{ reference: string }>;
 }) {
   const { reference } = await params;
+  const decodedReference = decodeURIComponent(reference);
 
-  let shipment, events, legs, quotes, locations;
+  let shipment;
   try {
-    shipment = await getShipment(decodeURIComponent(reference));
-    if (!shipment) notFound();
+    shipment = await getShipment(decodedReference);
+  } catch (error) {
+    unstable_rethrow(error);
+    return (
+      <>
+        <div className="page-head">
+          <h1>{decodedReference}</h1>
+        </div>
+        <Offline error={error instanceof Error ? error.message : String(error)} />
+      </>
+    );
+  }
+
+  if (!shipment) notFound();
+
+  let events, legs, quotes, locations;
+  try {
     [events, legs, quotes, locations] = await Promise.all([
       getEvents(shipment.id),
       getLegs(shipment.id),
@@ -28,11 +44,11 @@ export default async function ShipmentDetail({
       listLocations(),
     ]);
   } catch (error) {
-    if (error instanceof Error && error.message === "NEXT_NOT_FOUND") throw error;
+    unstable_rethrow(error);
     return (
       <>
         <div className="page-head">
-          <h1>{reference}</h1>
+          <h1>{shipment.reference}</h1>
         </div>
         <Offline error={error instanceof Error ? error.message : String(error)} />
       </>

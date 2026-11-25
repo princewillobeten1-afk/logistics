@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, unstable_rethrow } from "next/navigation";
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { city, relative, when } from "@/lib/format";
 import { customerMessages, customerShipments, getCustomer } from "@/lib/queries";
@@ -11,21 +11,37 @@ export default async function CustomerDetail({
   params: Promise<{ code: string }>;
 }) {
   const { code } = await params;
+  const decodedCode = decodeURIComponent(code);
 
-  let customer, shipments, messages;
+  let customer;
   try {
-    customer = await getCustomer(decodeURIComponent(code));
-    if (!customer) notFound();
+    customer = await getCustomer(decodedCode);
+  } catch (error) {
+    unstable_rethrow(error);
+    return (
+      <>
+        <div className="page-head">
+          <h1>{decodedCode}</h1>
+        </div>
+        <Offline error={error instanceof Error ? error.message : String(error)} />
+      </>
+    );
+  }
+
+  if (!customer) notFound();
+
+  let shipments, messages;
+  try {
     [shipments, messages] = await Promise.all([
       customerShipments(customer.id),
       customerMessages(customer.id),
     ]);
   } catch (error) {
-    if (error instanceof Error && error.message === "NEXT_NOT_FOUND") throw error;
+    unstable_rethrow(error);
     return (
       <>
         <div className="page-head">
-          <h1>{decodeURIComponent(code)}</h1>
+          <h1>{customer.code}</h1>
         </div>
         <Offline error={error instanceof Error ? error.message : String(error)} />
       </>

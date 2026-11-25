@@ -469,7 +469,11 @@ export async function handleFrontendLogisticsAction(
                ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
               [
                 setup.shipmentId,
-                JSON.stringify({ message_id: setup.pendingId, engine: "gemini" }),
+                JSON.stringify({
+                  message_id: setup.pendingId,
+                  engine: result.meta.provider ?? "ai",
+                  model: result.meta.model,
+                }),
                 `assist:${setup.pendingId}`,
               ],
             );
@@ -574,7 +578,7 @@ export async function handleFrontendLogisticsAction(
         await client.query(
           `INSERT INTO work_items (shipment_id, kind, payload, priority, dedupe_key)
            VALUES ($1, $2, $3, 10, $4)
-           ON CONFLICT (dedupe_key) DO NOTHING`,
+           ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
           [
             row.shipment_id,
             approved ? "approval.granted" : "approval.refused",
@@ -667,6 +671,14 @@ export async function handleFrontendLogisticsAction(
              ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
             [`fleet-opt:${Math.floor(Date.now() / 5000)}`],
           );
+          // Also queue the NVIDIA cuOpt VRP batch solver on the Python worker
+          // so mathematical PDPTW routing & waypoint persistence run asynchronously.
+          await query(
+            `INSERT INTO work_items (kind, state, payload, priority, dedupe_key)
+             VALUES ('planning.optimize_fleet', 'PENDING', '{"source": "action_controller_cuopt"}'::jsonb, 15, $1)
+             ON CONFLICT (org_id, dedupe_key) DO NOTHING`,
+            [`cuopt-fleet:${Math.floor(Date.now() / 15000)}`],
+          ).catch(() => {});
 
           const autonomousOut = await dispatchAutonomous({
             sourceChannel: request.sourceChannel ?? "WEB_FORM_PLANNING",

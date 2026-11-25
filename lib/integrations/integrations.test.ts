@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { query } from "@/lib/db";
 import { getConnectorTemplate } from "./catalog";
+import { processUniversalIngestion } from "./engine";
+import { createOrgConnector, deleteOrgConnector } from "./store";
 import {
   detectAndParseRawPayload,
   normalizeRecordDeterministically,
@@ -169,4 +174,104 @@ test("normalizeRecordDeterministically normalizes SAP, Shopify (grams->kg), Sams
   assert.equal(wmsNorm.normalized.warehouseCode, "LOS-HUB-01");
   assert.equal(wmsNorm.normalized.sku, "SKU-SOLAR-450W");
   assert.equal(wmsNorm.normalized.onHand, 340);
+});
+
+test("processUniversalIngestion persists TELEMETRY and INVENTORY_SYNC with Postgres-valid schema SQL", async () => {
+  const engineSrc = readFileSync(
+    path.join(process.cwd(), "lib", "integrations", "engine.ts"),
+    "utf8",
+  );
+  assert.equal(
+    /UPDATE\s+conveyances[\s\S]*SET\s+last_lat/i.test(engineSrc),
+    false,
+    "engine.ts must update conveyances.identifiers JSONB and tracking_events, not non-existent last_lat column",
+  );
+  assert.equal(
+    /INSERT\s+INTO\s+inventory\s*\(\s*warehouse\s*,/i.test(engineSrc),
+    false,
+    "engine.ts must use inventory.warehouse_id referencing warehouses(id)",
+  );
+  assert.equal(
+    /INSERT\s+INTO\s+shipment_events[\s\S]*VALUES\s*\(\$1,\s*1,/i.test(engineSrc),
+    false,
+    "engine.ts must compute next seq via COALESCE(MAX(seq), 0) + 1",
+  );
+
+  const orgId = "00000000-0000-0000-0000-000000000001";
+  const created = await createOrgConnector({
+    orgId,
+    name: "WMS & Telematics Integration Test",
+    systemType: "manhattan_wms",
+    autonomyMode: "SYNC_ONLY",
+    createdBy: "test@example.com",
+  });
+
+  try {
+    // 1. Inventory sync should create/resolve warehouse and upsert inventory
+    const wmsRes = await processUniversalIngestion({
+      connector: {
+        id: created.connector.id,
+        org_id: orgId,
+        name: created.connector.name,
+        system_type: "manhattan_wms",
+        category: "WMS",
+        status: "ACTIVE",
+        autonomy_mode: "SYNC_ONLY",
+        api_key_prefix: created.connector.apiKeyPrefix,
+        api_key_hash: "unused",
+        webhook_secret_hash: "unused",
+        outbound_webhook_url: null,
+        outbound_events: [],
+        field_mapping: created.connector.fieldMapping,
+        created_by: "test@example.com",
+        created_at: new Date(),
+        updated_at: new Date(),
+        last_sync_at: null,
+        events_processed: 0,
+        errors_count: 0,
+      },
+      rawPayload: getConnectorTemplate("manhattan_wms")!.samplePayload,
+      syncOrchestrate: false,
+    });
+    assert.equal(wmsRes.processed, 1);
+    const invRows = await query<{ warehouse: string; sku: string; on_hand: number }>(
+      `SELECT w.code AS warehouse, i.sku, i.on_hand, i.reserved, (i.on_hand - i.reserved) AS available
+         FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
+        ORDER BY w.code, i.sku`,
+    );
+    assert.ok(
+      invRows.some((r) => r.warehouse === "LOS-HUB-01" && r.sku === "SKU-SOLAR-450W" && r.on_hand === 340),
+    );
+
+    // 2. Telematics GPS update should update conveyance telemetry cleanly
+    const gpsTpl = getConnectorTemplate("samsara_telematics")!;
+    const gpsRes = await processUniversalIngestion({
+      connector: {
+        id: created.connector.id,
+        org_id: orgId,
+        name: "Samsara GPS",
+        system_type: "samsara_telematics",
+        category: "TELEMATICS",
+        status: "ACTIVE",
+        autonomy_mode: "SYNC_ONLY",
+        api_key_prefix: created.connector.apiKeyPrefix,
+        api_key_hash: "unused",
+        webhook_secret_hash: "unused",
+        outbound_webhook_url: null,
+        outbound_events: [],
+        field_mapping: gpsTpl.defaultFieldMapping,
+        created_by: "test@example.com",
+        created_at: new Date(),
+        updated_at: new Date(),
+        last_sync_at: null,
+        events_processed: 0,
+        errors_count: 0,
+      },
+      rawPayload: gpsTpl.samplePayload,
+      syncOrchestrate: false,
+    });
+    assert.equal(gpsRes.processed, 1);
+  } finally {
+    await deleteOrgConnector(created.connector.id, orgId);
+  }
 });

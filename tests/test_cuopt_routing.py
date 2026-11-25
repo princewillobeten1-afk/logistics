@@ -55,6 +55,7 @@ def test_build_cuopt_payload_matches_nvidia_managed_service_schema():
 
     assert payload["action"] == "cuOpt_OptimizedRouting"
     assert payload["client_version"] == "custom"
+    assert "parameters" not in payload
     assert locations == ["Lagos", "Abuja"]
 
     data = payload["data"]
@@ -304,4 +305,77 @@ async def test_optimize_fleet_handler_assigns_vehicles_to_queued_shipments(
     assert rows[0]["plan"]["assigned_vehicle"]
     assert "Lokoja" in rows[0]["plan"]["waypoints"]
     assert "Kaduna" in rows[1]["plan"]["waypoints"]
+
+
+async def test_replanning_already_planned_or_in_transit_shipment_does_not_fail(
+    db, settings, repo, queue, orchestrator, reference
+):
+    """Regression guard: autonomous PLANNING_ROUTING enqueues `planning.plan` on
+    existing PLANNED/IN_TRANSIT shipments. It must update plan cleanly without
+    raising InvalidTransition or trying to delete committed legs."""
+    planned = await repo.create(
+        reference=f"{reference}-PL",
+        state=ShipmentState.PLANNED,
+        origin={"city": "Lagos"},
+        destination={"city": "Abuja"},
+        cargo={"quantity": 10, "weight_kg": 1_200},
+    )
+    item1 = WorkItem(
+        id=uuid4(),
+        kind="planning.plan",
+        payload={},
+        attempts=1,
+        max_attempts=5,
+        shipment_id=planned.id,
+    )
+    async with db.connection() as conn:
+        await conn.execute(
+            "INSERT INTO work_items (id, shipment_id, kind, state, payload, priority, dedupe_key)"
+            " VALUES (%s, %s, 'planning.plan', 'RUNNING', '{}'::jsonb, 10, %s)",
+            (item1.id, planned.id, f"replan-test:{item1.id}"),
+        )
+    res1 = await plan(
+        StepContext(item=item1, shipment=planned, db=db, settings=settings)
+    )
+    assert res1.transition is None
+    updated1 = await orchestrator.apply(item1, res1)
+    assert updated1 is not None and updated1.state is ShipmentState.PLANNED
+    assert "Lokoja" in updated1.plan["waypoints"]
+
+    in_transit = await repo.create(
+        reference=f"{reference}-TR",
+        state=ShipmentState.IN_TRANSIT,
+        origin={"city": "Lagos"},
+        destination={"city": "Kano"},
+        cargo={"quantity": 15, "weight_kg": 2_000},
+    )
+    async with db.connection() as conn:
+        await conn.execute(
+            "INSERT INTO shipment_legs (shipment_id, sequence, mode, state)"
+            " VALUES (%s, 1, 'ROAD', 'IN_TRANSIT')",
+            (in_transit.id,),
+        )
+    item2 = WorkItem(
+        id=uuid4(),
+        kind="planning.plan",
+        payload={},
+        attempts=1,
+        max_attempts=5,
+        shipment_id=in_transit.id,
+    )
+    async with db.connection() as conn:
+        await conn.execute(
+            "INSERT INTO work_items (id, shipment_id, kind, state, payload, priority, dedupe_key)"
+            " VALUES (%s, %s, 'planning.plan', 'RUNNING', '{}'::jsonb, 10, %s)",
+            (item2.id, in_transit.id, f"replan-test:{item2.id}"),
+        )
+    res2 = await plan(
+        StepContext(item=item2, shipment=in_transit, db=db, settings=settings)
+    )
+    assert res2.transition is None
+    assert res2.legs == ()
+    updated2 = await orchestrator.apply(item2, res2)
+    assert updated2 is not None and updated2.state is ShipmentState.IN_TRANSIT
+    assert "Kaduna" in updated2.plan["waypoints"]
+
 

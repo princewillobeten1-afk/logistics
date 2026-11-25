@@ -18,7 +18,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from psycopg.types.json import Jsonb
@@ -167,6 +167,24 @@ def resolve_coordinates(
         if name.lower() in lowered or lowered in name.lower():
             return coords
     return None
+
+
+def expand_route_waypoints(stops: list[str]) -> list[str]:
+    """Deduplicate consecutive identical stops and expand highway corridor
+    waypoints between consecutive distinct stops."""
+    deduped: list[str] = []
+    for s in stops:
+        if s and (not deduped or deduped[-1] != s):
+            deduped.append(s)
+    if len(deduped) < 2:
+        return deduped
+    expanded: list[str] = []
+    for a, b in zip(deduped, deduped[1:], strict=False):
+        seg = corridor_waypoints(a, b)
+        for wp in seg:
+            if not expanded or expanded[-1] != wp:
+                expanded.append(wp)
+    return expanded
 
 
 def corridor_waypoints(origin: str, destination: str) -> list[str]:
@@ -320,7 +338,6 @@ def build_cuopt_payload(
                 "objectives": {"cost": 1.0, "travel_time": 1.0},
             },
         },
-        "parameters": {},
     }
     return payload, locations
 
@@ -377,7 +394,8 @@ def parse_cuopt_response(
             )
         )
 
-    solution_cost = float(solver_resp.get("solution_cost") or total_km)
+    raw_cost = solver_resp.get("solution_cost")
+    solution_cost = float(raw_cost) if raw_cost is not None else total_km
     return CuOptSolution(
         solver="nvidia_cuopt",
         status="OPTIMAL" if solver_resp.get("status", 0) == 0 else "FEASIBLE",
@@ -385,7 +403,7 @@ def parse_cuopt_response(
         total_distance_km=round(total_km, 1),
         total_transit_hours=round(total_hours, 2),
         assignments=assignments,
-        waypoints=all_waypoints,
+        waypoints=expand_route_waypoints(all_waypoints),
         request_id=request_id,
         latency_ms=latency_ms,
         raw=body,
@@ -588,6 +606,10 @@ class CuOptClient:
                 request_id=request_id,
                 latency_ms=latency_ms,
             )
+            if tasks and not solution.assignments:
+                raise RuntimeError(
+                    f"cuOpt returned no vehicle assignments (status={solution.status})"
+                )
             # Expand corridor waypoints if cuOpt only returned endpoints
             if len(solution.waypoints) == 2 and tasks:
                 expanded = corridor_waypoints(
@@ -676,20 +698,23 @@ class CuOptClient:
     ) -> None:
         if self._db is None:
             return
+        idem_key = f"cuopt:{work_item_id or uuid4()}:{int(time.time() * 1000)}"
+        payload = {**request, "work_item_id": str(work_item_id) if work_item_id else None}
         try:
             async with self._db.connection() as conn:
                 await conn.execute(
                     """
                     INSERT INTO tool_calls
-                        (shipment_id, work_item_id, tool, tier, state,
+                        (idempotency_key, shipment_id, tool, tier, state,
                          request, response, error, completed_at)
                     VALUES (%s, %s, 'nvidia.cuopt', 0, %s, %s, %s, %s, now())
+                    ON CONFLICT (idempotency_key) DO NOTHING
                     """,
                     (
+                        idem_key,
                         shipment_id,
-                        work_item_id,
-                        "FAILED" if error else "SUCCEEDED",
-                        Jsonb(request),
+                        "FAILED" if error else "RESULT",
+                        Jsonb(payload),
                         Jsonb(response) if response is not None else None,
                         error,
                     ),

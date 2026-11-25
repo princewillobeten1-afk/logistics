@@ -63,6 +63,19 @@ async def open_quote_window(ctx: StepContext) -> StepResult:
     if not candidates:
         # Nothing to ask. An exception rather than a silent wait — a shipment
         # with no reachable carrier is not going to move on its own.
+        from logistics.exceptions import ExceptionRepo
+        from logistics.tracking.detection import Detection, DetectionKind, Severity
+
+        await ExceptionRepo(ctx.db).raise_detection(
+            shipment_id=shipment.id,
+            detection=Detection(
+                kind=DetectionKind.NO_CARRIERS,
+                severity=Severity.HIGH,
+                summary=f"No reachable approved carriers available for {load.mode} freight",
+                detail={"mode": load.mode, "round": round_no},
+            ),
+            detected_by="carrier",
+        )
         ctx.log.warning("sourcing.no_carriers", mode=load.mode)
         return StepResult(
             transition=ShipmentState.EXCEPTION,

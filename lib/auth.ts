@@ -215,14 +215,31 @@ export function isHttpsRequest(head: Headers): boolean {
   ).toLowerCase();
   const appUrl = (process.env.APP_URL ?? "").toLowerCase();
 
-  return (
+  if (
     proto.includes("https") ||
     origin.startsWith("https://") ||
     referer.startsWith("https://") ||
     host.endsWith(".run.app") ||
-    appUrl.startsWith("https://") ||
-    process.env.NODE_ENV === "production"
-  );
+    appUrl.startsWith("https://")
+  ) {
+    return true;
+  }
+
+  // Local production runs (`next start` on http://localhost:3002) set
+  // NODE_ENV=production; marking them Secure/SameSite=None causes browsers to
+  // reject the session cookie over plain HTTP.
+  const hostname = host.split(":")[0];
+  if (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "0.0.0.0" ||
+    hostname === "[::1]" ||
+    proto === "http"
+  ) {
+    return false;
+  }
+
+  return process.env.NODE_ENV === "production";
 }
 
 export function sessionCookieOptions(isHttps: boolean, expires: Date) {
@@ -355,6 +372,7 @@ export async function signInWithGoogle(
         "INSERT INTO organisations (name, slug) VALUES ($1, $2) RETURNING id, name",
         [workspaceName, slug],
       );
+      const orgId = org.rows[0].id;
       const user = await client.query<{
         id: string;
         email: string;
@@ -364,11 +382,12 @@ export async function signInWithGoogle(
         `INSERT INTO users (org_id, email, password_hash, role, name)
          VALUES ($1, $2, $3, 'ADMIN', $4)
          RETURNING id, email, name, role`,
-        [org.rows[0].id, email, randomPasswordHash, displayName],
+        [orgId, email, randomPasswordHash, displayName],
       );
+      await seedNewOrgDefaults(client, orgId);
       return {
         id: user.rows[0].id,
-        org_id: org.rows[0].id,
+        org_id: orgId,
         org_name: org.rows[0].name,
         email: user.rows[0].email,
         name: user.rows[0].name,
@@ -432,6 +451,76 @@ function isUniqueViolation(err: unknown, constraint?: string): boolean {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const DEFAULT_ORG_CHANNELS: readonly [string, string][] = [
+  ["TELEGRAM", "Telegram bot"],
+  ["WHATSAPP", "WhatsApp Business"],
+  ["GMAIL", "Support mailbox"],
+  ["WIDGET", "Website widget"],
+];
+
+const DEFAULT_ORG_POLICY = {
+  base_currency: "NGN",
+  fx_max_age_hours: 24,
+  auto_execute_tiers: [0, 1],
+  actions: {
+    book_shipment: {
+      auto_approve_below_minor: 0,
+      hard_deny_above_minor: 200_000_000,
+      note: "Phase 1: every booking goes to a human. Raise in phase 6.",
+    },
+    reroute_vehicle: {
+      auto_approve_below_minor: 0,
+      hard_deny_above_minor: 50_000_000,
+      max_cost_increase_pct: 5,
+    },
+    create_invoice: { auto_approve_below_minor: null },
+    send_whatsapp: { auto_approve_below_minor: null },
+    send_email: { auto_approve_below_minor: null },
+    cancel_shipment: { auto_approve_below_minor: null },
+    change_delivery_address: { auto_approve_below_minor: null },
+    settle_claim: {
+      auto_approve_below_minor: 0,
+      hard_deny_above_minor: 100_000_000,
+    },
+  },
+  require_approval_when: {
+    unapproved_carrier: true,
+    address_change: true,
+    hazmat: true,
+    temperature_controlled: false,
+    customs_uncertain: true,
+    cancellation: true,
+    sla_breach_risk: true,
+    declared_value_above_minor: 500_000_000,
+  },
+  default_decision: "REQUIRE_APPROVAL",
+};
+
+async function seedNewOrgDefaults(
+  client: { query: (text: string, values?: unknown[]) => Promise<unknown> },
+  orgId: string,
+): Promise<void> {
+  // Scope the remainder of this signup transaction to the new org so RLS
+  // allows seeding its default channels and spend policy immediately.
+  await client.query("SELECT set_config('app.current_org', $1, true)", [orgId]);
+
+  for (const [channel, displayName] of DEFAULT_ORG_CHANNELS) {
+    await client.query(
+      `INSERT INTO channel_connections (channel, display_name)
+       VALUES ($1, $2)
+       ON CONFLICT (org_id, channel) DO NOTHING`,
+      [channel, displayName],
+    );
+  }
+
+  await client.query(
+    `INSERT INTO policies (version, name, rules, active)
+     VALUES (1, 'default conservative', $1::jsonb, true)
+     ON CONFLICT (org_id, version) DO NOTHING`,
+    [JSON.stringify(DEFAULT_ORG_POLICY)],
+  );
+}
+
 export async function signUp(
   input: { companyName: string; name: string; email: string; password: string },
   meta: { ip?: string | null; userAgent?: string | null } = {},
@@ -460,14 +549,18 @@ export async function signUp(
         "INSERT INTO organisations (name, slug) VALUES ($1, $2) RETURNING id, name",
         [companyName, slug],
       );
+      const orgId = org.rows[0].id;
       const user = await client.query<{ id: string; email: string; name: string | null; role: Role }>(
         `INSERT INTO users (org_id, email, password_hash, role, name)
          VALUES ($1, $2, $3, 'ADMIN', $4)
          RETURNING id, email, name, role`,
-        [org.rows[0].id, email, passwordHash, name],
+        [orgId, email, passwordHash, name],
       );
+
+      await seedNewOrgDefaults(client, orgId);
+
       return {
-        id: user.rows[0].id, org_id: org.rows[0].id, org_name: org.rows[0].name,
+        id: user.rows[0].id, org_id: orgId, org_name: org.rows[0].name,
         email: user.rows[0].email, name: user.rows[0].name, role: user.rows[0].role,
       };
     });

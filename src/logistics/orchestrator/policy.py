@@ -31,6 +31,65 @@ from logistics.obs import get_logger
 
 log = get_logger(__name__)
 
+# Default spend policy seeded for every new organisation so bookings and
+# exception actions evaluate cleanly instead of failing closed on "no policy".
+DEFAULT_POLICY_RULES: dict[str, Any] = {
+    "base_currency": "NGN",
+    "fx_max_age_hours": 24,
+    "auto_execute_tiers": [0, 1],
+    "actions": {
+        "book_shipment": {
+            "auto_approve_below_minor": 0,
+            "hard_deny_above_minor": 200_000_000,
+            "note": "Phase 1: every booking goes to a human. Raise in phase 6.",
+        },
+        "reroute_vehicle": {
+            "auto_approve_below_minor": 0,
+            "hard_deny_above_minor": 50_000_000,
+            "max_cost_increase_pct": 5,
+        },
+        "create_invoice": {"auto_approve_below_minor": None},
+        "send_whatsapp": {"auto_approve_below_minor": None},
+        "send_email": {"auto_approve_below_minor": None},
+        "cancel_shipment": {"auto_approve_below_minor": None},
+        "change_delivery_address": {"auto_approve_below_minor": None},
+        "settle_claim": {
+            "auto_approve_below_minor": 0,
+            "hard_deny_above_minor": 100_000_000,
+        },
+    },
+    "require_approval_when": {
+        "unapproved_carrier": True,
+        "address_change": True,
+        "hazmat": True,
+        "temperature_controlled": False,
+        "customs_uncertain": True,
+        "cancellation": True,
+        "sla_breach_risk": True,
+        "declared_value_above_minor": 500_000_000,
+    },
+    "default_decision": "REQUIRE_APPROVAL",
+}
+
+
+async def seed_default_policy(db: Database) -> bool:
+    """Seed an active default spend policy for the current organisation if none exists."""
+    async with db.transaction() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM policies WHERE active LIMIT 1"
+        )
+        if await cur.fetchone() is not None:
+            return False
+        cur = await conn.execute(
+            """
+            INSERT INTO policies (version, name, rules, active)
+            VALUES (1, 'default conservative', %s, true)
+            ON CONFLICT (org_id, version) DO NOTHING
+            """,
+            (Jsonb(DEFAULT_POLICY_RULES),),
+        )
+        return cur.rowcount > 0
+
 
 class Decision(StrEnum):
     ALLOW = "ALLOW"

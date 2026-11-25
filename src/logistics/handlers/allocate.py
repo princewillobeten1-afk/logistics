@@ -214,6 +214,25 @@ async def allocate(ctx: StepContext) -> StepResult:
     if plan.shortfall > 0:
         # A genuine operational exception: the order cannot be filled. One of
         # the few places that legitimately wakes a reasoning agent.
+        from logistics.exceptions import ExceptionRepo
+        from logistics.tracking.detection import Detection, DetectionKind, Severity
+
+        await ExceptionRepo(ctx.db).raise_detection(
+            shipment_id=shipment.id,
+            detection=Detection(
+                kind=DetectionKind.ALLOCATION_SHORT,
+                severity=Severity.HIGH,
+                summary=f"Inventory shortfall: {plan.allocated} of {needed} units available for SKU {sku}",
+                detail={
+                    "sku": sku,
+                    "needed": needed,
+                    "available": plan.allocated,
+                    "shortfall": plan.shortfall,
+                    "by_warehouse": plan.lines,
+                },
+            ),
+            detected_by="warehouse",
+        )
         ctx.log.warning("allocate.short", needed=needed, available=plan.allocated)
         return StepResult(
             transition=ShipmentState.EXCEPTION,
@@ -263,6 +282,19 @@ async def allocate(ctx: StepContext) -> StepResult:
     if plan.meets_deadline is False:
         # Stock exists but not in time. Worth an exception now rather than a
         # missed delivery later — the Exception Agent can expedite or re-plan.
+        from logistics.exceptions import ExceptionRepo
+        from logistics.tracking.detection import Detection, DetectionKind, Severity
+
+        await ExceptionRepo(ctx.db).raise_detection(
+            shipment_id=shipment.id,
+            detection=Detection(
+                kind=DetectionKind.SLA_BREACH_RISK,
+                severity=Severity.HIGH,
+                summary=plan.rationale or "No warehouse can dispatch in time to meet the deadline",
+                detail={"sku": sku, "quantity": needed, "lines": plan.lines},
+            ),
+            detected_by="warehouse",
+        )
         ctx.log.warning("allocate.deadline_at_risk", rationale=plan.rationale)
         return StepResult(
             transition=ShipmentState.EXCEPTION,

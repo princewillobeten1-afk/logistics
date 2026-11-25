@@ -149,12 +149,16 @@ def build_wpcargo_payload(
             order.get("comments")
             or f"Submitted via AI Customer Support Agent — {qty_str}x {description} ({weight_str})"
         ),
-        # Current Status / History metabox
+        # Current Status / History metabox + core wpcargo_status meta
+        "wpcargo_status": str(order.get("status") or "Pending"),
         "date": form_defaults.get("date") or today,
         "time": form_defaults.get("time") or "09:00 am",
         "location": pickup,
-        "status": "Pending",
-        "remarks": "Order received by Customer Support Agent and delegated to Orchestrator.",
+        "status": str(order.get("status") or "Pending"),
+        "remarks": str(
+            order.get("remarks")
+            or "Order received by Customer Support Agent and delegated to Orchestrator."
+        ),
         # Multiple Package repeater (first row)
         "wpc-multiple-package[0][wpc-pm-qty]": qty_str,
         "wpc-multiple-package[0][wpc-pm-piece-type]": piece_type,
@@ -221,6 +225,10 @@ async def submit_wpcargo_shipment(
             headers={"Origin": base_url, "Referer": new_post_url},
         )
         post_resp.raise_for_status()
+        if "wp-login.php" in str(post_resp.url):
+            raise RuntimeError("WPCargo session expired during shipment submission")
+        if 'id="error-page"' in post_resp.text or "wp-die-message" in post_resp.text:
+            raise RuntimeError("WPCargo WordPress rejected shipment submission (wp-die)")
 
         edit_url = f"{base_url}/wp-admin/post.php?post={post_id}&action=edit"
         log.info(
@@ -236,14 +244,58 @@ async def submit_wpcargo_shipment(
         )
 
 
+_STATE_TO_WPCARGO_STATUS: dict[str, str] = {
+    "DRAFT": "Pending",
+    "NEEDS_INFO": "On Hold",
+    "VALIDATED": "Pending",
+    "ALLOCATED": "Pending",
+    "PLANNED": "Pending",
+    "SOURCING": "Pending",
+    "AWAITING_APPROVAL": "Pending",
+    "BOOKED": "Picked Up",
+    "IN_TRANSIT": "In Transit",
+    "EXCEPTION": "On Hold",
+    "DELIVERED": "Delivered",
+    "POD_VERIFIED": "Delivered",
+    "CLOSED": "Delivered",
+    "CANCELLED": "Cancelled",
+    "FAILED": "Cancelled",
+}
+
+
+def status_for_shipment_state(state: str) -> str:
+    """Map an internal `ShipmentState` string to a standard WPCargo status."""
+    return _STATE_TO_WPCARGO_STATUS.get(str(state).upper(), "Pending")
+
+
+_COUNTRY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Ghana", ("ghana", "accra", "tema", "kumasi", "takoradi")),
+    ("Cote d'Ivoire", ("ivory coast", "cote d'ivoire", "abidjan", "san-pedro")),
+    ("Benin", ("benin", "cotonou", "porto-novo")),
+    ("Togo", ("togo", "lome", "lomé")),
+    ("Senegal", ("senegal", "dakar")),
+    ("Cameroon", ("cameroon", "douala", "yaounde")),
+    ("Kenya", ("kenya", "nairobi", "mombasa")),
+    ("South Africa", ("south africa", "johannesburg", "cape town", "durban")),
+    ("United Kingdom", ("united kingdom", "uk", "london", "manchester", "heathrow", "felixstowe")),
+    ("Netherlands", ("netherlands", "rotterdam", "amsterdam", "schiphol")),
+    ("Germany", ("germany", "hamburg", "frankfurt", "berlin", "munich")),
+    ("France", ("france", "paris", "le havre", "marseille")),
+    ("Belgium", ("belgium", "antwerp", "brussels")),
+    ("United Arab Emirates", ("uae", "dubai", "abu dhabi", "jebel ali")),
+    ("China", ("china", "shanghai", "shenzhen", "guangzhou", "ningbo", "beijing")),
+    ("India", ("india", "mumbai", "delhi", "chennai")),
+    ("Singapore", ("singapore",)),
+    ("United States", ("united states", "usa", "new york", "houston", "los angeles", "miami", "chicago")),
+    ("Canada", ("canada", "toronto", "vancouver", "montreal")),
+)
+
+
 def _infer_country(address: str) -> str:
     lowered = (address or "").lower()
-    if any(k in lowered for k in ("ghana", "accra", "tema", "kumasi")):
-        return "Ghana"
-    if any(k in lowered for k in ("uk", "united kingdom", "london")):
-        return "United Kingdom"
-    if any(k in lowered for k in ("usa", "united states", "new york", "houston")):
-        return "United States"
+    for country, keywords in _COUNTRY_KEYWORDS:
+        if any(re.search(rf"\b{re.escape(k)}\b", lowered) for k in keywords):
+            return country
     return "Nigeria"
 
 

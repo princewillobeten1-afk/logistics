@@ -31,9 +31,8 @@ Registered today:
     exception.await_approval  raises the approval a resolution needs
     customer.notify           proactive outbound on the customer's channel
     shipment.assist           answers an operator's question; reads only
+    pod.verify                Proof of Delivery verification before close-out
     shipment.close            terminal
-
-Not yet registered: pod.verify.
 """
 
 from logistics.handlers import (  # noqa: F401
@@ -49,6 +48,7 @@ from logistics.handlers import (  # noqa: F401
     exception,
     notify,
     plan,
+    pod,
     source,
     support_actions,
     tracking,

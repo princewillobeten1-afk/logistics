@@ -180,47 +180,93 @@ export async function processUniversalIngestion({
       await runWithOrgScope(connector.org_id, async () => {
         if (normalized.entityType === "TELEMETRY") {
           outboundEventName = "telemetry.updated";
+          const unitReg =
+            normalized.vehicleRegistration ?? normalized.externalRef ?? "EXT-UNIT";
+
           if (normalized.latitude !== null && normalized.longitude !== null) {
             await query(
               `UPDATE conveyances
-                  SET last_lat = $1, last_lon = $2, last_speed = $3, last_seen_at = now()
-                WHERE upper(registration) = upper($4)`,
+                  SET identifiers = COALESCE(identifiers, '{}'::jsonb) || jsonb_build_object(
+                        'last_lat', $1::text,
+                        'last_lon', $2::text,
+                        'last_speed', $3::text,
+                        'last_seen_at', $4::text
+                      ),
+                      updated_at = now()
+                WHERE upper(identifiers->>'registration') = upper($5)`,
               [
                 String(normalized.latitude),
                 String(normalized.longitude),
-                normalized.speedKph != null ? String(normalized.speedKph) : null,
-                normalized.vehicleRegistration ?? normalized.externalRef ?? "EXT-UNIT",
+                normalized.speedKph != null ? String(normalized.speedKph) : "",
+                new Date().toISOString(),
+                unitReg,
               ],
             );
           }
 
+          let targetShipmentId: string | null = null;
           if (normalized.shipmentRef) {
             const ship = await query<{ id: string }>(
               `SELECT id FROM shipments WHERE upper(reference) = upper($1) LIMIT 1`,
               [normalized.shipmentRef],
             );
-            if (ship[0]) {
-              await query(
-                `INSERT INTO shipment_events
-                   (shipment_id, seq, type, from_state, to_state, payload, actor)
-                 VALUES ($1, 1, $2, $3, $4, $5::jsonb, $6)`,
-                [
-                  ship[0].id,
-                  "telemetry.position_updated",
-                  null,
-                  null,
-                  JSON.stringify({
-                    connector: connector.name,
-                    vehicle: normalized.vehicleRegistration,
-                    lat: normalized.latitude,
-                    lon: normalized.longitude,
-                    speedKph: normalized.speedKph,
-                    temperatureC: normalized.temperatureC,
-                  }),
-                  `integration:${connector.system_type}`,
-                ],
-              );
-            }
+            targetShipmentId = ship[0]?.id ?? null;
+          } else {
+            const activeLeg = await query<{ shipment_id: string }>(
+              `SELECT l.shipment_id
+                 FROM shipment_legs l
+                 JOIN conveyances v ON v.id = l.conveyance_id
+                WHERE upper(v.identifiers->>'registration') = upper($1)
+                  AND l.state NOT IN ('COMPLETED', 'CANCELLED')
+                ORDER BY l.sequence
+                LIMIT 1`,
+              [unitReg],
+            );
+            targetShipmentId = activeLeg[0]?.shipment_id ?? null;
+          }
+
+          if (targetShipmentId) {
+            await query(
+              `INSERT INTO tracking_events
+                 (shipment_id, occurred_at, source, event_type, latitude, longitude, speed_kph, temperature_c, payload)
+               VALUES ($1, now(), 'API', 'POSITION', $2, $3, $4, $5, $6::jsonb)`,
+              [
+                targetShipmentId,
+                normalized.latitude,
+                normalized.longitude,
+                normalized.speedKph,
+                normalized.temperatureC,
+                JSON.stringify({
+                  connector: connector.name,
+                  vehicle: normalized.vehicleRegistration,
+                  externalRef: normalized.externalRef,
+                }),
+              ],
+            );
+            await query(
+              `INSERT INTO shipment_events
+                 (shipment_id, seq, type, from_state, to_state, payload, actor)
+               VALUES (
+                 $1,
+                 (SELECT COALESCE(MAX(seq), 0) + 1 FROM shipment_events WHERE shipment_id = $1),
+                 $2, $3, $4, $5::jsonb, $6
+               )`,
+              [
+                targetShipmentId,
+                "telemetry.position_updated",
+                null,
+                null,
+                JSON.stringify({
+                  connector: connector.name,
+                  vehicle: normalized.vehicleRegistration,
+                  lat: normalized.latitude,
+                  lon: normalized.longitude,
+                  speedKph: normalized.speedKph,
+                  temperatureC: normalized.temperatureC,
+                }),
+                `integration:${connector.system_type}`,
+              ],
+            );
           }
 
           if (!isSyncOnly) {
@@ -241,16 +287,49 @@ export async function processUniversalIngestion({
           }
         } else if (normalized.entityType === "INVENTORY_SYNC") {
           outboundEventName = "inventory.synced";
-          await query(
-            `INSERT INTO inventory (warehouse, sku, on_hand, reserved)
-             VALUES ($1, $2, $3, $4)`,
-            [
-              normalized.warehouseCode ?? "MAIN-HUB",
-              normalized.sku ?? normalized.externalRef ?? "SKU-EXT",
-              normalized.onHand ?? 0,
-              normalized.reserved ?? 0,
-            ],
+          const whCode = (normalized.warehouseCode ?? "MAIN-HUB")
+            .trim()
+            .toUpperCase();
+          const sku = (normalized.sku ?? normalized.externalRef ?? "SKU-EXT")
+            .trim()
+            .toUpperCase();
+          const onHand = Math.max(0, Math.round(normalized.onHand ?? 0));
+          const reserved = Math.min(
+            onHand,
+            Math.max(0, Math.round(normalized.reserved ?? 0)),
           );
+
+          let whRows = await query<{ id: string }>(
+            `SELECT id FROM warehouses WHERE upper(code) = upper($1) LIMIT 1`,
+            [whCode],
+          );
+          if (!whRows[0]) {
+            whRows = await query<{ id: string }>(
+              `INSERT INTO warehouses (code, name)
+               VALUES ($1, $2)
+               ON CONFLICT (org_id, code) DO NOTHING
+               RETURNING id`,
+              [whCode, `${whCode} (${connector.name})`],
+            );
+            if (!whRows[0]) {
+              whRows = await query<{ id: string }>(
+                `SELECT id FROM warehouses WHERE upper(code) = upper($1) LIMIT 1`,
+                [whCode],
+              );
+            }
+          }
+
+          if (whRows[0]) {
+            await query(
+              `INSERT INTO inventory (warehouse_id, sku, on_hand, reserved)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (warehouse_id, sku) DO UPDATE
+                 SET on_hand = EXCLUDED.on_hand,
+                     reserved = EXCLUDED.reserved,
+                     updated_at = now()`,
+              [whRows[0].id, sku, onHand, reserved],
+            );
+          }
 
           if (!isSyncOnly) {
             const dispatch = await dispatchToAutonomousAgent({

@@ -266,6 +266,7 @@ def create_org_cmd(
     async def _main() -> None:
         from logistics.auth import AuthRepo
         from logistics.channels.store import seed_channels
+        from logistics.orchestrator.policy import seed_default_policy
 
         settings = get_settings()
         configure_logging(settings.log_level, settings.log_json)
@@ -274,17 +275,18 @@ def create_org_cmd(
         try:
             resolved = slug or _slugify(name)
             org_id = await AuthRepo(db).create_org(name, resolved)
-            # A new tenant starts with no channel rows at all — migration 010
-            # seeded them for the org that existed then. Without this, Settings
-            # shows an empty page and nothing can be connected.
+            # A new tenant starts with no channel rows and no policy at all —
+            # migrations 006 and 010 seeded them only for the default org.
             with use_org(org_id):
                 created = await seed_channels(db)
+                policy_created = await seed_default_policy(db)
         finally:
             await db.close()
         typer.echo(f"Organisation '{name}' created.")
         typer.echo(f"  slug     : {resolved}")
         typer.echo(f"  id       : {org_id}")
         typer.echo(f"  channels : {created} connection(s) ready to configure")
+        typer.echo(f"  policy   : {'default active policy seeded' if policy_created else 'already configured'}")
         typer.echo(f"\nUse it with:  --org {resolved}")
 
     _run(_main())

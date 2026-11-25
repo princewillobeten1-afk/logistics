@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { Duplex } from "node:stream";
 import next from "next";
 import type { Pool } from "pg";
@@ -13,7 +15,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 const LIVE_MODEL = "gemini-3.8-live";
 const SESSION_COOKIE = "logistics_session";
-const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
+const LOCAL_STORE_PATH = path.join(tmpdir(), "logistics-local-store.json");
 const ALLOWED_VOICES = new Set(["Zephyr", "Puck", "Charon", "Kore", "Fenrir"]);
 
 interface AuthContext {

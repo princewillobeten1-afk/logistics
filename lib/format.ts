@@ -30,6 +30,10 @@ const TONES: Record<string, Tone> = {
   OK: "done",
   ERROR: "alert",
   INVALID_OUTPUT: "alert",
+  // analytics insight severities
+  ACTION_NEEDED: "alert",
+  NOTABLE: "waiting",
+  INFO: "done",
 };
 
 export function toneFor(state: string): Tone {

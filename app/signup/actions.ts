@@ -32,10 +32,17 @@ export async function signUpAction(
   let result;
   try {
     result = await signUp({ companyName, name, email, password }, { ip, userAgent });
-  } catch {
+  } catch (err) {
+    console.error("signUpAction failed:", err);
+    const code = (err as { code?: string })?.code;
+    if (code === "ECONNREFUSED" || code === "57P01" || code === "08006") {
+      return {
+        error:
+          "The system database is temporarily unreachable. Verify that the database service is running and try again.",
+      };
+    }
     return {
-      error:
-        "The system database is temporarily unreachable. Verify that the database service is running and try again.",
+      error: "Could not create your workspace right now. Please try again.",
     };
   }
 

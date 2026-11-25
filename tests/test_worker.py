@@ -11,11 +11,16 @@ from logistics.handlers import registry as real_registry
 from logistics.handlers.allocate import set_inventory_source
 from logistics.handlers.base import HandlerRegistry, PermanentFailure
 from logistics.inventory import InMemoryInventory
+from logistics.llm.registry import Job
 from logistics.orchestrator.worker import Worker
 from tests.conftest import ScriptedLLM
 
 S = ShipmentState
 CLEAN = '{"ready_to_ship": true, "issues": [], "confidence": 0.95}'
+ROUTE_ADVISORY = (
+    '{"waypoints": ["Lagos", "Ibadan", "Ilorin", "Lokoja", "Abuja"],'
+    ' "risk_level": "low", "corridor_notes": "Clear highway corridor"}'
+)
 
 
 def _worker(db, queue, orchestrator, repo, settings, registry, llm=None) -> Worker:  # noqa: ANN001
@@ -35,7 +40,11 @@ async def _drain(worker: Worker, limit: int = 20) -> int:
 async def test_shipment_walks_from_draft_to_sourcing(
     db, queue, orchestrator, repo, settings, reference, carriers
 ):
-    """DRAFT → VALIDATED → ALLOCATED → PLANNED → SOURCING, with one model call."""
+    """DRAFT → VALIDATED → ALLOCATED → PLANNED → SOURCING.
+
+    Only `order.validate` and `planning.plan` (cuOpt + Nemotron route advisory)
+    should call the model; allocation and sourcing remain deterministic.
+    """
     set_inventory_source(InMemoryInventory())
     shipment = await repo.create(
         reference=reference,
@@ -46,7 +55,7 @@ async def test_shipment_walks_from_draft_to_sourcing(
     )
     await orchestrator.start(shipment.id)
 
-    llm = ScriptedLLM(CLEAN)
+    llm = ScriptedLLM(CLEAN, ROUTE_ADVISORY)
     worker = _worker(db, queue, orchestrator, repo, settings, real_registry, llm)
     await _drain(worker)
 
@@ -56,7 +65,10 @@ async def test_shipment_walks_from_draft_to_sourcing(
     assert final.plan["modes"] == ["ROAD"]
     assert final.plan["international"] is False
     assert final.plan["distance_km"] == 750
-    assert len(llm.requests) == 1, "only order.validate should call the model"
+    assert [r.job for r in llm.requests] == [
+        Job.ORDER_EXTRACTION,
+        Job.ROUTE_OPTIMIZATION,
+    ], "only order.validate and planning.plan should call the model"
 
     # Planning must have written the leg, not just the summary.
     async with db.connection() as conn:
@@ -93,7 +105,7 @@ async def test_sourcing_waits_and_leaves_a_timer(
     )
     await orchestrator.start(shipment.id)
     await _drain(_worker(db, queue, orchestrator, repo, settings, real_registry,
-                         ScriptedLLM(CLEAN)))
+                         ScriptedLLM(CLEAN, ROUTE_ADVISORY)))
 
     async with db.connection() as conn:
         cur = await conn.execute(
@@ -119,7 +131,7 @@ async def test_incomplete_address_stops_at_needs_info(
     )
     await orchestrator.start(shipment.id)
     await _drain(_worker(db, queue, orchestrator, repo, settings, real_registry,
-                         ScriptedLLM(CLEAN)))
+                         ScriptedLLM(CLEAN, ROUTE_ADVISORY)))
 
     final = await repo.get(shipment.id)
     assert final.state is S.NEEDS_INFO

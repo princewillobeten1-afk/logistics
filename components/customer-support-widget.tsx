@@ -101,9 +101,13 @@ export function CustomerSupportWidget() {
       if (resolvedRef) {
         setReference(resolvedRef);
         setCreatedRef(resolvedRef);
+      } else if (!data.orderReference && !data.startedWork) {
+        setCreatedRef(null);
       }
       if (data.orderReference) {
         setOrderRef(data.orderReference);
+      } else if (!resolvedRef && !data.startedWork) {
+        setOrderRef(null);
       }
       if (data.startedWork || data.autonomousStarted || data.orderReference || resolvedRef) {
         router.refresh();

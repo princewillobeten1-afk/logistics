@@ -1,9 +1,11 @@
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { ThroughputChart } from "@/components/throughput-chart";
+import { relative } from "@/lib/format";
 import {
   legStats,
   modelUsage,
   overviewStats,
+  recentInsights,
   shipmentCounts,
   throughput,
 } from "@/lib/queries";
@@ -11,14 +13,15 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function Analytics() {
-  let counts, stats, legs, usage, daily;
+  let counts, stats, legs, usage, daily, insights;
   try {
-    [counts, stats, legs, usage, daily] = await Promise.all([
+    [counts, stats, legs, usage, daily, insights] = await Promise.all([
       shipmentCounts(),
       overviewStats(),
       legStats(),
       modelUsage(),
       throughput(),
+      recentInsights(),
     ]);
   } catch (error) {
     return (
@@ -195,6 +198,40 @@ export default async function Analytics() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title="AI operational briefings"
+        hint="written autonomously by the Analytics Agent over SQL facts"
+        flush
+      >
+        {insights.length === 0 ? (
+          <Empty
+            message="No briefings yet"
+            hint="The Analytics Agent generates daily briefings automatically once at least 5 shipments exist in the current 7-day window."
+          />
+        ) : (
+          <div className="body stack-md">
+            {insights.map((ins) => (
+              <article key={ins.id} className="approval">
+                <header>
+                  <div className="row-center" style={{ gap: 8 }}>
+                    <Pill state={ins.severity} />
+                    <span className="ref">{ins.topic}</span>
+                    <strong>{ins.headline}</strong>
+                  </div>
+                  <span className="expiry">{relative(ins.created_at)}</span>
+                </header>
+                <p className="summary">{ins.narrative}</p>
+                {ins.recommendation ? (
+                  <p className="rationale">
+                    <strong>Recommended:</strong> {ins.recommendation}
+                  </p>
+                ) : null}
+              </article>
+            ))}
           </div>
         )}
       </Panel>

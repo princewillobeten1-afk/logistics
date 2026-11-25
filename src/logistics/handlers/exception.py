@@ -99,6 +99,7 @@ async def investigate_exception(ctx: StepContext) -> StepResult:
 
     follow_up: list[WorkRequest] = []
     transition = None
+    proposal_decision: Decision | None = None
 
     if plan.escalate:
         events.append(
@@ -120,6 +121,7 @@ async def investigate_exception(ctx: StepContext) -> StepResult:
             rationale=f"{investigation.cause} — {investigation.recommended.rationale}",
             work_item_id=ctx.item.id,
         )
+        proposal_decision = proposal.result.decision
 
         events.append(
             EventDraft(
@@ -150,7 +152,11 @@ async def investigate_exception(ctx: StepContext) -> StepResult:
                 )
             )
 
-    if plan.notify:
+    # When the gated action itself IS sending the customer message, only send
+    # immediately if policy ALLOWed it; otherwise approval.granted sends it once
+    # a human approves (preventing unapproved or duplicate customer messages).
+    notify_is_gated_action = plan.action in ("send_whatsapp", "send_email", "send_message")
+    if plan.notify and not (notify_is_gated_action and proposal_decision is not Decision.ALLOW):
         follow_up.append(
             WorkRequest(
                 kind="customer.notify",
@@ -218,7 +224,16 @@ async def await_approval(ctx: StepContext) -> StepResult:
 
     ctx.log.info("exception.approval_requested", reference=shipment.reference)
 
+    from logistics.domain.states import ShipmentState
+
+    transition = (
+        ShipmentState.AWAITING_APPROVAL
+        if shipment.state is ShipmentState.EXCEPTION
+        else None
+    )
+
     return StepResult(
+        transition=transition,
         events=(
             EventDraft(
                 type=EventType.APPROVAL_REQUESTED,

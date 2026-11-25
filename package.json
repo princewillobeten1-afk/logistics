@@ -4,11 +4,11 @@
   "private": true,
   "description": "Operations dashboard for the AI Logistics Control Tower",
   "scripts": {
-    "dev": "NODE_ENV=development node server.ts",
+    "dev": "node -e \"process.env.NODE_ENV='development'; import('./server.ts').catch((e)=>{console.error(e);process.exit(1);});\"",
     "build": "next build",
-    "start": "NODE_ENV=production node server.ts",
+    "start": "node -e \"process.env.NODE_ENV='production'; import('./server.ts').catch((e)=>{console.error(e);process.exit(1);});\"",
     "lint": "next lint",
-    "test": "npx --yes tsx --test lib/scoring.test.ts lib/planning.test.ts lib/live-audio.test.ts lib/integrations/integrations.test.ts lib/channels/telegram.test.ts lib/agents/quota-management.test.ts lib/agents/catalog.test.ts lib/agents/autonomous.test.ts lib/agents/orchestrator.test.ts lib/controllers/action-controller.test.ts lib/view-helpers.test.ts lib/map-data.test.ts lib/map-layers.test.ts lib/maps-grounding.test.ts"
+    "test": "npx --yes tsx --test lib/scoring.test.ts lib/planning.test.ts lib/live-audio.test.ts lib/integrations/integrations.test.ts lib/channels/telegram.test.ts lib/agents/quota-management.test.ts lib/agents/catalog.test.ts lib/agents/autonomous.test.ts lib/agents/orchestrator.test.ts lib/controllers/action-controller.test.ts lib/view-helpers.test.ts lib/map-data.test.ts lib/map-layers.test.ts lib/maps-grounding.test.ts lib/agents/agents-integration.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",

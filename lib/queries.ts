@@ -133,7 +133,7 @@ export async function getShipment(reference: string) {
   const [row] = await query<ShipmentRow>(
     `SELECT id, reference, state, version, customer_ref, origin, destination,
             cargo, deadline, allocation, plan, booking, created_at, updated_at
-       FROM shipments WHERE reference = $1`,
+       FROM shipments WHERE upper(reference) = upper($1)`,
     [reference],
   );
   return row ?? null;
@@ -816,6 +816,31 @@ export async function migrations() {
   );
 }
 
+export type InsightRow = {
+  id: string;
+  topic: string;
+  headline: string;
+  narrative: string;
+  recommendation: string | null;
+  severity: string;
+  period_start: Date;
+  period_end: Date;
+  created_at: Date;
+};
+
+export async function recentInsights(limit = 12) {
+  return query<InsightRow>(
+    `SELECT id, topic, headline, narrative, recommendation, severity,
+            period_start, period_end, created_at
+       FROM insights
+      WHERE acknowledged_at IS NULL
+      ORDER BY array_position(ARRAY['ACTION_NEEDED','NOTABLE','INFO'], severity),
+               created_at DESC
+      LIMIT $1`,
+    [limit],
+  );
+}
+
 export async function openExceptions() {
   return query<{
     id: string;
@@ -1124,4 +1149,3 @@ export async function controlTowerSummary(): Promise<{
     locations,
   };
 }
-

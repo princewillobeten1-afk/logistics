@@ -848,7 +848,7 @@ export function classifyGeminiError(err: unknown): {
     return {
       status: 429,
       message:
-        "Gemini API quota or rate limit reached. Retry shortly or select a billing-enabled key in Settings > Secrets.",
+        "AI model quota or rate limit reached. Retry shortly or verify your NVIDIA_API_KEY / GEMINI_API_KEY.",
       quotaExceeded: true,
     };
   }
@@ -861,7 +861,7 @@ export function classifyGeminiError(err: unknown): {
     return {
       status: statusNum === 403 ? 403 : 400,
       message:
-        "Gemini API key is invalid or unauthorized. Please check GEMINI_API_KEY in Settings > Secrets.",
+        "AI provider API key is invalid or unauthorized. Verify NVIDIA_API_KEY or GEMINI_API_KEY.",
       quotaExceeded: false,
     };
   }
@@ -869,7 +869,7 @@ export function classifyGeminiError(err: unknown): {
   if (statusNum === 404 || /NOT_FOUND|not found for API version/i.test(message)) {
     return {
       status: 502,
-      message: "Configured Gemini model endpoint returned not found. Please retry.",
+      message: "Configured AI model endpoint returned not found. Please retry.",
       quotaExceeded: false,
     };
   }
@@ -877,7 +877,7 @@ export function classifyGeminiError(err: unknown): {
   if (statusNum === 400 || /INVALID_ARGUMENT/i.test(message)) {
     return {
       status: 400,
-      message: "Gemini rejected the structured request parameters (400 INVALID_ARGUMENT).",
+      message: "AI provider rejected the structured request parameters (400 INVALID_ARGUMENT).",
       quotaExceeded: false,
     };
   }
@@ -890,7 +890,7 @@ export function classifyGeminiError(err: unknown): {
   ) {
     return {
       status: statusNum === 504 || /TimeoutError|AbortError|timed out|aborted/i.test(message) ? 504 : 503,
-      message: `Gemini model service is temporarily unreachable (${statusNum ?? "timeout"}). Please retry shortly.`,
+      message: `AI model service is temporarily unreachable (${statusNum ?? "timeout"}). Please retry shortly.`,
       quotaExceeded: false,
     };
   }
@@ -898,21 +898,22 @@ export function classifyGeminiError(err: unknown): {
   if (/non-JSON|Unexpected token|JSON/i.test(message)) {
     return {
       status: 502,
-      message: "Gemini returned an incomplete structured JSON response. Please retry.",
+      message: "AI provider returned an incomplete structured JSON response. Please retry.",
       quotaExceeded: false,
     };
   }
 
   const safeSnippet = message
     .replace(/AIza[0-9A-Za-z_-]+/g, "[REDACTED]")
+    .replace(/nvapi-[0-9A-Za-z_-]+/g, "[REDACTED]")
     .replace(/https?:\/\/\S+/g, "[URL]")
     .slice(0, 140);
 
   return {
     status: 502,
     message: safeSnippet
-      ? `Unable to complete Gemini agent execution (${safeSnippet}).`
-      : "Unable to complete Gemini agent execution right now.",
+      ? `Unable to complete AI agent execution (${safeSnippet}).`
+      : "Unable to complete AI agent execution right now.",
     quotaExceeded: false,
   };
 }

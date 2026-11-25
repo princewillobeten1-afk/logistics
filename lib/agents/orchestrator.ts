@@ -1,4 +1,3 @@
-import { Type, type Schema } from "@google/genai";
 import { query } from "@/lib/db";
 import { matchBestConveyance } from "@/lib/planning";
 import {
@@ -14,9 +13,11 @@ import {
 } from "./catalog";
 import { gatherOperationalContext } from "./context";
 import {
-  AGENT_GEMINI_MODEL,
   generateAgentJson,
+  getActiveModelName,
+  Type,
   type GeminiGenerationMeta,
+  type Schema,
 } from "./gemini-client";
 
 const AGENT_RESPONSE_SCHEMA: Schema = {
@@ -293,7 +294,7 @@ export async function executeAgentTask({
     reference,
   );
 
-  // Orchestrator performs deterministic specialist delegation + multi-domain Gemini synthesis
+  // Orchestrator performs deterministic specialist delegation + multi-domain AI synthesis
   if (agent.id === "orchestrator") {
     const startedAt = Date.now();
     const openExc = Array.isArray(snapshot.openExceptions) ? snapshot.openExceptions.length : 0;
@@ -361,7 +362,7 @@ export async function executeAgentTask({
         shipmentId,
         agent: agent.id,
         job: trimmedTask.slice(0, 96),
-        model: AGENT_GEMINI_MODEL,
+        model: getActiveModelName(),
         status: "ERROR",
         latencyMs: Math.max(1, Date.now() - startedAt),
         promptTokens: null,
@@ -385,8 +386,7 @@ export async function executeAgentTask({
     const totalLatency = Math.max(1, Date.now() - startedAt);
     const totalPromptTokens = orchestrationRes.meta.promptTokens ?? null;
     const totalCompletionTokens = orchestrationRes.meta.completionTokens ?? null;
-
-    const executedModel = orchestrationRes.meta.model;
+    const usedModel = orchestrationRes.meta.model;
 
     await Promise.all([
       ...finalResult.delegations.map((del) => {
@@ -395,7 +395,7 @@ export async function executeAgentTask({
           shipmentId: match?.subCtx.shipmentId ?? shipmentId,
           agent: del.agentId,
           job: `Delegated: ${del.task.slice(0, 72)}`,
-          model: executedModel,
+          model: usedModel,
           status: "OK",
           latencyMs: totalLatency,
           promptTokens: null,
@@ -408,7 +408,7 @@ export async function executeAgentTask({
         shipmentId,
         agent: agent.id,
         job: trimmedTask.slice(0, 96),
-        model: executedModel,
+        model: usedModel,
         status: "OK",
         latencyMs: totalLatency,
         promptTokens: totalPromptTokens,
@@ -434,7 +434,8 @@ export async function executeAgentTask({
       agent,
       result: finalResult,
       meta: {
-        model: executedModel,
+        model: usedModel,
+        provider: orchestrationRes.meta.provider,
         latencyMs: totalLatency,
         promptTokens: totalPromptTokens,
         completionTokens: totalCompletionTokens,
@@ -464,7 +465,7 @@ export async function executeAgentTask({
       shipmentId,
       agent: agent.id,
       job: trimmedTask.slice(0, 96),
-      model: AGENT_GEMINI_MODEL,
+      model: getActiveModelName(),
       status: "ERROR",
       latencyMs: Math.max(1, Date.now() - singleStartedAt),
       promptTokens: null,
@@ -898,14 +899,16 @@ export async function runFleetOptimizationWithGemini(): Promise<{
     });
   }
 
-  // Deterministically match idle compliant vehicles for any eligible shipment still missing a vehicle
+  // Deterministically match idle compliant vehicles for any eligible shipment still missing a vehicle.
+  // Never double-assign a vehicle and never assign a non-compliant vehicle to hazmat/reefer/overweight cargo.
   const usedRegistrations = new Set<string>();
-  for (const plan of plannedWrites.values()) {
+  for (const planObj of plannedWrites.values()) {
     const reg =
-      typeof plan.assigned_vehicle === "string" ? plan.assigned_vehicle.trim().toUpperCase() : "";
+      typeof planObj.assigned_vehicle === "string"
+        ? planObj.assigned_vehicle.trim().toUpperCase()
+        : "";
     if (reg) usedRegistrations.add(reg);
   }
-
   for (const ship of eligible) {
     const existingPlan = plannedWrites.get(ship.id) ?? ship.plan ?? {};
     const hasVehicle = Boolean(
@@ -930,7 +933,7 @@ export async function runFleetOptimizationWithGemini(): Promise<{
         usedRegistrations.add(match.registration.trim().toUpperCase());
         plannedWrites.set(ship.id, {
           ...existingPlan,
-          assigned_vehicle: match.registration,
+          assigned_vehicle: match.registration.trim(),
           routing_solver: "route-fleet-optimizer",
           optimized_at: new Date().toISOString(),
         });
@@ -998,6 +1001,7 @@ export async function runFleetOptimizationWithGemini(): Promise<{
     result: normalized,
     meta: {
       model: res.meta.model,
+      provider: res.meta.provider,
       latencyMs: totalLatency,
       promptTokens: res.meta.promptTokens,
       completionTokens: res.meta.completionTokens,

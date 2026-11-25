@@ -50,20 +50,26 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
   const [sessionKey] = useState(
     () => `portal:${Math.random().toString(36).slice(2, 10)}`,
   );
+  const [followUpTicks, setFollowUpTicks] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [turns, pending]);
 
+  // Auto-load shipment details when linked via `/track?ref=...`
   useEffect(() => {
-    if (!initialReference) return;
+    if (!initialReference?.trim()) return;
     let active = true;
-    (async () => {
+    void (async () => {
       const found = await lookupShipment(initialReference);
       if (active && found) {
         setShipment(found);
-        const conv = await conversation(found.reference, sessionKey, channel);
+        const conv = await conversation(
+          found.reference,
+          `${channel.toLowerCase()}:${sessionKey}`,
+          channel,
+        );
         if (active) setTurns(conv.turns);
       }
     })();
@@ -71,6 +77,43 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
       active = false;
     };
   }, [initialReference, sessionKey, channel]);
+
+  // Quietly catch delegated `support.create_shipment` / WPCargo confirmations after reply.
+  useEffect(() => {
+    if (followUpTicks <= 0 || pending) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const latest = await conversation(
+        shipment?.reference ?? "",
+        `${channel.toLowerCase()}:${sessionKey}`,
+        channel,
+      );
+      if (cancelled) return;
+      const gotNewTurn = latest.turns.length > turns.length;
+      if (gotNewTurn) {
+        setTurns(latest.turns);
+      }
+      if (
+        latest.activeReference &&
+        (!shipment || shipment.reference !== latest.activeReference)
+      ) {
+        const created = await lookupShipment(latest.activeReference);
+        if (!cancelled && created) {
+          setShipment(created);
+          setReference(created.reference);
+          if (gotNewTurn) {
+            setFollowUpTicks(0);
+            return;
+          }
+        }
+      }
+      setFollowUpTicks((n) => Math.max(0, n - 1));
+    }, 1500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [followUpTicks, pending, shipment, turns.length, sessionKey, channel]);
 
   function track(event: React.FormEvent) {
     event.preventDefault();
@@ -83,7 +126,11 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
         return;
       }
       setShipment(found);
-      const conv = await conversation(found.reference, sessionKey, channel);
+      const conv = await conversation(
+        found.reference,
+        `${channel.toLowerCase()}:${sessionKey}`,
+        channel,
+      );
       setTurns(conv.turns);
     });
   }
@@ -93,6 +140,7 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
     const asked = text.trim();
     setQuestion("");
     setError(null);
+    setFollowUpTicks(0);
     setTurns((prev) => [
       ...prev,
       { role: "customer", text: asked, at: new Date().toISOString() },
@@ -117,19 +165,31 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
         ]);
       }
 
+      let refreshed: TrackResult | null = null;
       if (result.reference) {
-        const refreshed = await lookupShipment(result.reference);
+        refreshed = await lookupShipment(result.reference);
         if (refreshed) {
           setShipment(refreshed);
           setReference(refreshed.reference);
         }
       }
 
-      if (result.autonomousStarted || result.orderReference || result.reference) {
+      const workflowStarted =
+        Boolean(result.orderReference) ||
+        (Boolean(result.autonomousStarted) && result.intent !== "TRACKING_INQUIRY");
+
+      if (workflowStarted && (refreshed || result.orderReference)) {
         setWorkNotice({
-          shipmentReference: result.reference ?? null,
+          shipmentReference: refreshed?.reference ?? null,
           orderReference: result.orderReference ?? null,
         });
+        setFollowUpTicks(8);
+      } else if (workflowStarted) {
+        setWorkNotice(null);
+        setFollowUpTicks(8);
+      } else {
+        setWorkNotice(null);
+        setFollowUpTicks(0);
       }
     });
   }

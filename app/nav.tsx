@@ -221,7 +221,7 @@ export function NavShell({
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}
               transition={{ duration: 0.18, ease: "easeOut" }}
-              onClick={(e) => e.stopPropagation()}
+              onClick={(e: React.MouseEvent) => e.stopPropagation()}
             >
               <div className="brand">
                 <div className="brand-lockup">

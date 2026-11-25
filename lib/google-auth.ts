@@ -159,14 +159,15 @@ export async function connectGmailWithGoogle(): Promise<{
       browserPopupRedirectResolver,
     );
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
+    const accessToken = credential?.accessToken;
+    if (!accessToken) {
       throw new Error("Failed to obtain Gmail access token from Google.");
     }
 
-    cachedAccessToken = credential.accessToken;
+    cachedAccessToken = accessToken;
     cachedTokenEmail = result.user.email ?? null;
 
-    return { user: result.user, accessToken: cachedAccessToken };
+    return { user: result.user, accessToken };
   } finally {
     isSigningIn = false;
   }

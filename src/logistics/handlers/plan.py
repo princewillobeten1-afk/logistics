@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 from logistics.domain.events import EventDraft
 from logistics.domain.legs import TransportMode, modes_for_cargo
 from logistics.domain.models import LegDraft, Shipment, StepResult
-from logistics.domain.states import ShipmentState
+from logistics.domain.states import ShipmentState, is_terminal
 from logistics.handlers.base import StepContext, handler
 from logistics.routing.cuopt import (
     CuOptClient,
@@ -26,6 +26,7 @@ from logistics.routing.cuopt import (
     FleetVehicle,
     ai_route_advisory,
     corridor_waypoints,
+    expand_route_waypoints,
 )
 
 _NAIRA: Final = 100  # kobo per naira
@@ -232,6 +233,10 @@ def build_itinerary(
 @handler("planning.plan")
 async def plan(ctx: StepContext) -> StepResult:
     shipment = ctx.require_shipment()
+    if is_terminal(shipment.state):
+        ctx.log.info("plan.ignored_terminal", state=str(shipment.state))
+        return StepResult()
+
     cargo = shipment.cargo or {}
     weight = float(cargo.get("weight_kg") or 0)
     hazmat = bool(cargo.get("hazmat") or cargo.get("hazmat_class"))
@@ -282,12 +287,25 @@ async def plan(ctx: StepContext) -> StepResult:
         routing_solver=summary.get("routing_solver"),
     )
 
-    await _write_checkpoints(ctx, legs, total_hours)
+    # Only advance state to PLANNED when entering from ALLOCATED or EXCEPTION;
+    # re-planning an already PLANNED/SOURCING/BOOKED/IN_TRANSIT shipment updates
+    # the plan metadata without violating the state machine or overwriting committed legs.
+    can_advance = shipment.state in (ShipmentState.ALLOCATED, ShipmentState.EXCEPTION)
+    legs_committed = shipment.state in (
+        ShipmentState.BOOKED,
+        ShipmentState.IN_TRANSIT,
+        ShipmentState.DELIVERED,
+        ShipmentState.POD_VERIFIED,
+    )
+    if not legs_committed:
+        await _write_checkpoints(ctx, legs, total_hours)
+
+    merged_plan = {**(shipment.plan or {}), **summary} if not can_advance else summary
 
     return StepResult(
-        transition=ShipmentState.PLANNED,
-        patch={"plan": summary},
-        legs=tuple(legs),
+        transition=ShipmentState.PLANNED if can_advance else None,
+        patch={"plan": merged_plan},
+        legs=() if legs_committed else tuple(legs),
         events=(EventDraft(type="planning.estimated", actor="planning", payload=summary),),
     )
 
@@ -297,7 +315,6 @@ async def optimize_fleet(ctx: StepContext) -> StepResult:
     """Batch-optimize all queued/active shipments across available fleet vehicles
     using NVIDIA cuOpt Pickup & Delivery with Time Windows (PDPTW)."""
     custom_coords = await _load_db_coordinates(ctx)
-    vehicles = await _load_fleet_vehicles(ctx)
 
     async with ctx.db.connection() as conn:
         cur = await conn.execute(
@@ -344,6 +361,9 @@ async def optimize_fleet(ctx: StepContext) -> StepResult:
     if not tasks:
         return StepResult()
 
+    max_latest_h = max(72, *(t.latest_hour for t in tasks))
+    vehicles = await _load_fleet_vehicles(ctx, latest_hour=max_latest_h)
+
     client = CuOptClient(ctx.settings, db=ctx.db)
     solution = await client.solve(
         vehicles,
@@ -365,6 +385,11 @@ async def optimize_fleet(ctx: StepContext) -> StepResult:
                 if not s_row:
                     continue
                 existing_plan = dict(s_row["plan"] or {})
+                src_city = _city(s_row["origin"] or {}) or (s_row["origin"] or {}).get("address") or "Lagos"
+                dst_city = _city(s_row["destination"] or {}) or (s_row["destination"] or {}).get("address") or "Abuja"
+                lane_waypoints = corridor_waypoints(str(src_city), str(dst_city))
+                if len(lane_waypoints) <= 2 and assignment.stop_locations:
+                    lane_waypoints = expand_route_waypoints(assignment.stop_locations)
                 existing_plan.update(
                     {
                         "routing_solver": solution.solver,
@@ -372,7 +397,7 @@ async def optimize_fleet(ctx: StepContext) -> StepResult:
                         "cuopt_request_id": solution.request_id,
                         "cuopt_solution_cost": solution.solution_cost,
                         "assigned_vehicle": assignment.vehicle_id,
-                        "waypoints": assignment.stop_locations,
+                        "waypoints": lane_waypoints,
                         "stop_sequence": assignment.task_ids,
                         "optimized_at": datetime.now(UTC).isoformat(),
                     }
@@ -544,6 +569,7 @@ async def _load_fleet_vehicles(
     destination: str = "Abuja",
     weight_kg: float = 1_000,
     hazmat: bool = False,
+    latest_hour: int = 72,
 ) -> list[FleetVehicle]:
     async with ctx.db.connection() as conn:
         cur = await conn.execute(
@@ -572,6 +598,7 @@ async def _load_fleet_vehicles(
                 start_location=origin,
                 end_location=destination,
                 capacity_kg=cap,
+                latest_hour=max(72, latest_hour),
             )
         )
 
@@ -582,6 +609,7 @@ async def _load_fleet_vehicles(
                 start_location=origin,
                 end_location=destination,
                 capacity_kg=max(15_000, int(weight_kg or 1_000)),
+                latest_hour=max(72, latest_hour),
             )
         )
     return vehicles

@@ -104,7 +104,7 @@ def _deterministic_issues(shipment) -> list[ValidationIssue]:  # noqa: ANN001
         issues.append(ValidationIssue(
             field="cargo.weight_kg", severity="blocking", detail="Weight is missing."
         ))
-    elif not isinstance(weight, int | float) or weight <= 0:
+    elif isinstance(weight, bool) or not isinstance(weight, int | float) or weight <= 0:
         issues.append(ValidationIssue(
             field="cargo.weight_kg", severity="blocking", detail=f"Weight {weight!r} is not positive."
         ))
@@ -115,7 +115,7 @@ def _deterministic_issues(shipment) -> list[ValidationIssue]:  # noqa: ANN001
         ))
 
     quantity = cargo.get("quantity")
-    if quantity is not None and (not isinstance(quantity, int) or quantity <= 0):
+    if quantity is not None and (isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0):
         issues.append(ValidationIssue(
             field="cargo.quantity", severity="blocking", detail=f"Quantity {quantity!r} is invalid."
         ))

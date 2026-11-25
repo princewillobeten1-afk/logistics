@@ -73,14 +73,18 @@ _TRANSITIONS: Final[dict[ShipmentState, frozenset[ShipmentState]]] = {
         {_S.AWAITING_APPROVAL, _S.BOOKED, _S.PLANNED, _S.EXCEPTION, _S.CANCELLED, _S.FAILED}
     ),
     # A rejected approval goes back to PLANNED to source again with the next
-    # carrier; SOURCING stays reachable for a re-open that keeps the round.
+    # carrier; SOURCING stays reachable for a re-open that keeps the round;
+    # IN_TRANSIT is reachable when an exception approval (e.g. delay notice or
+    # expedite fee) clears on a moving shipment.
     _S.AWAITING_APPROVAL: frozenset(
-        {_S.BOOKED, _S.SOURCING, _S.PLANNED, _S.EXCEPTION, _S.CANCELLED, _S.FAILED}
+        {_S.BOOKED, _S.IN_TRANSIT, _S.SOURCING, _S.PLANNED, _S.EXCEPTION, _S.CANCELLED, _S.FAILED}
     ),
     _S.BOOKED: frozenset({_S.IN_TRANSIT, _S.EXCEPTION, _S.CANCELLED, _S.FAILED}),
     _S.IN_TRANSIT: frozenset({_S.DELIVERED, _S.EXCEPTION, _S.FAILED}),
+    # PLANNED is reachable so exception recovery (RESOURCE_CARRIER) can re-run
+    # carrier sourcing cleanly through the standard state route.
     _S.EXCEPTION: frozenset(
-        {_S.IN_TRANSIT, _S.SOURCING, _S.AWAITING_APPROVAL, _S.DELIVERED, _S.CANCELLED, _S.FAILED}
+        {_S.IN_TRANSIT, _S.PLANNED, _S.SOURCING, _S.AWAITING_APPROVAL, _S.DELIVERED, _S.CANCELLED, _S.FAILED}
     ),
     # A short-delivery or damage finding at POD reopens as an exception.
     _S.DELIVERED: frozenset({_S.POD_VERIFIED, _S.EXCEPTION}),

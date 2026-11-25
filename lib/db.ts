@@ -1,6 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Pool, type PoolClient, type QueryResult } from "pg";
 
 import {
@@ -18,7 +27,15 @@ const globalForPg = globalThis as unknown as {
   pgUnavailableUntil?: number;
 };
 
-const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
+const IS_TEST_RUNNER =
+  Boolean(process.env.NODE_TEST_CONTEXT) ||
+  process.argv.includes("--test") ||
+  process.execArgv.includes("--test");
+
+const CUSTOM_LOCAL_STORE_PATH = process.env.LOGISTICS_LOCAL_STORE_PATH?.trim();
+const LOCAL_STORE_PATH =
+  CUSTOM_LOCAL_STORE_PATH || path.join(tmpdir(), "logistics-local-store.json");
+const PERSIST_LOCAL_STORE = !IS_TEST_RUNNER || Boolean(CUSTOM_LOCAL_STORE_PATH);
 
 type LocalOrg = { id: string; name: string; slug: string; active: boolean };
 type LocalUser = {
@@ -84,20 +101,22 @@ function reviveLocalStore(raw: unknown): LocalStore {
 }
 
 function getLocalStore(): LocalStore {
-  try {
-    if (existsSync(LOCAL_STORE_PATH)) {
-      const mtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
-      if (
-        !globalForPg.logisticsLocalStore ||
-        globalForPg.logisticsLocalMtimeMs !== mtimeMs
-      ) {
-        const parsed = JSON.parse(readFileSync(LOCAL_STORE_PATH, "utf8"));
-        globalForPg.logisticsLocalStore = reviveLocalStore(parsed);
-        globalForPg.logisticsLocalMtimeMs = mtimeMs;
+  if (PERSIST_LOCAL_STORE) {
+    try {
+      if (existsSync(LOCAL_STORE_PATH)) {
+        const mtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
+        if (
+          !globalForPg.logisticsLocalStore ||
+          globalForPg.logisticsLocalMtimeMs !== mtimeMs
+        ) {
+          const parsed = JSON.parse(readFileSync(LOCAL_STORE_PATH, "utf8"));
+          globalForPg.logisticsLocalStore = reviveLocalStore(parsed);
+          globalForPg.logisticsLocalMtimeMs = mtimeMs;
+        }
       }
+    } catch {
+      // Fall back to in-memory store if temp file read fails
     }
-  } catch {
-    // Fall back to in-memory store if temp file read fails
   }
 
   if (!globalForPg.logisticsLocalStore) {
@@ -114,10 +133,18 @@ function getLocalStore(): LocalStore {
 
 function saveLocalStore(store: LocalStore): void {
   globalForPg.logisticsLocalStore = store;
+  if (!PERSIST_LOCAL_STORE) return;
+  const tmpFile = `${LOCAL_STORE_PATH}.${process.pid}.tmp`;
   try {
-    writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store), "utf8");
+    writeFileSync(tmpFile, JSON.stringify(store), "utf8");
+    renameSync(tmpFile, LOCAL_STORE_PATH);
     globalForPg.logisticsLocalMtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
   } catch {
+    try {
+      unlinkSync(tmpFile);
+    } catch {
+      // Ignore cleanup errors
+    }
     // Ignore disk write issues in read-only environments
   }
 }
@@ -470,11 +497,36 @@ function localQuery(
     return ok([{ ...s, open_exceptions: String(openExc) }]);
   }
 
-  // 7. Assistant / Track / Approval shipment lookup
-  if (/SELECT id(?:,\s*reference)? FROM shipments WHERE upper\(reference\) = (?:upper\(\$1\)|\$1)/i.test(sql)) {
+  // 7. Assistant / Track / Approval / Autonomous shipment lookup
+  if (/SELECT id(?:,\s*reference)?[\s\S]*FROM shipments[\s\S]*WHERE upper\(reference\) = (?:upper\(\$1\)|\$1)/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
-    const s = seed.shipments.find((x) => x.reference.toUpperCase() === ref);
+    const s = seed.shipments.find(
+      (x) =>
+        x.reference.toUpperCase() === ref ||
+        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
+    );
     return s ? ok([{ id: s.id, reference: s.reference }], 1) : ok([]);
+  }
+
+  if (/SELECT reference,\s*state,\s*origin,\s*destination,\s*plan,\s*booking[\s\S]*FROM shipments/i.test(sql)) {
+    const ref = String(params[0] ?? "").trim().toUpperCase();
+    const s = seed.shipments.find(
+      (x) =>
+        x.reference.toUpperCase() === ref ||
+        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
+    );
+    return s
+      ? ok([
+          {
+            reference: s.reference,
+            state: s.state,
+            origin: s.origin,
+            destination: s.destination,
+            plan: s.plan,
+            booking: s.booking,
+          },
+        ])
+      : ok([]);
   }
 
   if (/SELECT reference FROM shipments WHERE id = \$1/i.test(sql)) {
@@ -1168,14 +1220,31 @@ function localQuery(
       ? rawSev
       : "HIGH") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
     const detectedBy = String(params[3] ?? "autonomous_intake");
+    const hasSummaryCol = /,\s*summary\s*,\s*detail\)/i.test(sql);
+    const rawDetail = hasSummaryCol ? params[5] : params[4];
     let detail: Record<string, unknown> = {};
     try {
       detail =
-        typeof params[4] === "string"
-          ? JSON.parse(params[4])
-          : ((params[4] as Record<string, unknown>) ?? {});
+        typeof rawDetail === "string"
+          ? JSON.parse(rawDetail)
+          : ((rawDetail as Record<string, unknown>) ?? {});
     } catch {
       detail = {};
+    }
+    if (hasSummaryCol && params[4] != null && !detail.summary) {
+      detail.summary = String(params[4]);
+    }
+    const existing = seed.exceptions.find(
+      (e) =>
+        e.shipment_id === shipmentId &&
+        e.kind === kind &&
+        String(e.state) !== "RESOLVED" &&
+        String(e.state) !== "ABANDONED",
+    );
+    if (existing) {
+      existing.detail = detail;
+      saveLocalStore(store);
+      return ok([{ id: existing.id }], 1);
     }
     seed.exceptions.unshift({
       id,
@@ -1541,7 +1610,7 @@ function localQuery(
     return ok(rows as unknown as Record<string, unknown>[]);
   }
 
-  if (/UPDATE shipments\s+SET plan = \$1::jsonb/i.test(sql)) {
+  if (/UPDATE shipments[\s\S]*SET plan = (?:COALESCE\(plan,\s*'\{\}'::jsonb\)\s*\|\|\s*)?\$1::jsonb/i.test(sql)) {
     const rawPlan = params[0];
     let parsedPlan: Record<string, unknown> = {};
     if (typeof rawPlan === "string") {
@@ -2251,16 +2320,17 @@ function localQuery(
   }
 
   // Telemetry vehicle GPS update
-  if (/UPDATE conveyances[\s\S]*last_lat/i.test(sql)) {
+  if (/UPDATE conveyances[\s\S]*(?:last_lat|identifiers)/i.test(sql)) {
+    const isJsonbForm = /identifiers/i.test(sql) && params.length >= 5;
     const lat = String(params[0] ?? "");
     const lon = String(params[1] ?? "");
-    const speed = params[2] != null ? String(params[2]) : null;
-    const reg = String(params[3] ?? "").trim().toUpperCase();
+    const speedRaw = params[2] != null && String(params[2]) !== "" ? String(params[2]) : null;
+    const reg = String(isJsonbForm ? (params[4] ?? "") : (params[3] ?? "")).trim().toUpperCase();
     const conv = seed.conveyances.find((c) => c.registration.toUpperCase() === reg);
     if (conv) {
       conv.last_lat = lat;
       conv.last_lon = lon;
-      conv.last_speed = speed;
+      conv.last_speed = speedRaw;
       conv.last_seen_at = new Date();
       saveLocalStore(store);
       return ok([{ id: conv.id, registration: conv.registration }], 1);
@@ -2283,19 +2353,77 @@ function localQuery(
       last_seen_at: new Date(),
       last_lat: lat,
       last_lon: lon,
-      last_speed: speed,
+      last_speed: speedRaw,
     };
     seed.conveyances.unshift(newConv);
     saveLocalStore(store);
     return ok([{ id: newConv.id, registration: newConv.registration }], 1);
   }
 
+  if (/FROM shipment_legs l\s+JOIN conveyances v/i.test(sql)) {
+    const reg = String(params[0] ?? "").trim().toUpperCase();
+    const conv = seed.conveyances.find((c) => c.registration.toUpperCase() === reg);
+    if (!conv?.assigned_to) return ok([]);
+    const ship = seed.shipments.find((s) => s.reference === conv.assigned_to);
+    return ship ? ok([{ shipment_id: ship.id }]) : ok([]);
+  }
+
+  if (/INSERT INTO tracking_events/i.test(sql)) {
+    const shipmentId = String(params[0] ?? "");
+    const ship = shipById(shipmentId);
+    if (ship && params[1] != null && params[2] != null) {
+      const conv = seed.conveyances.find((c) => c.assigned_to === ship.reference);
+      if (conv) {
+        conv.last_lat = String(params[1]);
+        conv.last_lon = String(params[2]);
+        conv.last_speed = params[3] != null ? String(params[3]) : conv.last_speed;
+        conv.last_seen_at = new Date();
+        saveLocalStore(store);
+      }
+    }
+    return ok([], 1);
+  }
+
+  if (/SELECT id FROM warehouses WHERE upper\(code\)/i.test(sql)) {
+    const code = String(params[0] ?? "").trim().toUpperCase();
+    const wh = seed.warehouses.find((w) => w.code.toUpperCase() === code);
+    return wh ? ok([{ id: wh.id }]) : ok([]);
+  }
+
+  if (/INSERT INTO warehouses\s*\(/i.test(sql)) {
+    const code = String(params[0] ?? "MAIN-WH").trim().toUpperCase();
+    const name = String(params[1] ?? code);
+    const existing = seed.warehouses.find((w) => w.code.toUpperCase() === code);
+    if (existing) return ok([{ id: existing.id }], 1);
+    const newWh = {
+      id: `wh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      code,
+      name,
+      dispatch_lead_hours: "8",
+      handles_hazmat: false,
+      handles_reefer: false,
+      active: true,
+      city: "Lagos",
+      country: "NG",
+      latitude: "6.5244",
+      longitude: "3.3792",
+      skus: "0",
+      on_hand: "0",
+      reserved: "0",
+    };
+    seed.warehouses.unshift(newWh);
+    saveLocalStore(store);
+    return ok([{ id: newWh.id }], 1);
+  }
+
   // Warehouse inventory sync upsert
   if (/INSERT INTO inventory/i.test(sql)) {
-    const wh = String(params[0] ?? "MAIN-WH").trim().toUpperCase();
+    const rawWh = String(params[0] ?? "MAIN-WH").trim();
+    const byId = seed.warehouses.find((w) => w.id === rawWh);
+    const wh = (byId ? byId.code : rawWh).toUpperCase();
     const sku = String(params[1] ?? "SKU-UNKNOWN").trim().toUpperCase();
     const onHand = Math.max(0, Math.round(Number(params[2] ?? 0)));
-    const reserved = Math.max(0, Math.round(Number(params[3] ?? 0)));
+    const reserved = Math.min(onHand, Math.max(0, Math.round(Number(params[3] ?? 0))));
     const available = Math.max(0, onHand - reserved);
     const existing = seed.inventory.find(
       (i) => i.warehouse.toUpperCase() === wh && i.sku.toUpperCase() === sku,
@@ -2313,8 +2441,22 @@ function localQuery(
         available,
       });
     }
+    if (byId) {
+      const whItems = seed.inventory.filter((i) => i.warehouse.toUpperCase() === wh);
+      byId.skus = String(whItems.length);
+      byId.on_hand = String(whItems.reduce((sum, i) => sum + i.on_hand, 0));
+      byId.reserved = String(whItems.reduce((sum, i) => sum + i.reserved, 0));
+    }
     saveLocalStore(store);
     return ok([{ warehouse: wh, sku, on_hand: onHand, reserved, available }], 1);
+  }
+
+  if (/FROM insights/i.test(sql)) {
+    return ok([]);
+  }
+
+  if (/INSERT INTO (?:channel_connections|policies)/i.test(sql)) {
+    return ok([], 1);
   }
 
   // Fallback for unhandled queries
@@ -2424,6 +2566,7 @@ function isConnectionError(err: unknown): boolean {
   const code = (err as { code?: string })?.code;
   if (
     code === "ECONNREFUSED" ||
+    code === "EACCES" ||
     code === "ENOTFOUND" ||
     code === "ETIMEDOUT" ||
     code === "ECONNRESET"

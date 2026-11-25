@@ -51,6 +51,8 @@ export async function lookupShipment(
 ): Promise<TrackResult | null> {
   const trimmed = reference.trim().toUpperCase();
   if (!trimmed) return null;
+  const user = await currentUser();
+  if (!user) return null;
 
   const rows = await query<{
     state: string;
@@ -117,16 +119,44 @@ export async function conversation(
   const trimmedRef = reference?.trim().toUpperCase() || "";
   const dbChannel = channel === "WEBSITE_CHAT" ? "WIDGET" : channel;
 
+  const contacts = await query<{ id: string; last_ref: string | null }>(
+    `SELECT c.id,
+            (SELECT s.reference FROM shipments s WHERE s.id = c.last_shipment_id) AS last_ref
+       FROM channel_contacts c
+      WHERE c.channel = $1 AND c.external_id = $2
+      LIMIT 1`,
+    [dbChannel, extId],
+  );
+  const contact = contacts[0] ?? null;
+
   if (trimmedRef) {
-    const rows = await query<{ direction: string; body: string; created_at: Date }>(
-      `SELECT m.direction, m.body, m.created_at
-         FROM communications m
-         JOIN shipments s ON s.id = m.shipment_id
-        WHERE upper(s.reference) = $1
-          AND m.channel IN ('WIDGET', 'PORTAL', 'WHATSAPP', 'TELEGRAM')
-        ORDER BY m.created_at`,
-      [trimmedRef],
-    );
+    // Preserve pre-booking chat turns from this same session once the newly
+    // created shipment is linked, so the conversation never resets mid-chat.
+    const includeSessionPreBooking =
+      contact !== null &&
+      contact.last_ref !== null &&
+      contact.last_ref.toUpperCase() === trimmedRef;
+
+    const rows = includeSessionPreBooking
+      ? await query<{ direction: string; body: string; created_at: Date }>(
+          `SELECT m.direction, m.body, m.created_at
+             FROM communications m
+             LEFT JOIN shipments s ON s.id = m.shipment_id
+            WHERE (upper(s.reference) = $1
+                   AND m.channel IN ('WIDGET', 'PORTAL', 'WHATSAPP', 'TELEGRAM'))
+               OR (m.contact_id = $2 AND m.shipment_id IS NULL)
+            ORDER BY m.created_at`,
+          [trimmedRef, contact.id],
+        )
+      : await query<{ direction: string; body: string; created_at: Date }>(
+          `SELECT m.direction, m.body, m.created_at
+             FROM communications m
+             JOIN shipments s ON s.id = m.shipment_id
+            WHERE upper(s.reference) = $1
+              AND m.channel IN ('WIDGET', 'PORTAL', 'WHATSAPP', 'TELEGRAM')
+            ORDER BY m.created_at`,
+          [trimmedRef],
+        );
     return {
       turns: rows.map((r) => ({
         role: r.direction === "INBOUND" ? "customer" : "agent",
@@ -137,15 +167,7 @@ export async function conversation(
     };
   }
 
-  const contacts = await query<{ id: string; last_ref: string | null }>(
-    `SELECT c.id,
-            (SELECT s.reference FROM shipments s WHERE s.id = c.last_shipment_id) AS last_ref
-       FROM channel_contacts c
-      WHERE c.channel = $1 AND c.external_id = $2
-      LIMIT 1`,
-    [dbChannel, extId],
-  );
-  const contact = contacts[0];
+  // Session-based conversation (e.g. booking a new shipment via support chat)
   if (!contact) {
     return { turns: [], activeReference: null };
   }
@@ -213,12 +235,20 @@ export async function askQuestion(
     revalidatePath("/queue");
     revalidatePath("/activity");
 
+    const verifiedShipment = out.shipmentReference
+      ? await lookupShipment(out.shipmentReference).catch(() => null)
+      : null;
+    const verifiedReference = verifiedShipment?.reference ?? null;
+    const autonomousStarted =
+      Boolean(out.startedWork) &&
+      (Boolean(out.orderReference) || out.intent !== "TRACKING_INQUIRY");
+
     return {
       ok: true,
       reply: out.reply,
-      reference: out.shipmentReference ?? null,
+      reference: verifiedReference,
       orderReference: out.orderReference ?? null,
-      autonomousStarted: Boolean(out.startedWork),
+      autonomousStarted,
       intent: out.intent,
     };
   } catch (error) {

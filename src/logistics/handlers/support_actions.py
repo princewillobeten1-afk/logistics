@@ -18,7 +18,11 @@ from logistics.handlers.base import PermanentFailure, StepContext, handler
 from logistics.orchestrator.orchestrator import Orchestrator
 from logistics.orchestrator.queue import WorkQueue
 from logistics.shipments import ShipmentRepo
-from logistics.support.wpcargo import WPCargoSubmission, submit_wpcargo_shipment
+from logistics.support.wpcargo import (
+    WPCargoSubmission,
+    status_for_shipment_state,
+    submit_wpcargo_shipment,
+)
 
 # A contact may create at most this many shipments an hour. Anyone can message
 # a Telegram bot — there is no authentication — so this is what stops one
@@ -196,6 +200,88 @@ async def create_shipment(ctx: StepContext) -> StepResult:
     return StepResult()
 
 
+@handler("wpcargo.sync")
+async def sync_wpcargo(ctx: StepContext) -> StepResult:
+    """Publish an existing shipment created via web/API/omnichannel intake onto
+    the configured WordPress WPCargo admin portal, idempotently."""
+    shipment = ctx.require_shipment()
+    if not ctx.settings.has_wpcargo:
+        ctx.log.info("wpcargo.sync_skipped_unconfigured", reference=shipment.reference)
+        return StepResult()
+
+    origin = dict(shipment.origin or {})
+    if origin.get("wpcargo_post_id"):
+        ctx.log.info(
+            "wpcargo.sync_already_registered",
+            reference=shipment.reference,
+            post_id=origin.get("wpcargo_post_id"),
+        )
+        return StepResult()
+
+    destination = dict(shipment.destination or {})
+    cargo = dict(shipment.cargo or {})
+    payload = ctx.item.payload or {}
+
+    pickup = str(origin.get("address") or origin.get("city") or "")
+    dest = str(destination.get("address") or destination.get("city") or "")
+    order: dict[str, Any] = {
+        "pickup": pickup,
+        "destination": dest,
+        "description": str(cargo.get("description") or "General Cargo"),
+        "quantity": cargo.get("quantity") or 1,
+        "weight_kg": cargo.get("weight_kg"),
+        "piece_type": cargo.get("piece_type") or "Carton",
+        "deadline": shipment.deadline.isoformat() if shipment.deadline else None,
+        "shipper_name": str(
+            origin.get("contact_name") or payload.get("customerName") or ""
+        ),
+        "shipper_phone": str(origin.get("contact_phone") or ""),
+        "shipper_email": str(
+            origin.get("contact_email") or payload.get("customerEmail") or ""
+        ),
+        "receiver_name": str(destination.get("contact_name") or ""),
+        "receiver_phone": str(destination.get("contact_phone") or ""),
+        "receiver_email": str(destination.get("contact_email") or ""),
+        "status": status_for_shipment_state(str(shipment.state)),
+        "remarks": (
+            f"Synced autonomously from Control Tower ({payload.get('sourceChannel', 'PORTAL')}) "
+            f"for shipment {shipment.reference}."
+        ),
+    }
+
+    submission = await submit_wpcargo_shipment(
+        ctx.settings,
+        order,
+        fallback_reference=shipment.reference,
+    )
+
+    origin["wpcargo_post_id"] = submission.post_id
+    origin["wpcargo_reference"] = submission.reference
+    origin["wpcargo_edit_url"] = submission.edit_url
+
+    ctx.log.info(
+        "wpcargo.synced",
+        reference=shipment.reference,
+        wpcargo_post_id=submission.post_id,
+        wpcargo_reference=submission.reference,
+    )
+
+    return StepResult(
+        patch={"origin": origin},
+        events=(
+            EventDraft(
+                type="wpcargo.registered",
+                actor="agent:support",
+                payload={
+                    "post_id": submission.post_id,
+                    "reference": submission.reference,
+                    "edit_url": submission.edit_url,
+                },
+            ),
+        ),
+    )
+
+
 @handler("support.change_request")
 async def change_request(ctx: StepContext) -> StepResult:
     """Route a customer's change request through the policy gate.
@@ -204,6 +290,11 @@ async def change_request(ctx: StepContext) -> StepResult:
     approval-required in the active policy, so this lands in the approval queue
     and an operator decides.
     """
+    from logistics.approvals import ApprovalRepo
+    from logistics.domain.events import EventType
+    from logistics.domain.models import WorkRequest
+    from logistics.orchestrator.policy import Decision
+
     shipment = ctx.require_shipment()
     policy = ctx.require_policy()
     payload = ctx.item.payload
@@ -226,6 +317,47 @@ async def change_request(ctx: StepContext) -> StepResult:
         work_item_id=ctx.item.id,
     )
 
+    events: list[EventDraft] = [
+        EventDraft(
+            type="customer.change_requested",
+            actor="agent:support",
+            payload={
+                "kind": kind,
+                "detail": detail,
+                "decision": str(proposal.result.decision),
+            },
+        ),
+    ]
+    follow_up: list[WorkRequest] = []
+
+    if proposal.result.decision is Decision.REQUIRE_APPROVAL:
+        label = "Cancellation" if kind == "cancellation" else "Delivery change"
+        approval = await ApprovalRepo(ctx.db).request(
+            proposed_action_id=proposal.id,
+            shipment_id=shipment.id,
+            summary=f"{shipment.reference}: {label} requested by customer — {detail}",
+        )
+        events.append(
+            EventDraft(
+                type=EventType.APPROVAL_REQUESTED,
+                actor="agent:support",
+                payload={
+                    "approval_id": str(approval.id),
+                    "summary": approval.summary,
+                    "expires_at": approval.expires_at.isoformat(),
+                },
+            )
+        )
+        follow_up.append(
+            WorkRequest(
+                kind="approval.escalate",
+                shipment_id=shipment.id,
+                payload={"approval_id": str(approval.id)},
+                run_after=approval.escalate_at,
+                dedupe_key=f"escalate:{approval.id}",
+            )
+        )
+
     ctx.log.info(
         "support.change_requested",
         kind=kind,
@@ -234,17 +366,8 @@ async def change_request(ctx: StepContext) -> StepResult:
     )
 
     return StepResult(
-        events=(
-            EventDraft(
-                type="customer.change_requested",
-                actor="agent:support",
-                payload={
-                    "kind": kind,
-                    "detail": detail,
-                    "decision": str(proposal.result.decision),
-                },
-            ),
-        )
+        events=tuple(events),
+        enqueue=tuple(follow_up),
     )
 
 

@@ -48,7 +48,7 @@ async def close_window(ctx: StepContext) -> StepResult:
     )
 
     if not usable:
-        return _nothing_usable(shipment, round_no, expired)
+        return await _nothing_usable(ctx, shipment, round_no, expired)
 
     # Scoring is canonical here, in Python. The dashboard renders what this
     # writes rather than recomputing it, so the score that spends money is the
@@ -90,7 +90,7 @@ async def close_window(ctx: StepContext) -> StepResult:
         # Quotes existed but none could be priced in the base currency.
         # Failing closed, exactly as the policy gate does.
         ctx.log.error("sourcing.unpriceable", round=round_no, quotes=len(usable))
-        return _nothing_usable(shipment, round_no, expired, reason="no quote could be priced")
+        return await _nothing_usable(ctx, shipment, round_no, expired, reason="no quote could be priced")
 
     for entry in scored:
         await quotes.save_score(
@@ -192,11 +192,11 @@ async def close_window(ctx: StepContext) -> StepResult:
         )
 
     # DENY.
-    return _denied(shipment, round_no, proposal.result.reason, decision_event)
+    return await _denied(ctx, shipment, round_no, proposal.result.reason, decision_event)
 
 
-def _nothing_usable(
-    shipment, round_no: int, expired: int, reason: str = "no usable quotes"  # noqa: ANN001
+async def _nothing_usable(
+    ctx: StepContext, shipment, round_no: int, expired: int, reason: str = "no usable quotes"  # noqa: ANN001
 ) -> StepResult:
     """No price to act on. Reopen sourcing, or stop trying."""
     event = EventDraft(
@@ -206,6 +206,19 @@ def _nothing_usable(
     )
 
     if round_no >= MAX_ROUNDS:
+        from logistics.exceptions import ExceptionRepo
+        from logistics.tracking.detection import Detection, DetectionKind, Severity
+
+        await ExceptionRepo(ctx.db).raise_detection(
+            shipment_id=shipment.id,
+            detection=Detection(
+                kind=DetectionKind.SOURCING_EXHAUSTED,
+                severity=Severity.HIGH,
+                summary=f"Sourcing exhausted after {round_no} rounds: {reason}",
+                detail={"rounds": round_no, "expired": expired, "reason": reason},
+            ),
+            detected_by="carrier",
+        )
         return StepResult(
             transition=ShipmentState.EXCEPTION,
             events=(
@@ -223,8 +236,23 @@ def _nothing_usable(
     return StepResult(transition=ShipmentState.PLANNED, events=(event,))
 
 
-def _denied(shipment, round_no: int, reason: str, decision_event: EventDraft) -> StepResult:  # noqa: ANN001
+async def _denied(
+    ctx: StepContext, shipment, round_no: int, reason: str, decision_event: EventDraft  # noqa: ANN001
+) -> StepResult:
     if round_no >= MAX_ROUNDS:
+        from logistics.exceptions import ExceptionRepo
+        from logistics.tracking.detection import Detection, DetectionKind, Severity
+
+        await ExceptionRepo(ctx.db).raise_detection(
+            shipment_id=shipment.id,
+            detection=Detection(
+                kind=DetectionKind.SOURCING_EXHAUSTED,
+                severity=Severity.HIGH,
+                summary=f"Carrier booking denied by policy after {round_no} rounds: {reason}",
+                detail={"rounds": round_no, "reason": reason},
+            ),
+            detected_by="policy",
+        )
         return StepResult(
             transition=ShipmentState.EXCEPTION,
             events=(

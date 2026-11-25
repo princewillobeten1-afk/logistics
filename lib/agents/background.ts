@@ -184,7 +184,7 @@ export async function runBackgroundOperationsSweep({
     return {
       scope,
       executed: [],
-      skippedReason: "GEMINI_API_KEY is not configured.",
+      skippedReason: "Neither NVIDIA_API_KEY nor GEMINI_API_KEY is configured.",
     };
   }
 
