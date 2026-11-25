@@ -21,6 +21,8 @@ const SESSION_COOKIE = "logistics_session";
 // signed-out visitor in a loop or let a page render past the layout thinking
 // it is protected when middleware already let it through unauthenticated.
 const PUBLIC_PATHS = new Set([
+  "/",
+  "/welcome",
   "/login",
   "/signup",
   "/forgot-password",
@@ -29,6 +31,7 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/session",
   "/api/webhooks/whatsapp",
   "/api/webhooks/telegram",
+  "/api/channels/telegram/sync",
   "/api/intake/external",
   "/api/v1/ingest",
   "/api/v1/shipments",
@@ -102,7 +105,6 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Everything except Next's own assets and the favicon. API routes are
-  // included on purpose: they read the same data the pages do.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Everything except Next's own assets, static images, and the favicon.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|images/|assets/).*)"],
 };

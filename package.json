@@ -8,11 +8,12 @@
     "build": "next build",
     "start": "NODE_ENV=production node server.ts",
     "lint": "next lint",
-    "test": "npx --yes tsx --test lib/scoring.test.ts lib/planning.test.ts lib/live-audio.test.ts lib/integrations/integrations.test.ts lib/agents/quota-management.test.ts lib/agents/catalog.test.ts lib/agents/autonomous.test.ts lib/agents/orchestrator.test.ts lib/controllers/action-controller.test.ts lib/view-helpers.test.ts lib/map-data.test.ts lib/map-layers.test.ts lib/maps-grounding.test.ts"
+    "test": "npx --yes tsx --test lib/scoring.test.ts lib/planning.test.ts lib/live-audio.test.ts lib/integrations/integrations.test.ts lib/channels/telegram.test.ts lib/agents/quota-management.test.ts lib/agents/catalog.test.ts lib/agents/autonomous.test.ts lib/agents/orchestrator.test.ts lib/controllers/action-controller.test.ts lib/view-helpers.test.ts lib/map-data.test.ts lib/map-layers.test.ts lib/maps-grounding.test.ts"
   },
   "dependencies": {
     "@google/genai": "^3.3.0",
     "@types/nodemailer": "^8.0.1",
+    "@types/three": "^0.187.0",
     "@types/ws": "^8.18.2",
     "@vis.gl/react-google-maps": "^1.10.2",
     "firebase": "^13.3.0",
@@ -24,6 +25,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
+    "three": "^0.187.0",
     "ws": "^8.23.0"
   },
   "devDependencies": {

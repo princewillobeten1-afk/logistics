@@ -3,19 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { recordAudit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth";
+import {
+  configureTelegramChannelInDb,
+  syncTelegramUpdatesNow,
+  triggerTelegramPollNow,
+} from "@/lib/channels/telegram";
 import { query } from "@/lib/db";
 
-/** Channel management runs through the Python layer via a queued step, for the
- *  same reason support replies do: credential encryption, provider
- *  verification and the Fernet key all live there. Re-implementing any of it
- *  in TypeScript would put a second copy of the security-critical half of this
- *  feature somewhere it could drift.
- *
- *  The form writes an intent row; `channels.configure` picks it up, verifies
- *  against the real service, and stores the result. The page shows the outcome. */
-/** Queue one channel-configuration intent. The dedupe key keeps a
- *  double-submitted form to one work item; it is unique per organisation
- *  (migration 019), so two companies configuring Telegram do not collide. */
 async function enqueueChannelWork(
   channel: string,
   key: string,
@@ -33,17 +27,44 @@ async function enqueueChannelWork(
 }
 
 export async function saveChannel(formData: FormData): Promise<void> {
-  // Channel credentials are how customers reach this company, and a bot token
-  // is a live secret. Administrators only.
   const user = await requireRole("ADMINISTER");
 
-  const channel = String(formData.get("channel") ?? "");
+  const channel = String(formData.get("channel") ?? "").trim().toUpperCase();
   if (!channel) return;
 
   const submitted: Record<string, string> = {};
   for (const [key, value] of formData.entries()) {
     if (key === "channel" || key === "action") continue;
     submitted[key] = String(value);
+  }
+
+  if (channel === "TELEGRAM") {
+    const res = await configureTelegramChannelInDb({
+      orgId: user.orgId,
+      fields: submitted,
+    });
+
+    await recordAudit({
+      actor: user.email,
+      orgId: user.orgId,
+      action: res.ok ? "CHANNEL_CONFIGURED" : "CHANNEL_CONFIGURATION_FAILED",
+      entityType: "channel",
+      after: {
+        channel,
+        ok: res.ok,
+        username: res.username ?? null,
+        fields: Object.keys(submitted),
+      },
+    });
+
+    if (res.ok) {
+      triggerTelegramPollNow();
+      await syncTelegramUpdatesNow({ orgId: user.orgId, longPollTimeoutSec: 0 });
+    }
+
+    revalidatePath("/settings");
+    revalidatePath("/support");
+    return;
   }
 
   await enqueueChannelWork(channel, `channel-config:${channel}`, {
@@ -56,8 +77,6 @@ export async function saveChannel(formData: FormData): Promise<void> {
     orgId: user.orgId,
     action: "CHANNEL_CONFIGURED",
     entityType: "channel",
-    // The field *names* only. Values are credentials, and an audit log that
-    // records a bot token is a second place the token can leak from.
     after: { channel, fields: Object.keys(submitted) },
   });
 
@@ -67,13 +86,24 @@ export async function saveChannel(formData: FormData): Promise<void> {
 export async function toggleChannel(formData: FormData): Promise<void> {
   const user = await requireRole("ADMINISTER");
 
-  const channel = String(formData.get("channel") ?? "");
+  const channel = String(formData.get("channel") ?? "").trim().toUpperCase();
   const enable = String(formData.get("enable")) === "true";
   if (!channel) return;
 
-  await enqueueChannelWork(channel, `channel-toggle:${channel}`, {
-    action: enable ? "enable" : "disable",
-  });
+  if (channel === "TELEGRAM") {
+    await query(
+      `UPDATE channel_connections SET enabled = $1 WHERE channel = $2`,
+      [enable, channel],
+    );
+    if (enable) {
+      triggerTelegramPollNow();
+      await syncTelegramUpdatesNow({ orgId: user.orgId, longPollTimeoutSec: 0 });
+    }
+  } else {
+    await enqueueChannelWork(channel, `channel-toggle:${channel}`, {
+      action: enable ? "enable" : "disable",
+    });
+  }
 
   await recordAudit({
     actor: user.email,
@@ -89,12 +119,27 @@ export async function toggleChannel(formData: FormData): Promise<void> {
 export async function disconnectChannel(formData: FormData): Promise<void> {
   const user = await requireRole("ADMINISTER");
 
-  const channel = String(formData.get("channel") ?? "");
+  const channel = String(formData.get("channel") ?? "").trim().toUpperCase();
   if (!channel) return;
 
-  await enqueueChannelWork(channel, `channel-disconnect:${channel}`, {
-    action: "disconnect",
-  });
+  if (channel === "TELEGRAM") {
+    await query(
+      `UPDATE channel_connections
+          SET credentials = NULL,
+              config = '{}'::jsonb,
+              enabled = false,
+              state = 'UNCONFIGURED',
+              verified_at = NULL,
+              last_error = NULL,
+              cursor = NULL
+        WHERE channel = $1`,
+      [channel],
+    );
+  } else {
+    await enqueueChannelWork(channel, `channel-disconnect:${channel}`, {
+      action: "disconnect",
+    });
+  }
 
   await recordAudit({
     actor: user.email,
@@ -105,6 +150,14 @@ export async function disconnectChannel(formData: FormData): Promise<void> {
   });
 
   revalidatePath("/settings");
+}
+
+export async function syncTelegramChannel(): Promise<void> {
+  const user = await requireRole("ADMINISTER");
+  triggerTelegramPollNow();
+  await syncTelegramUpdatesNow({ orgId: user.orgId, longPollTimeoutSec: 0 });
+  revalidatePath("/settings");
+  revalidatePath("/support");
 }
 
 export type ChannelRow = {

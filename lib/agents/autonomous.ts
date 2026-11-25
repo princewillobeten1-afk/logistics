@@ -782,41 +782,134 @@ export async function processOmnichannelSupportTurn({
     }
 
     const fallbackIntent = classifyAutonomousIntent(trimmed, undefined, extracted);
+    const isGreeting = /^(\/(start|help|menu)\b|hi\b|hello\b|hey\b|good\s+(morning|afternoon|evening)\b)/i.test(
+      trimmed,
+    );
     const isActionableFallback =
       fallbackIntent !== "TRACKING_INQUIRY" ||
       Boolean(extracted.originCity && extracted.destinationCity);
 
-    if (aiError && !isActionableFallback) {
+    let fallbackReply: string | null = null;
+    if (aiError) {
+      if (isGreeting) {
+        let activeNote = "";
+        if (resolvedRef && effectiveShipmentId) {
+          const rows = await query<{
+            reference: string;
+            state: string;
+            origin: Record<string, unknown>;
+            destination: Record<string, unknown>;
+          }>(
+            `SELECT reference, state, origin, destination FROM shipments WHERE id = $1 LIMIT 1`,
+            [effectiveShipmentId],
+          );
+          if (rows[0]) {
+            const o = String(rows[0].origin?.city ?? "origin");
+            const d = String(rows[0].destination?.city ?? "destination");
+            activeNote = `\n\nYour latest shipment ${rows[0].reference} (${o} to ${d}) is currently ${rows[0].state.replace(/_/g, " ")}.`;
+          }
+        }
+        fallbackReply =
+          `Hello${displayName && !/^Telegram\s/i.test(displayName) ? ` ${displayName}` : ""}! Welcome to Logistics Support.\n\n` +
+          `I can help you:\n` +
+          `• Track a shipment (send a reference like LG-10421)\n` +
+          `• Book a shipment (e.g. "Ship 500kg electronics from Rotterdam to Munich")\n` +
+          `• Report a delay, damage, or customs issue${activeNote}`;
+      } else if (fallbackIntent === "TRACKING_INQUIRY") {
+        if (effectiveShipmentId) {
+          const rows = await query<{
+            reference: string;
+            state: string;
+            origin: Record<string, unknown>;
+            destination: Record<string, unknown>;
+            cargo: Record<string, unknown>;
+            deadline: Date | null;
+            plan: Record<string, unknown> | null;
+          }>(
+            `SELECT reference, state, origin, destination, cargo, deadline, plan FROM shipments WHERE id = $1 LIMIT 1`,
+            [effectiveShipmentId],
+          );
+          if (rows[0]) {
+            const s = rows[0];
+            const o = String(s.origin?.city ?? "origin");
+            const d = String(s.destination?.city ?? "destination");
+            const cargoDesc = s.cargo?.description ? ` (${String(s.cargo.description)})` : "";
+            const eta = s.plan?.projected_delivery
+              ? ` Projected delivery: ${new Date(String(s.plan.projected_delivery)).toLocaleDateString("en-US", { month: "short", day: "numeric" })}.`
+              : s.deadline
+                ? ` Promised deadline: ${new Date(s.deadline).toLocaleDateString("en-US", { month: "short", day: "numeric" })}.`
+                : "";
+            fallbackReply = `Shipment ${s.reference}: currently ${s.state.replace(/_/g, " ")} on route ${o} → ${d}${cargoDesc}.${eta}`;
+          }
+        } else {
+          const recent = await query<{
+            reference: string;
+            state: string;
+            origin: Record<string, unknown>;
+            destination: Record<string, unknown>;
+          }>(
+            `SELECT reference, state, origin, destination FROM shipments ORDER BY updated_at DESC LIMIT 3`,
+          );
+          if (recent.length > 0) {
+            const list = recent
+              .map(
+                (r) =>
+                  `• ${r.reference} (${String(r.origin?.city ?? "?")} → ${String(r.destination?.city ?? "?")}): ${r.state.replace(/_/g, " ")}`,
+              )
+              .join("\n");
+            fallbackReply = `Please share a shipment reference (like ${recent[0].reference}) so I can check exact details. Recent active shipments:\n${list}`;
+          } else {
+            fallbackReply =
+              "I'm connected and ready to help. Share a shipment reference (e.g. LG-10421) to track cargo, or tell me your origin and destination cities to book a new shipment.";
+          }
+        }
+      }
+    }
+
+    if (aiError && !isActionableFallback && !fallbackReply) {
       return { ok: false, error: aiError };
     }
 
     // Hand off directly to the Autonomous Agent (creates orders/shipments/events/exceptions & delegates work immediately)
     const draftOrigin = (contactRes[0]?.draft?.origin as string | undefined) ?? null;
     const draftDest = (contactRes[0]?.draft?.destination as string | undefined) ?? null;
-    const autonomousResult = await dispatchToAutonomousAgent({
-      sourceChannel,
-      intentHint: handoff?.intent ?? (aiError ? fallbackIntent : undefined),
-      message: handoff?.taskSummary || trimmed,
-      reference: handoff?.shipmentReference ?? resolvedRef,
-      contactId: contactId ?? null,
-      externalId,
-      displayName: displayName ?? null,
-      orgId: effectiveOrgId,
-      actorEmail: actorEmail ?? null,
-      mode: "background_orchestrate",
-      structured: {
-        originCity: handoff?.originCity ?? extracted.originCity ?? draftOrigin,
-        destinationCity: handoff?.destinationCity ?? extracted.destinationCity ?? draftDest,
-        cargoDescription: handoff?.cargoDescription ?? null,
-        weightKg: handoff?.weightKg ?? extracted.weightKg ?? null,
-        quantity: handoff?.quantity ?? extracted.quantity ?? null,
-        deadlineIso: handoff?.deadlineIso ?? null,
-        customerName: handoff?.customerName ?? displayName ?? null,
-        hazmat: handoff?.hazmat ?? extracted.hazmat ?? false,
-        reefer: handoff?.reefer ?? extracted.reefer ?? false,
-        missingFields: handoff?.missingFields ?? [],
-      },
-    });
+    const autonomousResult =
+      isGreeting || (aiError && fallbackReply && !isActionableFallback)
+        ? {
+            intent: "TRACKING_INQUIRY" as AutonomousIntent,
+            startedWork: false,
+            orderReference: null,
+            shipmentReference: resolvedRef,
+            shipmentId: effectiveShipmentId,
+            delegatedAgents: [] as CoreAgentId[],
+            draftSaved: false,
+            orchestrationSummary: null,
+            aiWarning: aiError,
+          }
+        : await dispatchToAutonomousAgent({
+            sourceChannel,
+            intentHint: handoff?.intent ?? (aiError ? fallbackIntent : undefined),
+            message: handoff?.taskSummary || trimmed,
+            reference: handoff?.shipmentReference ?? resolvedRef,
+            contactId: contactId ?? null,
+            externalId,
+            displayName: displayName ?? null,
+            orgId: effectiveOrgId,
+            actorEmail: actorEmail ?? null,
+            mode: "background_orchestrate",
+            structured: {
+              originCity: handoff?.originCity ?? extracted.originCity ?? draftOrigin,
+              destinationCity: handoff?.destinationCity ?? extracted.destinationCity ?? draftDest,
+              cargoDescription: handoff?.cargoDescription ?? null,
+              weightKg: handoff?.weightKg ?? extracted.weightKg ?? null,
+              quantity: handoff?.quantity ?? extracted.quantity ?? null,
+              deadlineIso: handoff?.deadlineIso ?? null,
+              customerName: handoff?.customerName ?? displayName ?? null,
+              hazmat: handoff?.hazmat ?? extracted.hazmat ?? false,
+              reefer: handoff?.reefer ?? extracted.reefer ?? false,
+              missingFields: handoff?.missingFields ?? [],
+            },
+          });
 
     const finalRef = autonomousResult.shipmentReference ?? resolvedRef;
     const finalShipmentId = autonomousResult.shipmentId ?? effectiveShipmentId;
@@ -829,9 +922,11 @@ export async function processOmnichannelSupportTurn({
           ? `${aiReplyText} Your request has been queued under shipment ${finalRef} (order ${autonomousResult.orderReference}).`
           : aiReplyText;
     } else if (autonomousResult.orderReference && finalRef) {
-      outboundReply = `Request accepted for fulfillment as shipment ${finalRef} (order ${autonomousResult.orderReference}). (${aiError})`;
+      outboundReply = `Request accepted for fulfillment as shipment ${finalRef} (order ${autonomousResult.orderReference}). Our operations team is planning your route now.`;
     } else if (autonomousResult.startedWork) {
-      outboundReply = `Operations intake logged (${autonomousResult.intent.toLowerCase().replace(/_/g, " ")}) and queued for specialist execution. (${aiError})`;
+      outboundReply = `Operations intake logged (${autonomousResult.intent.toLowerCase().replace(/_/g, " ")}) and queued for immediate handling.${finalRef ? ` Reference: ${finalRef}.` : ""}`;
+    } else if (fallbackReply) {
+      outboundReply = fallbackReply;
     } else {
       return { ok: false, error: aiError ?? "Unable to process support request." };
     }

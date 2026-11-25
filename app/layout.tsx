@@ -8,7 +8,7 @@ import { TopBar } from "@/app/top-bar";
 import { MapsQuotaBanner } from "@/components/maps-quota-banner";
 import { CustomerSupportWidget } from "@/components/customer-support-widget";
 import { MotionProvider } from "@/components/motion-provider";
-import { requireUser } from "@/lib/auth";
+import { currentUser, requireUser } from "@/lib/auth";
 
 const plusJakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
@@ -31,9 +31,15 @@ export const metadata: Metadata = {
   },
 };
 
-// Routes that render without a session.
+// Routes that render without the authenticated app shell.
 // Must match PUBLIC_PATHS in middleware.ts.
-const PUBLIC = new Set(["/login", "/signup", "/forgot-password", "/reset-password"]);
+const PUBLIC = new Set([
+  "/welcome",
+  "/login",
+  "/signup",
+  "/forgot-password",
+  "/reset-password",
+]);
 
 const THEME_INIT_SCRIPT = `try{var s=localStorage.getItem("color-scheme");if(s==="light"||s==="dark"){document.querySelector('meta[name="color-scheme"]').content=s;document.documentElement.setAttribute("data-theme",s);}}catch(e){}`;
 
@@ -45,24 +51,34 @@ export default async function RootLayout({
   const pathname = (await headers()).get("x-pathname") ?? "";
   const fontVars = `${plusJakarta.variable} ${jetbrainsMono.variable}`;
 
+  const renderPublicShell = () => (
+    <html lang="en" className={fontVars} suppressHydrationWarning>
+      <head>
+        <meta name="color-scheme" content="light dark" suppressHydrationWarning />
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
+      <body suppressHydrationWarning>
+        <MotionProvider>
+          <MapsQuotaBanner />
+          {children}
+        </MotionProvider>
+      </body>
+    </html>
+  );
+
   if (PUBLIC.has(pathname)) {
-    return (
-      <html lang="en" className={fontVars} suppressHydrationWarning>
-        <head>
-          <meta name="color-scheme" content="light dark" suppressHydrationWarning />
-          <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
-        </head>
-        <body suppressHydrationWarning>
-          <MotionProvider>
-            <MapsQuotaBanner />
-            {children}
-          </MotionProvider>
-        </body>
-      </html>
-    );
+    return renderPublicShell();
   }
 
-  const user = await requireUser();
+  let user;
+  if (pathname === "/") {
+    user = await currentUser();
+    if (!user) {
+      return renderPublicShell();
+    }
+  } else {
+    user = await requireUser();
+  }
 
   return (
     <html lang="en" className={fontVars} suppressHydrationWarning>

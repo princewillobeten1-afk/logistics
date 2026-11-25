@@ -1,17 +1,22 @@
 import { Offline } from "@/app/components";
 import { ControlTowerDashboard } from "@/components/control-tower/control-tower-dashboard";
+import { LandingPage } from "@/components/landing/landing-page";
 import { currentUser } from "@/lib/auth";
 import { controlTowerSummary, deadWork } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function Overview() {
-  let summary, dead, user;
+  const user = await currentUser();
+  if (!user) {
+    return <LandingPage isAuthenticated={false} />;
+  }
+
+  let summary, dead;
   try {
-    [summary, dead, user] = await Promise.all([
+    [summary, dead] = await Promise.all([
       controlTowerSummary(),
       deadWork(),
-      currentUser(),
     ]);
   } catch (error) {
     return (
@@ -26,7 +31,7 @@ export default async function Overview() {
 
   return (
     <ControlTowerDashboard
-      operatorName={user?.name || user?.email || "Operator"}
+      operatorName={user.name || user.email || "Operator"}
       kpis={summary.kpis}
       quoteBookingTrend={summary.quoteBookingTrend}
       modeVolumeTrend={summary.modeVolumeTrend}

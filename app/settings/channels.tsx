@@ -1,6 +1,7 @@
 import {
   disconnectChannel,
   saveChannel,
+  syncTelegramChannel,
   toggleChannel,
   type ChannelRow,
 } from "@/app/settings/channel-actions";
@@ -121,11 +122,10 @@ export function ChannelCards({
     <div className="channels">
       {!keyConfigured ? (
         <div className="banner" data-tone="warn" style={{ marginBottom: 0 }}>
-          <strong>Token encryption key is not configured</strong>
+          <strong>Optional token encryption key not set</strong>
           <div>
-            Gmail Sign-In works immediately with Google. Token-based channels
-            (Telegram, WhatsApp, Widget) require <code>CREDENTIALS_KEY</code> on
-            this server before saving secrets.
+            Telegram and Gmail Sign-In work immediately. Set <code>CREDENTIALS_KEY</code>{" "}
+            on this server to enable AES-256-GCM encryption at rest for saved channel secrets.
           </div>
         </div>
       ) : null}
@@ -200,6 +200,14 @@ export function ChannelCards({
                         <dd>{String(row.config.address)}</dd>
                       </div>
                     ) : null}
+                    {row.channel === "TELEGRAM" && connected ? (
+                      <div>
+                        <dt>delivery</dt>
+                        <dd>
+                          {row.enabled ? "Live polling active" : "Paused"}
+                        </dd>
+                      </div>
+                    ) : null}
                     <div>
                       <dt>verified</dt>
                       <dd>{relative(row.verified_at)}</dd>
@@ -254,9 +262,17 @@ export function ChannelCards({
                     );
                   })}
                   <div className="channel-buttons">
-                    <button type="submit" disabled={!keyConfigured}>
+                    <button
+                      type="submit"
+                      disabled={row.channel !== "TELEGRAM" && !keyConfigured}
+                    >
                       {connected ? "Re-verify" : "Connect"}
                     </button>
+                    {row.channel === "TELEGRAM" && connected ? (
+                      <button type="submit" formAction={syncTelegramChannel}>
+                        Check messages now
+                      </button>
+                    ) : null}
                     {row.has_credentials ? (
                       <button
                         type="submit"

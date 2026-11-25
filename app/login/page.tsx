@@ -53,7 +53,12 @@ export default async function LoginPage({
 
         <div className="auth-card">
           <div className="auth-brand">
-            <span>Control Tower</span>
+            <div className="lp-auth-brand-row">
+              <span>Control Tower</span>
+              <Link href="/" className="auth-link">
+                ← Back to overview
+              </Link>
+            </div>
             <h1>Sign in to your workspace</h1>
           </div>
           {reset ? (

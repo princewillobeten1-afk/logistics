@@ -204,11 +204,14 @@ function localQuery(
     ]);
   }
 
-  // Fallback org lookup for external webhooks / unauthenticated autonomous intake
-  if (/FROM organisations/i.test(sql) && /LIMIT 1/i.test(sql) && !/WHERE slug/i.test(sql)) {
-    const firstOrg = store.orgs.find((o) => o.active) ?? store.orgs[0];
-    if (firstOrg) {
-      return ok([{ id: firstOrg.id, name: firstOrg.name }]);
+  // Fallback & active org lookup for external webhooks / background workers
+  if (/FROM organisations\b/i.test(sql) && !/WHERE slug/i.test(sql) && !/JOIN/i.test(sql)) {
+    const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+    const limit = limitMatch ? Number(limitMatch[1]) : 25;
+    const activeOnly = /active\s*=\s*true/i.test(sql);
+    const orgs = (activeOnly ? store.orgs.filter((o) => o.active) : store.orgs).slice(0, limit);
+    if (orgs.length > 0) {
+      return ok(orgs.map((o) => ({ id: o.id, name: o.name })));
     }
     return ok([{ id: "00000000-0000-0000-0000-000000000001", name: "Operations Workspace" }]);
   }
@@ -562,7 +565,12 @@ function localQuery(
     return ok([], before - seed.assistantMessages.length);
   }
 
-  // 9. Get single shipment detail (case-insensitive for ergonomic quick-jump)
+  // 9. Get single shipment detail (by id or case-insensitive reference)
+  if (/FROM shipments WHERE id = \$1/i.test(sql)) {
+    const s = shipById(String(params[0] ?? ""));
+    return s ? ok([s as unknown as Record<string, unknown>]) : ok([]);
+  }
+
   if (/FROM shipments WHERE reference = \$1/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
     const s = seed.shipments.find((x) => x.reference.toUpperCase() === ref);
@@ -596,10 +604,12 @@ function localQuery(
   // 11. List shipments (with optional state)
   if (/FROM shipments(?:\s+WHERE state = \$1)?\s+ORDER BY updated_at DESC/i.test(sql)) {
     const stateFilter = params[0] ? String(params[0]) : null;
+    const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+    const limit = limitMatch ? Number(limitMatch[1]) : 100;
     const rows = seed.shipments
       .filter((s) => (!stateFilter ? true : s.state === stateFilter))
       .sort((a, b) => b.updated_at.getTime() - a.updated_at.getTime())
-      .slice(0, 100);
+      .slice(0, limit);
     return ok(rows as unknown as Record<string, unknown>[]);
   }
 
@@ -1484,11 +1494,14 @@ function localQuery(
     return ok(rows as unknown as Record<string, unknown>[]);
   }
 
-  if (/FROM communications m[\s\S]*WHERE m\.contact_id = \$1/i.test(sql)) {
+  if (/FROM communications(?:\s+m)?[\s\S]*WHERE (?:m\.)?contact_id = \$1/i.test(sql)) {
     const contactId = String(params[0] ?? "");
+    const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
+    const limit = limitMatch ? Number(limitMatch[1]) : 100;
     const rows = seed.communications
       .filter((m) => m.contact_id === contactId)
-      .sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+      .sort((a, b) => a.created_at.getTime() - b.created_at.getTime())
+      .slice(-limit);
     return ok(rows as unknown as Record<string, unknown>[]);
   }
 
@@ -1555,38 +1568,93 @@ function localQuery(
 
   if (/INSERT INTO communications/i.test(sql)) {
     const id = `comm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const isOutbound = /'OUTBOUND'/i.test(sql) || String(params[2] ?? "").toUpperCase() === "OUTBOUND";
-    const channelMatch = sql.match(/'(EMAIL|WIDGET|PORTAL|TELEGRAM|WHATSAPP)'/i);
-    if (channelMatch) {
+    const colsMatch = sql.match(/INSERT INTO communications\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)/i);
+    if (colsMatch) {
+      const colNames = colsMatch[1].split(",").map((c) => c.trim().toLowerCase());
+      const rawValues = colsMatch[2];
+      const tokens: string[] = [];
+      let current = "";
+      let inQuote = false;
+      let parenDepth = 0;
+      for (let i = 0; i < rawValues.length; i += 1) {
+        const ch = rawValues[i];
+        if (ch === "'") {
+          if (inQuote && rawValues[i + 1] === "'") {
+            current += "'";
+            i += 1;
+            continue;
+          }
+          inQuote = !inQuote;
+          current += ch;
+          continue;
+        }
+        if (!inQuote) {
+          if (ch === "(") parenDepth += 1;
+          else if (ch === ")") {
+            if (parenDepth === 0) break;
+            parenDepth -= 1;
+          } else if (ch === "," && parenDepth === 0) {
+            tokens.push(current.trim());
+            current = "";
+            continue;
+          }
+        }
+        current += ch;
+      }
+      if (current.trim()) tokens.push(current.trim());
+
+      const resolveVal = (token: string | undefined): unknown => {
+        if (!token) return null;
+        const paramMatch = token.match(/^\$(\d+)/);
+        if (paramMatch) {
+          return params[Number(paramMatch[1]) - 1] ?? null;
+        }
+        if (/^null$/i.test(token)) return null;
+        if (/^true$/i.test(token)) return true;
+        if (/^false$/i.test(token)) return false;
+        const strMatch = token.match(/^'([\s\S]*)'$/);
+        if (strMatch) return strMatch[1];
+        return token;
+      };
+
+      const rowMap: Record<string, unknown> = {};
+      colNames.forEach((col, idx) => {
+        rowMap[col] = resolveVal(tokens[idx]);
+      });
+
+      const dirRaw = String(rowMap.direction ?? "INBOUND").toUpperCase();
+      const direction = dirRaw === "OUTBOUND" ? "OUTBOUND" : "INBOUND";
+      const channel = String(rowMap.channel ?? "WIDGET").toUpperCase();
+      const state = String(rowMap.state ?? (direction === "OUTBOUND" ? "SENT" : "RECEIVED")).toUpperCase();
+
       seed.communications.push({
         id,
-        shipment_id: params[0] != null ? String(params[0]) : null,
-        customer_id: null,
-        contact_id: params[1] != null ? String(params[1]) : null,
-        channel: channelMatch[1].toUpperCase(),
-        direction: isOutbound ? "OUTBOUND" : "INBOUND",
-        recipient: params[3] != null ? String(params[3]) : null,
-        subject: null,
-        body: String(params[2] ?? ""),
-        state: isOutbound ? "SENT" : "RECEIVED",
-        safety_checked: true,
+        shipment_id: rowMap.shipment_id != null ? String(rowMap.shipment_id) : null,
+        customer_id: rowMap.customer_id != null ? String(rowMap.customer_id) : null,
+        contact_id: rowMap.contact_id != null ? String(rowMap.contact_id) : null,
+        channel,
+        direction,
+        recipient: rowMap.recipient != null ? String(rowMap.recipient) : null,
+        subject: rowMap.subject != null ? String(rowMap.subject) : null,
+        body: String(rowMap.body ?? ""),
+        state,
+        safety_checked: rowMap.safety_checked != null ? Boolean(rowMap.safety_checked) : true,
         created_at: new Date(),
       });
     } else {
-      // Parameterized: (shipment_id, contact_id, channel, direction, body, recipient, state, safety_checked)
-      const ch = String(params[2] ?? "WIDGET").toUpperCase();
-      const dir = String(params[3] ?? "INBOUND").toUpperCase() === "OUTBOUND" ? "OUTBOUND" : "INBOUND";
+      const isOutbound = /'OUTBOUND'/i.test(sql) || String(params[2] ?? "").toUpperCase() === "OUTBOUND";
+      const channelMatch = sql.match(/'(EMAIL|WIDGET|PORTAL|TELEGRAM|WHATSAPP)'/i);
       seed.communications.push({
         id,
         shipment_id: params[0] != null ? String(params[0]) : null,
         customer_id: null,
         contact_id: params[1] != null ? String(params[1]) : null,
-        channel: ch,
-        direction: dir,
-        recipient: params[5] != null ? String(params[5]) : null,
+        channel: channelMatch ? channelMatch[1].toUpperCase() : String(params[2] ?? "WIDGET").toUpperCase(),
+        direction: isOutbound ? "OUTBOUND" : "INBOUND",
+        recipient: params[4] != null ? String(params[4]) : params[3] != null ? String(params[3]) : null,
         subject: null,
-        body: String(params[4] ?? ""),
-        state: dir === "OUTBOUND" ? "SENT" : "RECEIVED",
+        body: String(params[3] ?? params[2] ?? ""),
+        state: isOutbound ? "SENT" : "RECEIVED",
         safety_checked: true,
         created_at: new Date(),
       });
@@ -1761,8 +1829,36 @@ function localQuery(
   }
 
   // 24. Settings: Channel connections, Policy, Currencies, FX rates, Migrations
-  if (/UPDATE channel_connections SET last_inbound_at/i.test(sql)) {
-    const chName = String(params[0] ?? "").toUpperCase();
+  const sanitizeChannelForDashboard = (c: (typeof seed.channels)[number]) => {
+    const safeConfig = { ...(c.config ?? {}) };
+    delete safeConfig.bot_token;
+    delete safeConfig.access_token;
+    delete safeConfig.verify_token;
+    delete safeConfig.app_password;
+    return {
+      channel: c.channel,
+      display_name: c.display_name,
+      state: c.state,
+      enabled: c.enabled,
+      config: safeConfig,
+      has_credentials: Boolean(c.credentials || c.config?.bot_token || c.has_credentials),
+      verified_at: c.verified_at,
+      last_inbound_at: c.last_inbound_at,
+      last_error: c.last_error,
+    };
+  };
+
+  const extractWhereChannel = (queryText: string, queryParams: unknown[]): string => {
+    const paramMatch = queryText.match(/WHERE\s+channel\s*=\s*\$(\d+)/i);
+    if (paramMatch) {
+      return String(queryParams[Number(paramMatch[1]) - 1] ?? "").toUpperCase();
+    }
+    const litMatch = queryText.match(/WHERE\s+channel\s*=\s*'([A-Za-z0-9_]+)'/i);
+    return litMatch ? litMatch[1].toUpperCase() : "";
+  };
+
+  if (/UPDATE\s+channel_connections\s+SET\s+last_inbound_at/i.test(sql)) {
+    const chName = extractWhereChannel(sql, params) || String(params[0] ?? "").toUpperCase();
     const ch = seed.channels.find((c) => c.channel === chName);
     if (ch) {
       ch.last_inbound_at = new Date();
@@ -1771,15 +1867,142 @@ function localQuery(
     return ok([], ch ? 1 : 0);
   }
 
-  if (/FROM channel_connections[\s\S]*WHERE channel = \$1/i.test(sql)) {
-    const chName = String(params[0] ?? "").toUpperCase();
+  if (/UPDATE\s+channel_connections\s+SET\s+cursor\s*=\s*\$1/i.test(sql)) {
+    const cursorVal = params[0] != null ? String(params[0]) : null;
+    const chName = extractWhereChannel(sql, params) || String(params[1] ?? "TELEGRAM").toUpperCase();
+    const ch = seed.channels.find((c) => c.channel === chName);
+    if (ch) {
+      ch.cursor = cursorVal;
+      if (/last_inbound_at\s*=\s*now\(\)/i.test(sql)) {
+        ch.last_inbound_at = new Date();
+      }
+      if (/last_error\s*=\s*NULL/i.test(sql)) {
+        ch.last_error = null;
+      }
+      saveLocalStore(store);
+      return ok([], 1);
+    }
+    return ok([], 0);
+  }
+
+  if (/UPDATE\s+channel_connections\s+SET\s+last_error\s*=\s*\$1/i.test(sql)) {
+    const errVal = params[0] != null ? String(params[0]) : null;
+    const chName = extractWhereChannel(sql, params) || String(params[1] ?? "TELEGRAM").toUpperCase();
+    const ch = seed.channels.find((c) => c.channel === chName);
+    if (ch) {
+      ch.last_error = errVal;
+      if (/state\s*=\s*'ERROR'/i.test(sql)) {
+        ch.state = "ERROR";
+        ch.enabled = false;
+      }
+      saveLocalStore(store);
+      return ok([], 1);
+    }
+    return ok([], 0);
+  }
+
+  if (/UPDATE\s+channel_connections\s+SET\s+credentials\s*=\s*NULL/i.test(sql)) {
+    const chName = extractWhereChannel(sql, params) || String(params[0] ?? "").toUpperCase();
+    const ch = seed.channels.find((c) => c.channel === chName);
+    if (ch) {
+      ch.credentials = null;
+      ch.config = {};
+      ch.enabled = false;
+      ch.state = "UNCONFIGURED";
+      ch.verified_at = null;
+      ch.last_error = null;
+      ch.cursor = null;
+      ch.has_credentials = false;
+      saveLocalStore(store);
+      return ok([], 1);
+    }
+    return ok([], 0);
+  }
+
+  if (/UPDATE\s+channel_connections\s+SET\s+enabled\s*=\s*\$1/i.test(sql)) {
+    const enabledVal = Boolean(params[0]);
+    const chName = extractWhereChannel(sql, params) || String(params[1] ?? "").toUpperCase();
+    const ch = seed.channels.find((c) => c.channel === chName);
+    if (ch) {
+      ch.enabled = enabledVal;
+      saveLocalStore(store);
+      return ok([], 1);
+    }
+    return ok([], 0);
+  }
+
+  if (/UPDATE\s+channel_connections\s+SET\s+credentials\s*=\s*\$1/i.test(sql)) {
+    const rawCreds = params[0];
+    const credStr =
+      Buffer.isBuffer(rawCreds)
+        ? rawCreds.toString("utf8")
+        : rawCreds != null
+          ? String(rawCreds)
+          : null;
+    let nextConfig: Record<string, unknown> = {};
+    if (typeof params[1] === "string") {
+      try {
+        nextConfig = JSON.parse(params[1]) as Record<string, unknown>;
+      } catch {
+        nextConfig = {};
+      }
+    } else if (params[1] && typeof params[1] === "object") {
+      nextConfig = params[1] as Record<string, unknown>;
+    }
+    const nextState = String(params[2] ?? "VERIFIED");
+    const isOk = Boolean(params[3]);
+    const nextErr = params[4] != null ? String(params[4]) : null;
+    const nextEnabled = Boolean(params[5]);
+    const chName = extractWhereChannel(sql, params) || String(params[6] ?? "").toUpperCase();
+    const ch = seed.channels.find((c) => c.channel === chName);
+    if (ch) {
+      ch.credentials = credStr;
+      ch.has_credentials = Boolean(credStr);
+      ch.config = nextConfig;
+      ch.state = nextState;
+      ch.verified_at = isOk ? new Date() : ch.verified_at;
+      ch.last_error = nextErr;
+      ch.enabled = nextEnabled;
+      saveLocalStore(store);
+      return ok([sanitizeChannelForDashboard(ch) as unknown as Record<string, unknown>], 1);
+    }
+    return ok([], 0);
+  }
+
+  if (/SELECT\s+org_id,\s*channel,\s*credentials/i.test(sql)) {
+    const defaultOrgId = store.orgs[0]?.id ?? null;
+    const filterChannel = extractWhereChannel(sql, params) || null;
+    const rows = seed.channels
+      .filter((c) => (!filterChannel || c.channel === filterChannel))
+      .filter((c) => !/enabled\s*=\s*true/i.test(sql) || (c.enabled && c.state === "VERIFIED"))
+      .map((c) => ({
+        org_id: defaultOrgId,
+        channel: c.channel,
+        credentials: c.credentials ?? null,
+        config: c.config ?? {},
+        cursor: c.cursor ?? null,
+        state: c.state,
+        enabled: c.enabled,
+      }));
+    return ok(rows as unknown as Record<string, unknown>[]);
+  }
+
+  if (/FROM\s+channel_connections[\s\S]*WHERE\s+channel\s*=\s*(?:\$\d+|'[A-Za-z0-9_]+')/i.test(sql)) {
+    const chName = extractWhereChannel(sql, params);
+    const includeCreds = /\bcredentials\b/i.test(sql) && !/credentials IS NOT NULL/i.test(sql);
     return ok(
-      seed.channels.filter((c) => c.channel === chName) as unknown as Record<string, unknown>[],
+      seed.channels
+        .filter((c) => c.channel === chName)
+        .map((c) =>
+          includeCreds ? (c as unknown as Record<string, unknown>) : sanitizeChannelForDashboard(c),
+        ) as unknown as Record<string, unknown>[],
     );
   }
 
-  if (/FROM channel_connections/i.test(sql)) {
-    return ok(seed.channels as unknown as Record<string, unknown>[]);
+  if (/FROM\s+channel_connections/i.test(sql)) {
+    return ok(
+      seed.channels.map(sanitizeChannelForDashboard) as unknown as Record<string, unknown>[],
+    );
   }
 
   if (/FROM policies/i.test(sql)) {

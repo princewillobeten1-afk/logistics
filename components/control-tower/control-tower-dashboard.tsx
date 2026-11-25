@@ -15,8 +15,20 @@ import {
   Truck,
   X,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { CarrierWireframe } from "@/components/control-tower/carrier-wireframe";
 import { ControlTowerCharts } from "@/components/control-tower/control-tower-charts";
+
+const Carrier3DStage = dynamic(
+  () =>
+    import("@/components/control-tower/carrier-3d/carrier-stage").then(
+      (mod) => mod.Carrier3DStage,
+    ),
+  {
+    ssr: false,
+    loading: () => <CarrierWireframe mode="ROAD" />,
+  },
+);
 import {
   CorridorVectorMap,
   type CorridorMapHub,
@@ -569,7 +581,7 @@ export function ControlTowerDashboard({
               </div>
 
               <div className="ct-wireframe-stage">
-                <CarrierWireframe mode={activeMode} />
+                <Carrier3DStage mode={activeMode} />
               </div>
 
               <div className="ct-carrier-row">

@@ -325,6 +325,8 @@ export interface ChannelConnectionRecord {
   state: string;
   enabled: boolean;
   config: Record<string, unknown>;
+  credentials?: string | null;
+  cursor?: string | null;
   has_credentials: boolean;
   verified_at: Date | null;
   last_inbound_at: Date | null;
@@ -622,6 +624,8 @@ export function reviveOperationalStateDates(
     channels: Array.isArray(raw.channels)
       ? raw.channels.map((ch) => ({
           ...ch,
+          credentials: ch.credentials ?? null,
+          cursor: ch.cursor ?? null,
           verified_at: ch.verified_at ? new Date(ch.verified_at) : null,
           last_inbound_at: ch.last_inbound_at ? new Date(ch.last_inbound_at) : null,
         }))
