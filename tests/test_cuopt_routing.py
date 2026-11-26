@@ -379,3 +379,60 @@ async def test_replanning_already_planned_or_in_transit_shipment_does_not_fail(
     assert "Kaduna" in updated2.plan["waypoints"]
 
 
+async def test_international_air_and_sea_modes_are_honored_without_explicit_country(
+    db, settings, repo, reference
+):
+    air_shipment = await repo.create(
+        reference=f"{reference}-AIR",
+        state=ShipmentState.ALLOCATED,
+        origin={"city": "Lagos"},
+        destination={"city": "London"},
+        cargo={"quantity": 6, "weight_kg": 640, "preferred_mode": "AIR"},
+    )
+    res_air = await plan(
+        StepContext(
+            item=WorkItem(
+                id=uuid4(),
+                kind="planning.plan",
+                payload={"preferredMode": "AIR"},
+                attempts=1,
+                max_attempts=5,
+                shipment_id=air_shipment.id,
+            ),
+            shipment=air_shipment,
+            db=db,
+            settings=settings,
+        )
+    )
+    assert res_air.patch["plan"]["modes"] == ["ROAD", "AIR", "ROAD"]
+    assert res_air.patch["plan"]["vehicle"] == "cargo aircraft"
+    assert res_air.patch["plan"]["international"] is True
+
+    sea_shipment = await repo.create(
+        reference=f"{reference}-SEA",
+        state=ShipmentState.ALLOCATED,
+        origin={"city": "Apapa Port"},
+        destination={"city": "Tema Port"},
+        cargo={"quantity": 10, "weight_kg": 5_000, "preferred_mode": "SEA"},
+    )
+    res_sea = await plan(
+        StepContext(
+            item=WorkItem(
+                id=uuid4(),
+                kind="planning.plan",
+                payload={"preferredMode": "SEA"},
+                attempts=1,
+                max_attempts=5,
+                shipment_id=sea_shipment.id,
+            ),
+            shipment=sea_shipment,
+            db=db,
+            settings=settings,
+        )
+    )
+    assert res_sea.patch["plan"]["modes"] == ["SEA"]
+    assert res_sea.patch["plan"]["vehicle"] == "container vessel"
+    assert res_sea.patch["plan"]["distance_km"] == 480.0
+
+
+

@@ -178,6 +178,7 @@ async def submit_wpcargo_shipment(
     order: dict[str, Any],
     *,
     fallback_reference: str,
+    prefer_generated: bool = True,
 ) -> WPCargoSubmission:
     """Log into WordPress admin, open `post-new.php?post_type=wpcargo_shipment`,
     fill in the customer & shipment fields, and publish the shipment post."""
@@ -215,7 +216,11 @@ async def submit_wpcargo_shipment(
         if not post_id:
             raise RuntimeError("Could not find post_ID on WPCargo shipment form")
 
-        reference = (generated_ref or fallback_reference).strip()
+        reference = (
+            (generated_ref or fallback_reference).strip()
+            if prefer_generated
+            else (fallback_reference or generated_ref or "").strip()
+        )
         payload = build_wpcargo_payload(form_defaults, order, reference=reference)
 
         # 3. Submit the `#post` form to `/wp-admin/post.php`

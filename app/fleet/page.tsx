@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
+import { AddFleetForms, StarterNetworkButton } from "@/components/network-crud";
 import { relative } from "@/lib/format";
 import { listConveyances, listDrivers } from "@/lib/queries";
 
@@ -37,15 +38,31 @@ export default async function Fleet() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Fleet</h1>
-        <p>
-          Vehicles and drivers, with what each is currently committed to. An
-          assignment here comes from a shipment leg rather than from the vehicle
-          record — a conveyance row says a truck exists, not that anyone can
-          dispatch it today.
-        </p>
+      <div
+        className="page-head"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h1>Fleet</h1>
+          <p>
+            Vehicles and drivers, with what each is currently committed to. An
+            assignment here comes from a shipment leg rather than from the vehicle
+            record — a conveyance row says a truck exists, not that anyone can
+            dispatch it today.
+          </p>
+        </div>
+        {vehicles.length === 0 ? <StarterNetworkButton /> : <StarterNetworkButton compact />}
       </div>
+
+      <Panel title="Register vehicle & driver" hint="available immediately to cuOpt fleet optimization">
+        <AddFleetForms />
+      </Panel>
 
       {expiring.length > 0 ? (
         <div className="banner" data-tone="warn">

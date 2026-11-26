@@ -23,6 +23,16 @@ export const KNOWN_HUB_KM: Record<string, number> = {
   "port harcourt->abuja": 610,
   "port harcourt->kano": 1025,
   "kano->port harcourt": 1025,
+  "apapa port->tema port": 480,
+  "tema port->apapa port": 480,
+  "lagos->london": 5000,
+  "london->lagos": 5000,
+  "lagos->rotterdam": 7100,
+  "rotterdam->lagos": 7100,
+  "hamburg->rotterdam": 460,
+  "rotterdam->hamburg": 460,
+  "dallas->los angeles": 2310,
+  "los angeles->dallas": 2310,
 };
 
 const MODE_PROFILE: Record<

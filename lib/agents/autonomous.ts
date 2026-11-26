@@ -28,7 +28,11 @@ export type AutonomousIntent =
 
 export interface AutonomousStructuredInput {
   originCity?: string | null;
+  originAddress?: string | null;
+  originCountry?: string | null;
   destinationCity?: string | null;
+  destinationAddress?: string | null;
+  destinationCountry?: string | null;
   cargoDescription?: string | null;
   weightKg?: number | null;
   quantity?: number | null;
@@ -36,6 +40,14 @@ export interface AutonomousStructuredInput {
   preferredMode?: string | null;
   customerName?: string | null;
   customerEmail?: string | null;
+  shipperName?: string | null;
+  shipperPhone?: string | null;
+  shipperEmail?: string | null;
+  receiverName?: string | null;
+  receiverPhone?: string | null;
+  receiverEmail?: string | null;
+  hsCode?: string | null;
+  incoterm?: string | null;
   hazmat?: boolean;
   reefer?: boolean;
   currency?: string | null;
@@ -194,6 +206,34 @@ export function extractOrderFieldsFromText(message: string): Partial<AutonomousS
   if (/\b(hazmat|hazardous|flammable|chemical|dangerous goods)\b/i.test(message)) {
     out.hazmat = true;
   }
+
+  // Extract shipper / sender and receiver / consignee details when provided in text
+  const senderMatch = message.match(
+    /\b(?:sender|shipper|from\s+contact)\s*(?::|-)?\s*([A-Za-z][A-Za-z .'-]{1,45})(?:\s*\(\s*([+\d][\d\s()-]{6,20})\s*\))?/i,
+  );
+  if (senderMatch) {
+    out.shipperName = senderMatch[1].trim();
+    if (senderMatch[2]) out.shipperPhone = senderMatch[2].trim();
+  }
+  const receiverMatch = message.match(
+    /\b(?:receiver|recipient|consignee|to\s+contact)\s*(?::|-)?\s*([A-Za-z][A-Za-z .'-]{1,45})(?:\s*\(\s*([+\d][\d\s()-]{6,20})\s*\))?/i,
+  );
+  if (receiverMatch) {
+    out.receiverName = receiverMatch[1].trim();
+    if (receiverMatch[2]) out.receiverPhone = receiverMatch[2].trim();
+  }
+  const pickupAddrMatch = message.match(
+    /\bpickup(?:\s+address)?\s*(?::|-)?\s*([^;\n.]{5,90})/i,
+  );
+  if (pickupAddrMatch) {
+    out.originAddress = pickupAddrMatch[1].trim();
+  }
+  const deliveryAddrMatch = message.match(
+    /\bdeliver(?:y)?(?:\s+address)?\s*(?::|-)?\s*([^;\n.]{5,90})/i,
+  );
+  if (deliveryAddrMatch) {
+    out.destinationAddress = deliveryAddrMatch[1].trim();
+  }
   return out;
 }
 
@@ -345,18 +385,65 @@ export async function dispatchToAutonomousAgent(
         channel: input.sourceChannel,
         customerName:
           structured.customerName ||
+          structured.shipperName ||
           input.displayName ||
           input.actorEmail ||
           "Direct Customer",
-        customerEmail: structured.customerEmail || null,
+        customerEmail:
+          structured.customerEmail || structured.shipperEmail || null,
         originCity: structured.originCity,
         destinationCity: structured.destinationCity,
         cargoDescription: structured.cargoDescription || input.message.slice(0, 120),
         weightKg: planEstimate.weightKg,
         quantity,
         itemsCount: quantity,
+        hsCode: structured.hsCode || null,
+        incoterm: structured.incoterm || null,
         notes: structured.notes || input.message.slice(0, 400),
       };
+
+      // Upsert or resolve customer record when a real customer/shipper name is available
+      let customerId: string | null = null;
+      const custName = rawOrder.customerName.trim();
+      if (custName && custName.toLowerCase() !== "direct customer") {
+        try {
+          const code = custName
+            .toUpperCase()
+            .replace(/[^A-Z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")
+            .slice(0, 18) || `CUST-${Math.floor(1000 + Math.random() * 8999)}`;
+          const existingCust = await query<{ id: string }>(
+            `SELECT id FROM customers WHERE lower(name) = lower($1) OR upper(code) = upper($2) LIMIT 1`,
+            [custName, code],
+          );
+          if (existingCust[0]) {
+            customerId = existingCust[0].id;
+          } else {
+            const insertedCust = await query<{ id: string }>(
+              `INSERT INTO customers (code, name, default_currency, contacts)
+               VALUES ($1, $2, $3, $4::jsonb)
+               ON CONFLICT (org_id, code) DO UPDATE SET name = EXCLUDED.name
+               RETURNING id`,
+              [
+                code,
+                custName,
+                planEstimate.currency,
+                JSON.stringify([
+                  {
+                    name: custName,
+                    email: rawOrder.customerEmail ?? undefined,
+                    phone: structured.shipperPhone ?? undefined,
+                    role: "primary",
+                  },
+                ]),
+              ],
+            );
+            customerId = insertedCust[0]?.id ?? null;
+          }
+        } catch {
+          customerId = null;
+        }
+      }
 
       const orderRows = await query<{ id: string; reference: string }>(
         `INSERT INTO orders (reference, state, source, currency, required_by, raw)
@@ -371,13 +458,30 @@ export async function dispatchToAutonomousAgent(
           JSON.stringify(rawOrder),
         ],
       );
+      const orderId = orderRows[0]?.id ?? null;
       if (orderRows[0]?.reference) {
         orderReference = orderRows[0].reference;
+      }
+
+      if (orderId) {
+        if (customerId) {
+          await query(`UPDATE orders SET customer_id = $1 WHERE id = $2`, [
+            customerId,
+            orderId,
+          ]).catch(() => {});
+        }
+        await query(
+          `INSERT INTO order_items (order_id, line_no, sku, description, quantity)
+           VALUES ($1, 1, 'DEFAULT', $2, $3)
+           ON CONFLICT (order_id, line_no) DO NOTHING`,
+          [orderId, rawOrder.cargoDescription, Math.max(1, Math.round(quantity))],
+        ).catch(() => {});
       }
 
       const planPayload = {
         lane_label: `${structured.originCity} → ${structured.destinationCity}`,
         modes: [planEstimate.mode],
+        preferred_mode: planEstimate.mode,
         distance_km: planEstimate.distanceKm,
         transit_hours: planEstimate.transitHours,
         estimated_cost_minor: planEstimate.estimatedCostMinor,
@@ -390,6 +494,23 @@ export async function dispatchToAutonomousAgent(
         projected_delivery: planEstimate.projectedDeliveryIso,
       };
 
+      const originObj: Record<string, unknown> = {
+        city: structured.originCity,
+        ...(structured.originAddress ? { address: structured.originAddress } : {}),
+        ...(structured.originCountry ? { country: structured.originCountry } : {}),
+        ...(structured.shipperName ? { contact_name: structured.shipperName } : {}),
+        ...(structured.shipperPhone ? { contact_phone: structured.shipperPhone } : {}),
+        ...(structured.shipperEmail ? { contact_email: structured.shipperEmail } : {}),
+      };
+      const destObj: Record<string, unknown> = {
+        city: structured.destinationCity,
+        ...(structured.destinationAddress ? { address: structured.destinationAddress } : {}),
+        ...(structured.destinationCountry ? { country: structured.destinationCountry } : {}),
+        ...(structured.receiverName ? { contact_name: structured.receiverName } : {}),
+        ...(structured.receiverPhone ? { contact_phone: structured.receiverPhone } : {}),
+        ...(structured.receiverEmail ? { contact_email: structured.receiverEmail } : {}),
+      };
+
       const shipRows = await query<{ id: string; reference: string }>(
         `INSERT INTO shipments
            (reference, state, customer_ref, origin, destination, cargo, deadline, plan, created_via, origin_contact_id)
@@ -399,12 +520,15 @@ export async function dispatchToAutonomousAgent(
           candidateShipRef,
           "ALLOCATED",
           orderReference,
-          JSON.stringify({ city: structured.originCity }),
-          JSON.stringify({ city: structured.destinationCity }),
+          JSON.stringify(originObj),
+          JSON.stringify(destObj),
           JSON.stringify({
             description: structured.cargoDescription || input.message.slice(0, 120),
             weight_kg: planEstimate.weightKg,
             quantity,
+            preferred_mode: planEstimate.mode,
+            ...(structured.hsCode ? { hs_code: structured.hsCode } : {}),
+            ...(structured.incoterm ? { incoterm: structured.incoterm } : {}),
             hazmat: Boolean(structured.hazmat),
             reefer: Boolean(structured.reefer),
           }),
@@ -414,6 +538,13 @@ export async function dispatchToAutonomousAgent(
           input.contactId ?? null,
         ],
       );
+
+      if (shipRows[0]?.id && customerId) {
+        await query(`UPDATE shipments SET customer_id = $1 WHERE id = $2`, [
+          customerId,
+          shipRows[0].id,
+        ]).catch(() => {});
+      }
 
       shipmentId = shipRows[0]?.id ?? null;
       shipmentReference = shipRows[0]?.reference ?? candidateShipRef;

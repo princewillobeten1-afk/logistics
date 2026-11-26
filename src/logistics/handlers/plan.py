@@ -45,14 +45,57 @@ LANES: Final[dict[tuple[str, str], dict[str, float]]] = {
 # The gateway each city clears international freight through.
 GATEWAYS: Final[dict[str, dict[str, str]]] = {
     "Lagos": {"SEA": "Apapa Port", "AIR": "Murtala Muhammed Cargo"},
+    "Apapa Port": {"SEA": "Apapa Port"},
+    "Murtala Muhammed Cargo": {"AIR": "Murtala Muhammed Cargo"},
     "Abuja": {"AIR": "Nnamdi Azikiwe Cargo"},
     "Port Harcourt": {"SEA": "Onne Port", "AIR": "Port Harcourt Cargo"},
+    "Onne Port": {"SEA": "Onne Port"},
     "Kano": {"AIR": "Mallam Aminu Kano Cargo"},
     "Tema": {"SEA": "Tema Port"},
+    "Tema Port": {"SEA": "Tema Port"},
     "Accra": {"AIR": "Kotoka Cargo", "SEA": "Tema Port"},
     "Abidjan": {"SEA": "Abidjan Port"},
-    "Rotterdam": {"SEA": "Port of Rotterdam"},
+    "Abidjan Port": {"SEA": "Abidjan Port"},
+    "Rotterdam": {"SEA": "Port of Rotterdam", "AIR": "Schiphol Cargo"},
+    "Port of Rotterdam": {"SEA": "Port of Rotterdam"},
     "London": {"AIR": "Heathrow Cargo"},
+    "Heathrow Cargo": {"AIR": "Heathrow Cargo"},
+    "Hamburg": {"SEA": "Port of Hamburg", "AIR": "Hamburg Cargo"},
+    "Port of Hamburg": {"SEA": "Port of Hamburg"},
+    "Dallas": {"AIR": "DFW Cargo"},
+    "Los Angeles": {"AIR": "LAX Cargo"},
+    "Dubai": {"SEA": "Jebel Ali Port", "AIR": "DXB Cargo"},
+}
+
+CITY_COUNTRIES: Final[dict[str, str]] = {
+    "lagos": "NG",
+    "ikeja": "NG",
+    "apapa port": "NG",
+    "murtala muhammed cargo": "NG",
+    "abuja": "NG",
+    "nnamdi azikiwe cargo": "NG",
+    "ibadan": "NG",
+    "kano": "NG",
+    "port harcourt": "NG",
+    "onne port": "NG",
+    "enugu": "NG",
+    "yenagoa": "NG",
+    "tema": "GH",
+    "tema port": "GH",
+    "accra": "GH",
+    "kotoka cargo": "GH",
+    "abidjan": "CI",
+    "abidjan port": "CI",
+    "rotterdam": "NL",
+    "port of rotterdam": "NL",
+    "london": "GB",
+    "heathrow cargo": "GB",
+    "hamburg": "DE",
+    "port of hamburg": "DE",
+    "dallas": "US",
+    "los angeles": "US",
+    "dubai": "AE",
+    "jebel ali port": "AE",
 }
 
 # Indicative international corridor legs, by mode.
@@ -116,7 +159,15 @@ def _city(location: dict) -> str | None:
 
 def _country(location: dict) -> str | None:
     country = location.get("country")
-    return country.upper() if country else None
+    if country:
+        return str(country).strip().upper()
+    place = (_city(location) or location.get("address") or "").strip().lower()
+    if place in CITY_COUNTRIES:
+        return CITY_COUNTRIES[place]
+    for name, code in CITY_COUNTRIES.items():
+        if name in place:
+            return code
+    return None
 
 
 def _road_leg(
@@ -151,17 +202,30 @@ def _road_leg(
 
 
 def build_itinerary(
-    origin: dict, destination: dict, weight_kg: float, *, hazmat: bool = False
+    origin: dict,
+    destination: dict,
+    weight_kg: float,
+    *,
+    hazmat: bool = False,
+    preferred_mode: str | None = None,
 ) -> tuple[list[LegDraft], dict]:
     """Return the legs plus a summary. Never raises on an unknown lane — it
     flags low confidence and lets carrier quotes set the price."""
+    from logistics.routing.cuopt import haversine_km, resolve_coordinates
+
     src, dst = _city(origin), _city(destination)
     src_country, dst_country = _country(origin), _country(destination)
     international = bool(src_country and dst_country and src_country != dst_country)
 
     allowed = modes_for_cargo(hazmat=hazmat)
+    pref = preferred_mode.strip().upper() if preferred_mode else None
+    pref_enum = (
+        TransportMode(pref)
+        if pref in ("ROAD", "AIR", "SEA", "RAIL")
+        else None
+    )
 
-    if not international:
+    if not international and pref_enum not in (TransportMode.AIR, TransportMode.SEA):
         leg = _road_leg(1, src or "?", dst or "?", weight_kg)
         return [leg], {
             "international": False,
@@ -171,24 +235,49 @@ def build_itinerary(
                     "Lane not in the rate table; carrier quotes will set the price.",
         }
 
-    # International: pick a gateway mode both ends support, preferring sea for
-    # cost unless hazmat or the pairing has no sea corridor.
-    for mode in (TransportMode.SEA, TransportMode.AIR):
-        if mode not in allowed:
-            continue
+    # Build ordered mode candidates: honour explicit preferred_mode first (unless hazmat blocks AIR).
+    candidate_modes: list[TransportMode] = []
+    if pref_enum in (TransportMode.SEA, TransportMode.AIR) and pref_enum in allowed:
+        candidate_modes.append(pref_enum)
+    for m in (TransportMode.SEA, TransportMode.AIR):
+        if m in allowed and m not in candidate_modes:
+            candidate_modes.append(m)
+
+    for mode in candidate_modes:
         src_gate = GATEWAYS.get(src or "", {}).get(mode.value)
         dst_gate = GATEWAYS.get(dst or "", {}).get(mode.value)
         if not src_gate or not dst_gate:
             continue
         corridor = CORRIDORS.get((src_gate, dst_gate, mode.value))
         if corridor is None:
-            continue
+            # When the caller explicitly specified AIR or SEA (or when using a
+            # known international airport/port pairing), estimate mainline
+            # distance/hours from hub coordinates rather than defaulting to ROAD.
+            if pref_enum is None:
+                continue
+            c1 = resolve_coordinates(src_gate) or resolve_coordinates(src or "")
+            c2 = resolve_coordinates(dst_gate) or resolve_coordinates(dst or "")
+            if c1 and c2:
+                km = round(max(100.0, haversine_km(c1, c2)), 1)
+                speed = 550.0 if mode is TransportMode.AIR else 30.0
+                corridor = {"km": km, "hours": round(km / speed, 1)}
+            else:
+                continue
 
-        legs = [
-            _road_leg(1, src or "?", src_gate, weight_kg,
-                      km=DRAYAGE_KM, hours=DRAYAGE_HOURS, cost_minor=DRAYAGE_MINOR),
+        legs: list[LegDraft] = []
+        seq = 1
+        if src and src.lower() != src_gate.lower():
+            legs.append(
+                _road_leg(
+                    seq, src, src_gate, weight_kg,
+                    km=DRAYAGE_KM, hours=DRAYAGE_HOURS, cost_minor=DRAYAGE_MINOR,
+                )
+            )
+            seq += 1
+
+        legs.append(
             LegDraft(
-                sequence=2,
+                sequence=seq,
                 mode=mode.value,
                 origin_name=src_gate,
                 destination_name=dst_gate,
@@ -197,28 +286,34 @@ def build_itinerary(
                 co2e_kg=co2e_kg(mode.value, corridor["km"], weight_kg),
                 metadata={
                     "transit_hours": corridor["hours"],
-                    "known_lane": True,
-                    # Priced by the carrier, not by us — international rates
-                    # move too fast for a static table to be honest about.
+                    "known_lane": (src_gate, dst_gate, mode.value) in CORRIDORS,
                     "pricing": "carrier_quote",
                 },
-            ),
-            _road_leg(3, dst_gate, dst or "?", weight_kg,
-                      km=DRAYAGE_KM, hours=DRAYAGE_HOURS, cost_minor=None),
-        ]
+            )
+        )
+        seq += 1
+
+        if dst and dst.lower() != dst_gate.lower():
+            legs.append(
+                _road_leg(
+                    seq, dst_gate, dst, weight_kg,
+                    km=DRAYAGE_KM, hours=DRAYAGE_HOURS, cost_minor=None,
+                )
+            )
+
         return legs, {
-            "international": True,
-            "modes": ["ROAD", mode.value, "ROAD"],
+            "international": international,
+            "modes": [leg.mode for leg in legs],
             "gateway_out": src_gate,
             "gateway_in": dst_gate,
             "confidence": "medium",
-            "customs_required": True,
+            "customs_required": international,
         }
 
     # No corridor found. One leg, flagged, rather than a fabricated itinerary.
     leg = _road_leg(1, src or "?", dst or "?", weight_kg)
     return [leg], {
-        "international": True,
+        "international": international,
         "modes": ["ROAD"],
         "confidence": "low",
         "note": (
@@ -226,7 +321,7 @@ def build_itinerary(
             + (" that can carry hazmat" if hazmat else "")
             + "; needs manual planning."
         ),
-        "customs_required": True,
+        "customs_required": international,
     }
 
 
@@ -238,11 +333,23 @@ async def plan(ctx: StepContext) -> StepResult:
         return StepResult()
 
     cargo = shipment.cargo or {}
+    existing_plan = shipment.plan or {}
+    payload_data = ctx.item.payload or {}
+    preferred_mode = (
+        payload_data.get("preferredMode")
+        or cargo.get("preferred_mode")
+        or existing_plan.get("preferred_mode")
+        or (existing_plan.get("modes")[0] if isinstance(existing_plan.get("modes"), list) and existing_plan.get("modes") else None)
+    )
     weight = float(cargo.get("weight_kg") or 0)
     hazmat = bool(cargo.get("hazmat") or cargo.get("hazmat_class"))
 
     legs, summary = build_itinerary(
-        shipment.origin or {}, shipment.destination or {}, weight, hazmat=hazmat
+        shipment.origin or {},
+        shipment.destination or {},
+        weight,
+        hazmat=hazmat,
+        preferred_mode=str(preferred_mode) if preferred_mode else None,
     )
 
     # Optimize road routing & vehicle selection via NVIDIA cuOpt + Nemotron 3.5 Super VL
@@ -429,6 +536,71 @@ async def _optimize_shipment_routing(
     single shipment's road routing."""
     src = _city(shipment.origin or {}) or (shipment.origin or {}).get("address") or "Lagos"
     dst = _city(shipment.destination or {}) or (shipment.destination or {}).get("address") or "Abuja"
+
+    has_non_road = any(leg.mode != "ROAD" for leg in legs)
+    if has_non_road:
+        non_road_mode = next(leg.mode for leg in legs if leg.mode != "ROAD")
+        waypoints: list[str] = []
+        for leg in legs:
+            for pt in (leg.origin_name, leg.destination_name):
+                if pt and (not waypoints or waypoints[-1] != pt):
+                    waypoints.append(pt)
+        total_leg_km = round(sum(float(leg.distance_km or 0) for leg in legs), 1)
+        total_leg_h = round(sum(float(leg.metadata.get("transit_hours") or 0) for leg in legs), 2)
+        assigned_vehicle = (
+            "cargo aircraft"
+            if non_road_mode == "AIR"
+            else "container vessel"
+            if non_road_mode == "SEA"
+            else vehicle_for(weight_kg)
+        )
+        updated_legs = [
+            LegDraft(
+                sequence=leg.sequence,
+                mode=leg.mode,
+                origin_name=leg.origin_name,
+                destination_name=leg.destination_name,
+                distance_km=leg.distance_km,
+                cost_minor=leg.cost_minor,
+                currency=leg.currency,
+                load_type=leg.load_type,
+                co2e_kg=leg.co2e_kg,
+                metadata={**leg.metadata, "waypoints": waypoints},
+            )
+            for leg in legs
+        ]
+        meta: dict[str, Any] = {
+            "routing_solver": f"multimodal_{non_road_mode.lower()}",
+            "waypoints": waypoints,
+            "recommended_vehicle": assigned_vehicle,
+        }
+        if ctx.llm is not None:
+            advisory = await ai_route_advisory(
+                ctx.llm,
+                origin=str(src),
+                destination=str(dst),
+                weight_kg=weight_kg,
+                waypoints=waypoints,
+                distance_km=total_leg_km,
+                transit_hours=total_leg_h,
+                shipment_id=shipment.id,
+                work_item_id=ctx.item.id,
+            )
+            if advisory is not None:
+                if advisory.waypoints:
+                    meta["waypoints"] = advisory.waypoints
+                meta["ai_risk_level"] = advisory.risk_level
+                meta["ai_route_notes"] = advisory.corridor_notes
+        await _persist_route_record(
+            ctx,
+            origin=str(src),
+            destination=str(dst),
+            distance_km=total_leg_km,
+            typical_hours=total_leg_h,
+            waypoints=meta["waypoints"],
+            risk_notes=meta.get("ai_route_notes"),
+        )
+        return updated_legs, meta
 
     custom_coords = await _load_db_coordinates(ctx)
     vehicles = await _load_fleet_vehicles(ctx, origin=str(src), destination=str(dst), weight_kg=weight_kg, hazmat=hazmat)

@@ -123,20 +123,105 @@ export default async function ShipmentDetail({
             <dt>customer</dt>
             <dd>{shipment.customer_ref ?? "—"}</dd>
             <dt>origin</dt>
-            <dd>{(shipment.origin?.address as string) ?? city(shipment.origin)}</dd>
+            <dd>
+              <div>
+                {(shipment.origin?.address as string) ?? city(shipment.origin)}
+                {shipment.origin?.country ? `, ${String(shipment.origin.country)}` : ""}
+              </div>
+              {shipment.origin?.contact_name ||
+              shipment.origin?.contact_phone ||
+              shipment.origin?.contact_email ? (
+                <div className="text-faint text-xs">
+                  {[
+                    shipment.origin?.contact_name as string | undefined,
+                    shipment.origin?.contact_phone as string | undefined,
+                    shipment.origin?.contact_email as string | undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              ) : null}
+            </dd>
             <dt>destination</dt>
             <dd>
-              {(shipment.destination?.address as string) ??
-                city(shipment.destination)}
+              <div>
+                {(shipment.destination?.address as string) ??
+                  city(shipment.destination)}
+                {shipment.destination?.country
+                  ? `, ${String(shipment.destination.country)}`
+                  : ""}
+              </div>
+              {shipment.destination?.contact_name ||
+              shipment.destination?.contact_phone ||
+              shipment.destination?.contact_email ? (
+                <div className="text-faint text-xs">
+                  {[
+                    shipment.destination?.contact_name as string | undefined,
+                    shipment.destination?.contact_phone as string | undefined,
+                    shipment.destination?.contact_email as string | undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              ) : null}
             </dd>
             <dt>cargo</dt>
             <dd>
-              {(shipment.cargo?.quantity as number) ?? "—"} ×{" "}
-              {(shipment.cargo?.weight_kg as number) ?? "—"} kg
-              {shipment.cargo?.description
-                ? ` — ${shipment.cargo.description}`
-                : ""}
+              <div>
+                {(shipment.cargo?.quantity as number) ?? "—"} ×{" "}
+                {(shipment.cargo?.weight_kg as number) ?? "—"} kg
+                {shipment.cargo?.description
+                  ? ` — ${shipment.cargo.description}`
+                  : ""}
+              </div>
+              {shipment.cargo?.hs_code ||
+              shipment.cargo?.incoterm ||
+              shipment.cargo?.preferred_mode ? (
+                <div className="text-faint text-xs">
+                  {[
+                    shipment.cargo?.preferred_mode
+                      ? `Mode: ${String(shipment.cargo.preferred_mode)}`
+                      : null,
+                    shipment.cargo?.hs_code
+                      ? `HS: ${String(shipment.cargo.hs_code)}`
+                      : null,
+                    shipment.cargo?.incoterm
+                      ? `Incoterm: ${String(shipment.cargo.incoterm)}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
+              ) : null}
             </dd>
+            {shipment.origin?.wpcargo_reference ? (
+              <>
+                <dt>wpcargo portal</dt>
+                <dd className="font-mono">
+                  <a
+                    href="https://test.swiftparcelcourier.com/track/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="auth-link"
+                  >
+                    {String(shipment.origin.wpcargo_reference)}
+                  </a>
+                  {shipment.origin?.wpcargo_edit_url ? (
+                    <>
+                      {" "}
+                      <a
+                        href={String(shipment.origin.wpcargo_edit_url)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-faint text-xs"
+                      >
+                        (admin post #{String(shipment.origin.wpcargo_post_id ?? "")})
+                      </a>
+                    </>
+                  ) : null}
+                </dd>
+              </>
+            ) : null}
             <dt>deadline</dt>
             <dd>
               {when(shipment.deadline)}{" "}
@@ -165,6 +250,18 @@ export default async function ShipmentDetail({
               <dd className="font-mono">{String(plan.transit_hours ?? "—")} h</dd>
               <dt>vehicle</dt>
               <dd>{String(plan.vehicle ?? "—")}</dd>
+              {plan.routing_solver ? (
+                <>
+                  <dt>routing solver</dt>
+                  <dd className="font-mono">{String(plan.routing_solver)}</dd>
+                </>
+              ) : null}
+              {Array.isArray(plan.waypoints) && plan.waypoints.length > 0 ? (
+                <>
+                  <dt>waypoints</dt>
+                  <dd>{(plan.waypoints as string[]).join(" → ")}</dd>
+                </>
+              ) : null}
               <dt>estimated cost</dt>
               <dd className="font-mono">
                 {money(
@@ -190,6 +287,12 @@ export default async function ShipmentDetail({
               </dd>
               <dt>confidence</dt>
               <dd>{String(plan.confidence ?? "—")}</dd>
+              {plan.ai_route_notes ? (
+                <>
+                  <dt>route advisory</dt>
+                  <dd className="text-muted text-xs">{String(plan.ai_route_notes)}</dd>
+                </>
+              ) : null}
               {plan.customs_required ? (
                 <>
                   <dt>customs</dt>

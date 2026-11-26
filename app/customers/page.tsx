@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { AddCustomerForm } from "@/components/network-crud";
 import { relative } from "@/lib/format";
 import { listCustomers } from "@/lib/queries";
 
@@ -42,6 +43,10 @@ export default async function Customers() {
           {withLate.map((c) => c.code).join(", ")}
         </div>
       ) : null}
+
+      <Panel title="Add customer account" hint="contractual SLA drives carrier scoring">
+        <AddCustomerForm />
+      </Panel>
 
       <Panel title="All customers" hint={`${customers.length} on file`} flush>
         {customers.length === 0 ? (

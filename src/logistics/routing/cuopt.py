@@ -69,6 +69,15 @@ HUB_COORDINATES: dict[str, tuple[float, float]] = {
     "Port of Rotterdam": (51.9490, 4.1450),
     "London": (51.5072, -0.1276),
     "Heathrow Cargo": (51.4700, -0.4543),
+    "Dallas": (32.7767, -96.7970),
+    "DFW Cargo": (32.8998, -97.0403),
+    "Los Angeles": (34.0522, -118.2437),
+    "LAX Cargo": (33.9416, -118.4085),
+    "Hamburg": (53.5511, 9.9937),
+    "Port of Hamburg": (53.5260, 9.9540),
+    "Dubai": (25.2048, 55.2708),
+    "DXB Cargo": (25.2532, 55.3657),
+    "Jebel Ali Port": (25.0044, 55.0616),
 }
 
 # Standard highway transit waypoints along major Nigerian freight corridors.

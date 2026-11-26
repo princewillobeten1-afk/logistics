@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { AddCarrierForm, StarterNetworkButton } from "@/components/network-crud";
 import { listCarriers } from "@/lib/queries";
 import { WEIGHTS, num, scoreCarrier } from "@/lib/scoring";
 
@@ -38,14 +39,30 @@ export default async function Carriers() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Carrier management</h1>
-        <p>
-          Selection is a weighted score, not a judgment call — so it is tunable,
-          auditable, and cannot invent a carrier that does not exist. The model
-          writes the rationale for the approval card; the arithmetic picks.
-        </p>
+      <div
+        className="page-head"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h1>Carrier management</h1>
+          <p>
+            Selection is a weighted score, not a judgment call — so it is tunable,
+            auditable, and cannot invent a carrier that does not exist. The model
+            writes the rationale for the approval card; the arithmetic picks.
+          </p>
+        </div>
+        {carriers.length === 0 ? <StarterNetworkButton /> : <StarterNetworkButton compact />}
       </div>
+
+      <Panel title="Add carrier" hint="register a haulage, air, or ocean partner">
+        <AddCarrierForm />
+      </Panel>
 
       <div className="grid-2">
         <Panel title="Scoring model" hint="applied at quote time">

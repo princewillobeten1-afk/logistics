@@ -16,6 +16,56 @@ export interface MapsGroundingContext {
   modes?: string[];
 }
 
+type ContentBlock =
+  | { type: "markdown"; content: string }
+  | { type: "table"; headers: string[]; rows: string[][] };
+
+function parseMarkdownBlocks(text: string): ContentBlock[] {
+  const lines = text.split(/\r?\n/);
+  const blocks: ContentBlock[] = [];
+  let mdBuffer: string[] = [];
+  let i = 0;
+
+  const flushMd = () => {
+    const joined = mdBuffer.join("\n").trim();
+    if (joined) blocks.push({ type: "markdown", content: joined });
+    mdBuffer = [];
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const next = lines[i + 1] ?? "";
+    const isHeaderRow = /^\s*\|.+\|\s*$/.test(line);
+    const isSepRow = /^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$/.test(next);
+
+    if (isHeaderRow && isSepRow) {
+      flushMd();
+      const splitCells = (row: string) =>
+        row
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+      const headers = splitCells(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && /^\s*\|.+\|\s*$/.test(lines[i])) {
+        rows.push(splitCells(lines[i]));
+        i += 1;
+      }
+      blocks.push({ type: "table", headers, rows });
+      continue;
+    }
+
+    mdBuffer.push(line);
+    i += 1;
+  }
+
+  flushMd();
+  return blocks;
+}
+
 export function MapsGroundingPanel({
   context,
   presets,
@@ -176,7 +226,34 @@ export function MapsGroundingPanel({
           ) : null}
 
           <div className="markdown-body">
-            <Markdown>{answer}</Markdown>
+            {parseMarkdownBlocks(answer).map((block, idx) =>
+              block.type === "table" ? (
+                <div key={idx} className="scroller" style={{ margin: "0.5rem 0" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        {block.headers.map((h, hIdx) => (
+                          <th key={hIdx} scope="col">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {block.rows.map((r, rIdx) => (
+                        <tr key={rIdx}>
+                          {block.headers.map((_, cIdx) => (
+                            <td key={cIdx}>{r[cIdx] ?? "—"}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <Markdown key={idx}>{block.content}</Markdown>
+              ),
+            )}
           </div>
 
           {sources.length > 0 ? (

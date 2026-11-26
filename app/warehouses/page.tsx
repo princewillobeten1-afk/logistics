@@ -1,4 +1,5 @@
 import { Empty, Offline, Panel, Pill } from "@/app/components";
+import { AddWarehouseForm, StarterNetworkButton } from "@/components/network-crud";
 import { listInventory, listWarehouses } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -26,15 +27,31 @@ export default async function Warehouses() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>Warehouse operations</h1>
-        <p>
-          Stock and dispatch capability. <strong>Dispatch lead time</strong> is
-          what makes allocation deadline-aware rather than merely stock-aware —
-          the nearest warehouse is not the fastest when it takes twice as long
-          to get goods onto a vehicle.
-        </p>
+      <div
+        className="page-head"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h1>Warehouse operations</h1>
+          <p>
+            Stock and dispatch capability. <strong>Dispatch lead time</strong> is
+            what makes allocation deadline-aware rather than merely stock-aware —
+            the nearest warehouse is not the fastest when it takes twice as long
+            to get goods onto a vehicle.
+          </p>
+        </div>
+        {warehouses.length === 0 ? <StarterNetworkButton /> : <StarterNetworkButton compact />}
       </div>
+
+      <Panel title="Add warehouse & stock" hint="create a fulfillment site with initial inventory">
+        <AddWarehouseForm />
+      </Panel>
 
       <dl className="tiles">
         <div className="tile">

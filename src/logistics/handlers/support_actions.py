@@ -220,13 +220,38 @@ async def sync_wpcargo(ctx: StepContext) -> StepResult:
 
     destination = dict(shipment.destination or {})
     cargo = dict(shipment.cargo or {})
+    plan = dict(shipment.plan or {})
     payload = ctx.item.payload or {}
+
+    preferred_mode = str(
+        cargo.get("preferred_mode")
+        or (plan.get("modes")[0] if isinstance(plan.get("modes"), list) and plan.get("modes") else "")
+        or ""
+    ).upper()
+    wpcargo_mode = (
+        "Air Freight"
+        if preferred_mode == "AIR"
+        else "Sea Transport"
+        if preferred_mode == "SEA"
+        else None
+    )
+    wpcargo_type = (
+        "Air Freight"
+        if preferred_mode == "AIR"
+        else "International Shipping"
+        if preferred_mode == "SEA"
+        else None
+    )
 
     pickup = str(origin.get("address") or origin.get("city") or "")
     dest = str(destination.get("address") or destination.get("city") or "")
     order: dict[str, Any] = {
         "pickup": pickup,
         "destination": dest,
+        "origin_country": origin.get("country"),
+        "destination_country": destination.get("country"),
+        "mode": wpcargo_mode,
+        "shipment_type": wpcargo_type,
         "description": str(cargo.get("description") or "General Cargo"),
         "quantity": cargo.get("quantity") or 1,
         "weight_kg": cargo.get("weight_kg"),
@@ -253,6 +278,7 @@ async def sync_wpcargo(ctx: StepContext) -> StepResult:
         ctx.settings,
         order,
         fallback_reference=shipment.reference,
+        prefer_generated=False,
     )
 
     origin["wpcargo_post_id"] = submission.post_id

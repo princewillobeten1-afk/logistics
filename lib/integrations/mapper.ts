@@ -13,7 +13,11 @@ export interface NormalizedLogisticsEvent {
   externalRef: string | null;
   shipmentRef: string | null;
   originCity: string | null;
+  originAddress?: string | null;
+  originCountry?: string | null;
   destinationCity: string | null;
+  destinationAddress?: string | null;
+  destinationCountry?: string | null;
   cargoDescription: string | null;
   weightKg: number | null;
   quantity: number | null;
@@ -21,6 +25,14 @@ export interface NormalizedLogisticsEvent {
   preferredMode: string | null;
   customerName: string | null;
   customerEmail: string | null;
+  shipperName?: string | null;
+  shipperPhone?: string | null;
+  shipperEmail?: string | null;
+  receiverName?: string | null;
+  receiverPhone?: string | null;
+  receiverEmail?: string | null;
+  hsCode?: string | null;
+  incoterm?: string | null;
   hazmat: boolean;
   reefer: boolean;
   currency: string;
@@ -657,6 +669,92 @@ export function normalizeRecordDeterministically(
       "customer",
     ]);
 
+  const originCountry =
+    asString(fromMap("originCountry")) ??
+    pickFirstString(record, [
+      "origin_country",
+      "originCountry",
+      "Shipment.Origin.Country",
+      "SourceLocation.Country",
+      "pickup.country",
+    ]);
+
+  const originAddress =
+    asString(fromMap("originAddress")) ??
+    pickFirstString(record, [
+      "origin_address",
+      "originAddress",
+      "Shipment.Shipper.Address",
+      "SourceLocation.Address",
+      "pickup.address",
+    ]);
+
+  const destinationCountry =
+    asString(fromMap("destinationCountry")) ??
+    pickFirstString(record, [
+      "destination_country",
+      "destinationCountry",
+      "Shipment.Destination.Country",
+      "DestinationLocation.Country",
+      "delivery.country",
+    ]);
+
+  const destinationAddress =
+    asString(fromMap("destinationAddress")) ??
+    pickFirstString(record, [
+      "destination_address",
+      "destinationAddress",
+      "Shipment.Consignee.Address",
+      "DestinationLocation.Address",
+      "delivery.address",
+    ]);
+
+  const shipperName = pickFirstString(record, [
+    "shipper_name",
+    "shipperName",
+    "Shipment.Shipper.CompanyName",
+    "ShipFromParty.BusinessPartnerName",
+  ]);
+  const shipperPhone = pickFirstString(record, [
+    "shipper_phone",
+    "shipperPhone",
+    "Shipment.Shipper.Phone",
+  ]);
+  const shipperEmail = pickFirstString(record, [
+    "shipper_email",
+    "shipperEmail",
+    "Shipment.Shipper.Email",
+  ]);
+  const receiverName = pickFirstString(record, [
+    "receiver_name",
+    "receiverName",
+    "Shipment.Consignee.CompanyName",
+    "ShipToParty.BusinessPartnerName",
+  ]);
+  const receiverPhone = pickFirstString(record, [
+    "receiver_phone",
+    "receiverPhone",
+    "Shipment.Consignee.Phone",
+  ]);
+  const receiverEmail = pickFirstString(record, [
+    "receiver_email",
+    "receiverEmail",
+    "Shipment.Consignee.Email",
+    "ShipToParty.ContactEmail",
+  ]);
+  const hsCode = pickFirstString(record, [
+    "hs_code",
+    "hsCode",
+    "CargoSummary.HSCode",
+    "Customs.HSCode",
+  ]);
+  const incoterm = pickFirstString(record, [
+    "incoterm",
+    "incoterms",
+    "Shipment.Incoterm",
+    "Incoterm",
+  ]);
+
   const customerEmail =
     asString(fromMap("customerEmail")) ??
     pickFirstString(record, [
@@ -839,7 +937,11 @@ export function normalizeRecordDeterministically(
       externalRef,
       shipmentRef,
       originCity,
+      originAddress,
+      originCountry: originCountry ? originCountry.toUpperCase() : null,
       destinationCity,
+      destinationAddress,
+      destinationCountry: destinationCountry ? destinationCountry.toUpperCase() : null,
       cargoDescription,
       weightKg,
       quantity: quantity !== null ? Math.round(quantity) : null,
@@ -847,6 +949,14 @@ export function normalizeRecordDeterministically(
       preferredMode: preferredMode ? preferredMode.toUpperCase() : null,
       customerName,
       customerEmail,
+      shipperName,
+      shipperPhone,
+      shipperEmail,
+      receiverName,
+      receiverPhone,
+      receiverEmail,
+      hsCode,
+      incoterm,
       hazmat,
       reefer,
       currency,
