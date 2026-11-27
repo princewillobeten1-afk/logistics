@@ -1,27 +1,30 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { OptimizeFleetButton } from "@/app/planning/optimize-button";
 import { RoutingRequestForm } from "@/app/planning/routing-request-form";
+import { RunConsolidationButton } from "@/components/lifecycle-panels";
 import { city, money } from "@/lib/format";
-import { legStats, listShipments } from "@/lib/queries";
+import { legStats, listConsolidationGroups, listShipments } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 const OBJECTIVES = [
   ["Cost", "carrier base rate plus cargo weight surcharge"],
   ["Delivery time", "warehouse dispatch lead plus transit matrix against deadline"],
+  ["Consolidation", "pre-sourcing pooling of matching LTL/LCL orders into high-utilization loads"],
   ["Fleet routing", "capacity and time-window optimisation across active vehicles"],
   ["Corridor advisory", "automated waypoint, weather, and border risk evaluation"],
   ["Carbon footprint", "mode-weighted emissions estimate (kg CO2e per tonne-km)"],
 ];
 
 export default async function Planning() {
-  let toPlan, planned, sourcing, legs;
+  let toPlan, planned, sourcing, legs, consolidations;
   try {
-    [toPlan, planned, sourcing, legs] = await Promise.all([
+    [toPlan, planned, sourcing, legs, consolidations] = await Promise.all([
       listShipments("ALLOCATED"),
       listShipments("PLANNED"),
       listShipments("SOURCING"),
       legStats(),
+      listConsolidationGroups(),
     ]);
   } catch (error) {
     return (
@@ -51,11 +54,15 @@ export default async function Planning() {
         <div>
           <h1>Planning workspace</h1>
           <p>
-            Multimodal corridor selection, vehicle routing across active fleet
-            capacity, and automated corridor risk advisory.
+            Multimodal corridor selection, pre-sourcing LTL/LCL shipment
+            consolidation, vehicle routing across active fleet capacity, and
+            automated corridor risk advisory.
           </p>
         </div>
-        <OptimizeFleetButton />
+        <div className="row-center" style={{ gap: 10, flexWrap: "wrap" }}>
+          <RunConsolidationButton />
+          <OptimizeFleetButton />
+        </div>
       </div>
 
       <Panel
@@ -121,6 +128,72 @@ export default async function Planning() {
           )}
         </Panel>
       </div>
+
+      <Panel
+        title="Pre-sourcing freight consolidation pools"
+        hint={`${consolidations.length} consolidated load(s)`}
+        flush
+      >
+        {consolidations.length === 0 ? (
+          <Empty
+            message="No consolidation pools yet"
+            hint="When 2+ LTL/LCL shipments share the same lane and mode in ALLOCATED/PLANNED state, Pool LTL / LCL Shipments merges them to cut freight cost."
+          />
+        ) : (
+          <div className="scroller" tabIndex={0} role="region" aria-label="Consolidation pools">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Pool Ref</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Corridor</th>
+                  <th scope="col">Mode / Load</th>
+                  <th scope="col">Shipments</th>
+                  <th scope="col">Weight / Vol</th>
+                  <th scope="col">Utilisation</th>
+                  <th scope="col">Est. Savings</th>
+                </tr>
+              </thead>
+              <tbody>
+                {consolidations.map((g) => {
+                  const util = Number(g.utilization_pct ?? 0);
+                  return (
+                    <tr key={g.id}>
+                      <td className="ref">{g.reference}</td>
+                      <td>
+                        <Pill state={g.status} />
+                      </td>
+                      <td>
+                        {g.origin_city} → {g.destination_city}
+                      </td>
+                      <td className="num">
+                        {g.mode} · {g.load_type}
+                      </td>
+                      <td className="ref">
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {(g.shipment_refs ?? []).map((ref) => (
+                            <ShipmentLink key={ref} reference={ref} />
+                          ))}
+                        </div>
+                      </td>
+                      <td className="num">
+                        {Number(g.total_weight_kg).toLocaleString()} kg · {Number(g.total_volume_cbm).toFixed(2)} cbm
+                      </td>
+                      <td style={{ width: 130 }}>
+                        <div className="text-xs text-muted">{util.toFixed(1)}%</div>
+                        <span className="bar">
+                          <span style={{ width: `${Math.min(100, util)}%` }} />
+                        </span>
+                      </td>
+                      <td className="num">{money(g.estimated_savings_minor, g.currency)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
 
       <Panel
         title="Planning queue"

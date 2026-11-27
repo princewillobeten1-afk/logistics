@@ -428,3 +428,334 @@ export async function createCustomerAction(input: {
     return { ok: false, message: error instanceof Error ? error.message : "Could not add customer." };
   }
 }
+
+export async function updateInventoryPolicyAction(input: {
+  warehouseCode: string;
+  sku: string;
+  safetyStock: number;
+  reorderPoint: number;
+  reorderQuantity: number;
+  unitCostNaira: number;
+  annualHoldingRatePct: number;
+}): Promise<ActionResult> {
+  const user = await requireUser();
+  if (!may(user.role, "EDIT_SHIPMENT")) {
+    return { ok: false, message: "Your role cannot modify inventory policies." };
+  }
+
+  const whCode = input.warehouseCode.trim();
+  const sku = input.sku.trim().toUpperCase() || "DEFAULT";
+  const safety = Math.max(0, Math.round(Number(input.safetyStock) || 0));
+  const rop = Math.max(0, Math.round(Number(input.reorderPoint) || 0));
+  const reorderQty = Math.max(1, Math.round(Number(input.reorderQuantity) || 100));
+  const unitCostMinor = Math.max(0, Math.round((Number(input.unitCostNaira) || 0) * 100));
+  const holdingRate = Math.max(0, Math.min(2, (Number(input.annualHoldingRatePct) || 20) / 100));
+
+  try {
+    const updated = await query<{ id: string }>(
+      `UPDATE inventory i
+          SET safety_stock = $1,
+              reorder_point = $2,
+              reorder_quantity = $3,
+              unit_cost_minor = $4,
+              annual_holding_rate = $5
+         FROM warehouses w
+        WHERE w.id = i.warehouse_id
+          AND w.code = $6
+          AND i.sku = $7
+       RETURNING i.id`,
+      [safety, rop, reorderQty, unitCostMinor, holdingRate, whCode, sku],
+    );
+    if (updated.length === 0) {
+      return { ok: false, message: `Stock line ${whCode} / ${sku} was not found.` };
+    }
+    await recordAudit({
+      actor: user.email,
+      actorType: "USER",
+      orgId: user.orgId,
+      action: "INVENTORY_POLICY_UPDATED",
+      entityType: "inventory",
+      after: { warehouseCode: whCode, sku, safety, rop, reorderQty, unitCostMinor, holdingRate },
+    });
+    revalidateNetworkPaths();
+    return { ok: true, message: `Updated replenishment & cost thresholds for ${whCode} / ${sku}.` };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not update policy." };
+  }
+}
+
+export async function runReplenishmentSweepAction(): Promise<ActionResult> {
+  const user = await requireUser();
+  if (!may(user.role, "EDIT_SHIPMENT")) {
+    return { ok: false, message: "Your role cannot run inventory replenishment." };
+  }
+
+  try {
+    const created = await transaction(async (client) => {
+      const low = await client.query<{
+        warehouse_id: string;
+        warehouse_code: string;
+        sku: string;
+        available: number;
+        safety_stock: number;
+        reorder_point: number;
+        reorder_quantity: number;
+        unit_cost_minor: string;
+        currency: string;
+      }>(
+        `SELECT i.warehouse_id, w.code AS warehouse_code, i.sku,
+                (i.on_hand - i.reserved) AS available,
+                i.safety_stock, i.reorder_point, i.reorder_quantity,
+                i.unit_cost_minor::text, i.currency
+           FROM inventory i
+           JOIN warehouses w ON w.id = i.warehouse_id
+          WHERE w.active
+            AND (i.on_hand - i.reserved) <= i.reorder_point
+            AND NOT EXISTS (
+              SELECT 1 FROM replenishment_orders r
+               WHERE r.warehouse_id = i.warehouse_id
+                 AND r.sku = i.sku
+                 AND r.status IN ('PROPOSED', 'APPROVED', 'ORDERED')
+            )`,
+      );
+
+      let count = 0;
+      for (const row of low.rows) {
+        const avail = Number(row.available ?? 0);
+        const rop = Number(row.reorder_point ?? 0);
+        const safety = Number(row.safety_stock ?? 0);
+        const rQty = Math.max(1, Number(row.reorder_quantity ?? 100));
+        const qty = Math.max(rQty, rop + safety + rQty - Math.max(0, avail));
+        const estCost = qty * Number(row.unit_cost_minor ?? 0);
+        const ref = `RPL-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        const level = avail <= safety ? "CRITICAL" : "REORDER";
+        const reason = `${level}: available ${avail} <= threshold ${level === "CRITICAL" ? safety : rop} at ${row.warehouse_code}`;
+        await client.query(
+          `INSERT INTO replenishment_orders
+             (reference, warehouse_id, sku, quantity, estimated_cost_minor, currency, reason, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'PROPOSED')
+           ON CONFLICT (org_id, warehouse_id, sku)
+               WHERE status IN ('PROPOSED', 'APPROVED', 'ORDERED') DO NOTHING`,
+          [ref, row.warehouse_id, row.sku, qty, estCost, row.currency || "NGN", reason],
+        );
+        count += 1;
+      }
+      return count;
+    });
+
+    revalidatePath("/warehouses");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        created > 0
+          ? `Created ${created} replenishment PO proposal(s) for stock at or below reorder point.`
+          : "All active warehouse SKUs are currently above reorder point (or already have an open replenishment order).",
+    };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not run replenishment sweep." };
+  }
+}
+
+export async function advanceReplenishmentAction(input: {
+  id: string;
+  targetStatus: "APPROVED" | "ORDERED" | "RECEIVED" | "CANCELLED";
+  supplierName?: string;
+}): Promise<ActionResult> {
+  const user = await requireUser();
+  if (!may(user.role, "EDIT_SHIPMENT")) {
+    return { ok: false, message: "Your role cannot update replenishment orders." };
+  }
+
+  try {
+    await transaction(async (client) => {
+      const res = await client.query<{
+        id: string;
+        warehouse_id: string;
+        sku: string;
+        quantity: number;
+        status: string;
+      }>(
+        `SELECT id, warehouse_id, sku, quantity, status
+           FROM replenishment_orders
+          WHERE id = $1`,
+        [input.id],
+      );
+      const row = res.rows[0];
+      if (!row) {
+        throw new Error("Replenishment order not found.");
+      }
+      if (row.status === "RECEIVED" || row.status === "CANCELLED") {
+        throw new Error(`Order is already ${row.status}.`);
+      }
+
+      if (input.targetStatus === "RECEIVED") {
+        await client.query(
+          `UPDATE inventory
+              SET on_hand = on_hand + $1
+            WHERE warehouse_id = $2 AND sku = $3`,
+          [row.quantity, row.warehouse_id, row.sku],
+        );
+      }
+
+      await client.query(
+        `UPDATE replenishment_orders
+            SET status = $1,
+                supplier_name = COALESCE($2, supplier_name),
+                received_at = CASE WHEN $1 = 'RECEIVED' THEN now() ELSE received_at END
+          WHERE id = $3`,
+        [input.targetStatus, input.supplierName?.trim() || null, row.id],
+      );
+    });
+
+    await recordAudit({
+      actor: user.email,
+      actorType: "USER",
+      orgId: user.orgId,
+      action: `REPLENISHMENT_${input.targetStatus}`,
+      entityType: "replenishment_order",
+      entityId: input.id,
+    });
+    revalidatePath("/warehouses");
+    revalidatePath("/");
+    return {
+      ok: true,
+      message:
+        input.targetStatus === "RECEIVED"
+          ? "Replenishment received and added to warehouse on-hand stock."
+          : `Replenishment order marked ${input.targetStatus}.`,
+    };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not advance replenishment order." };
+  }
+}
+
+export async function runConsolidationAction(): Promise<ActionResult> {
+  const user = await requireUser();
+  if (!may(user.role, "EDIT_SHIPMENT")) {
+    return { ok: false, message: "Your role cannot run freight consolidation." };
+  }
+
+  try {
+    const { poolConsolidatableShipments } = await import("@/lib/planning");
+    const result = await transaction(async (client) => {
+      const open = await client.query<{
+        id: string;
+        reference: string;
+        origin: Record<string, unknown>;
+        destination: Record<string, unknown>;
+        cargo: Record<string, unknown>;
+        plan: Record<string, unknown> | null;
+      }>(
+        `SELECT id, reference, origin, destination, cargo, plan
+           FROM shipments
+          WHERE state IN ('ALLOCATED', 'PLANNED')
+            AND consolidation_group_id IS NULL
+          ORDER BY created_at ASC
+          LIMIT 100`,
+      );
+
+      const candidates = open.rows.map((r) => {
+        const plan = r.plan ?? {};
+        const cargo = r.cargo ?? {};
+        const weightKg = Number(cargo.weight_kg ?? 0) || 250;
+        const modes = Array.isArray(plan.modes) ? plan.modes : ["ROAD"];
+        const mode = String(modes[0] ?? "ROAD").toUpperCase();
+        const loadType = String(
+          plan.load_type ??
+            (mode === "SEA" && weightKg < 10_000 ? "LCL" : weightKg < 4_000 ? "LTL" : "FTL"),
+        ).toUpperCase();
+        return {
+          shipmentId: r.id,
+          reference: r.reference,
+          originCity: String(r.origin?.city ?? r.origin?.warehouse ?? ""),
+          destinationCity: String(r.destination?.city ?? r.destination?.address ?? ""),
+          mode,
+          loadType,
+          weightKg,
+          estimatedCostMinor: Number(plan.estimated_cost_minor ?? 0) || 0,
+          currency: String(plan.currency ?? "NGN"),
+        };
+      });
+
+      const pools = poolConsolidatableShipments(candidates);
+      let groupsCreated = 0;
+      let shipmentsPooled = 0;
+
+      for (const pool of pools) {
+        const ref = `POOL-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        const gRes = await client.query<{ id: string }>(
+          `INSERT INTO consolidation_groups
+             (reference, origin_city, destination_city, mode, load_type, status,
+              vehicle_capacity_kg, total_weight_kg, total_volume_cbm,
+              utilization_pct, estimated_savings_minor, currency)
+           VALUES ($1, $2, $3, $4, $5, 'OPEN', 15000, $6, $7, $8, $9, $10)
+           RETURNING id`,
+          [
+            ref,
+            pool.originCity,
+            pool.destinationCity,
+            pool.mode,
+            pool.loadType,
+            pool.totalWeightKg,
+            pool.totalVolumeCbm,
+            pool.utilizationPct,
+            pool.estimatedSavingsMinor,
+            pool.currency,
+          ],
+        );
+        const groupId = gRes.rows[0]?.id;
+        if (!groupId) continue;
+        groupsCreated += 1;
+
+        for (const item of pool.items) {
+          const vol = Math.max(0.05, Math.round((item.weightKg / 333) * 10000) / 10000);
+          await client.query(
+            `INSERT INTO consolidation_items (group_id, shipment_id, weight_kg, volume_cbm)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (org_id, shipment_id) DO NOTHING`,
+            [groupId, item.shipmentId, item.weightKg, vol],
+          );
+          const srcRow = open.rows.find((x) => x.id === item.shipmentId);
+          const mergedPlan = {
+            ...(srcRow?.plan ?? {}),
+            consolidation_group_ref: ref,
+            consolidation_load_type: pool.loadType,
+            consolidation_utilization_pct: pool.utilizationPct,
+            consolidation_count: pool.items.length,
+          };
+          await client.query(
+            `UPDATE shipments
+                SET consolidation_group_id = $1,
+                    plan = $2::jsonb
+              WHERE id = $3`,
+            [groupId, JSON.stringify(mergedPlan), item.shipmentId],
+          );
+          shipmentsPooled += 1;
+        }
+      }
+
+      return { groupsCreated, shipmentsPooled };
+    });
+
+    await recordAudit({
+      actor: user.email,
+      actorType: "USER",
+      orgId: user.orgId,
+      action: "FREIGHT_CONSOLIDATION_RUN",
+      entityType: "consolidation_group",
+      after: result,
+    });
+    revalidatePath("/planning");
+    revalidatePath("/shipments");
+    return {
+      ok: true,
+      message:
+        result.groupsCreated > 0
+          ? `Consolidated ${result.shipmentsPooled} LTL/LCL shipments into ${result.groupsCreated} pool(s).`
+          : "No ungrouped LTL/LCL pairs found sharing the same lane and mode in ALLOCATED/PLANNED state.",
+    };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not consolidate shipments." };
+  }
+}

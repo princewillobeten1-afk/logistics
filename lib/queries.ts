@@ -399,16 +399,131 @@ export async function listWarehouses() {
 
 export async function listInventory() {
   return query<{
+    warehouse_id: string;
     warehouse: string;
     sku: string;
     on_hand: number;
     reserved: number;
     available: number;
+    safety_stock: number;
+    reorder_point: number;
+    reorder_quantity: number;
+    unit_cost_minor: string;
+    currency: string;
+    annual_holding_rate: string;
   }>(
-    `SELECT w.code AS warehouse, i.sku, i.on_hand, i.reserved,
-            (i.on_hand - i.reserved) AS available
+    `SELECT i.warehouse_id, w.code AS warehouse, i.sku, i.on_hand, i.reserved,
+            (i.on_hand - i.reserved) AS available,
+            i.safety_stock, i.reorder_point, i.reorder_quantity,
+            i.unit_cost_minor::text AS unit_cost_minor,
+            i.currency,
+            i.annual_holding_rate::text AS annual_holding_rate
        FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
       ORDER BY w.code, i.sku`,
+  );
+}
+
+export async function listReplenishmentOrders() {
+  return query<{
+    id: string;
+    reference: string;
+    warehouse_id: string;
+    warehouse_code: string;
+    sku: string;
+    quantity: number;
+    estimated_cost_minor: string | null;
+    currency: string;
+    reason: string | null;
+    status: string;
+    supplier_name: string | null;
+    expected_at: Date | null;
+    received_at: Date | null;
+    created_at: Date;
+  }>(
+    `SELECT r.id, r.reference, r.warehouse_id, w.code AS warehouse_code,
+            r.sku, r.quantity, r.estimated_cost_minor::text AS estimated_cost_minor,
+            r.currency, r.reason, r.status, r.supplier_name,
+            r.expected_at, r.received_at, r.created_at
+       FROM replenishment_orders r
+       JOIN warehouses w ON w.id = r.warehouse_id
+      ORDER BY CASE r.status
+                 WHEN 'PROPOSED' THEN 0
+                 WHEN 'APPROVED' THEN 1
+                 WHEN 'ORDERED' THEN 2
+                 ELSE 3
+               END,
+               r.created_at DESC
+      LIMIT 100`,
+  );
+}
+
+export async function listConsolidationGroups() {
+  return query<{
+    id: string;
+    reference: string;
+    origin_city: string;
+    destination_city: string;
+    mode: string;
+    load_type: string;
+    status: string;
+    vehicle_capacity_kg: string;
+    total_weight_kg: string;
+    total_volume_cbm: string;
+    utilization_pct: string;
+    estimated_savings_minor: string;
+    currency: string;
+    shipment_refs: string[];
+    shipment_count: string;
+    created_at: Date;
+  }>(
+    `SELECT g.id, g.reference, g.origin_city, g.destination_city, g.mode, g.load_type,
+            g.status, g.vehicle_capacity_kg::text, g.total_weight_kg::text,
+            g.total_volume_cbm::text, g.utilization_pct::text,
+            g.estimated_savings_minor::text, g.currency,
+            coalesce(array_agg(s.reference ORDER BY s.reference) FILTER (WHERE s.reference IS NOT NULL), '{}') AS shipment_refs,
+            count(ci.id)::text AS shipment_count,
+            g.created_at
+       FROM consolidation_groups g
+       LEFT JOIN consolidation_items ci ON ci.group_id = g.id
+       LEFT JOIN shipments s ON s.id = ci.shipment_id
+      GROUP BY g.id
+      ORDER BY g.created_at DESC
+      LIMIT 50`,
+  );
+}
+
+export async function listReturnAuthorizations() {
+  return query<{
+    id: string;
+    rma_number: string;
+    shipment_id: string | null;
+    shipment_reference: string | null;
+    warehouse_id: string | null;
+    warehouse_code: string | null;
+    sku: string;
+    quantity: number;
+    reason: string;
+    condition_notes: string | null;
+    state: string;
+    disposition: string | null;
+    refund_minor: string;
+    currency: string;
+    lot_number: string | null;
+    serial_number: string | null;
+    inspected_by: string | null;
+    inspected_at: Date | null;
+    created_at: Date;
+  }>(
+    `SELECT r.id, r.rma_number, r.shipment_id, s.reference AS shipment_reference,
+            r.warehouse_id, w.code AS warehouse_code, r.sku, r.quantity,
+            r.reason, r.condition_notes, r.state, r.disposition,
+            r.refund_minor::text, r.currency, r.lot_number, r.serial_number,
+            r.inspected_by, r.inspected_at, r.created_at
+       FROM return_authorizations r
+       LEFT JOIN shipments s ON s.id = r.shipment_id
+       LEFT JOIN warehouses w ON w.id = r.warehouse_id
+      ORDER BY r.created_at DESC
+      LIMIT 100`,
   );
 }
 

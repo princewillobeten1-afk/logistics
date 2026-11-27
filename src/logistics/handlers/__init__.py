@@ -33,6 +33,9 @@ Registered today:
     shipment.assist           answers an operator's question; reads only
     pod.verify                Proof of Delivery verification before close-out
     shipment.close            terminal
+    inventory.replenishment_sweep  carrying cost & safety-stock reorder proposals
+    planning.consolidate      pre-sourcing LTL/LCL shipment pooling
+    returns.process           reverse logistics / RMA lifecycle & restock
 """
 
 from logistics.handlers import (  # noqa: F401
@@ -45,10 +48,13 @@ from logistics.handlers import (  # noqa: F401
     channel_config,
     channels as channel_steps,
     close_window,
+    consolidation,
     exception,
     notify,
     plan,
     pod,
+    replenishment,
+    returns,
     source,
     support_actions,
     tracking,

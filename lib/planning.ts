@@ -195,3 +195,165 @@ export function matchBestConveyance(
 
   return eligible[0];
 }
+
+export type StockHealth = "CRITICAL" | "REORDER" | "HEALTHY";
+
+export interface InventoryEconomicsInput {
+  onHand: number;
+  reserved: number;
+  safetyStock: number;
+  reorderPoint: number;
+  reorderQuantity: number;
+  unitCostMinor: number;
+  annualHoldingRate: number;
+}
+
+export interface InventoryEconomics {
+  available: number;
+  stockHealth: StockHealth;
+  inventoryValueMinor: number;
+  annualHoldingCostMinor: number;
+  dailyHoldingCostMinor: number;
+  suggestedReorderQty: number;
+}
+
+/** Compute stock health, valuation, carrying cost, and replenishment size. */
+export function computeInventoryEconomics(input: InventoryEconomicsInput): InventoryEconomics {
+  const onHand = Math.max(0, Math.round(input.onHand));
+  const reserved = Math.max(0, Math.round(input.reserved));
+  const available = Math.max(0, onHand - reserved);
+  const safety = Math.max(0, Math.round(input.safetyStock));
+  const rop = Math.max(0, Math.round(input.reorderPoint));
+  const reorderQty = Math.max(1, Math.round(input.reorderQuantity || 100));
+  const unitCost = Math.max(0, Math.round(input.unitCostMinor));
+  const rate = Number.isFinite(input.annualHoldingRate) && input.annualHoldingRate >= 0
+    ? input.annualHoldingRate
+    : 0.2;
+
+  const inventoryValueMinor = onHand * unitCost;
+  const annualHoldingCostMinor = Math.round(inventoryValueMinor * rate);
+  const dailyHoldingCostMinor = annualHoldingCostMinor > 0 ? Math.round(annualHoldingCostMinor / 365) : 0;
+
+  let stockHealth: StockHealth = "HEALTHY";
+  if (available <= safety) {
+    stockHealth = "CRITICAL";
+  } else if (available <= rop) {
+    stockHealth = "REORDER";
+  }
+
+  const target = rop + safety + reorderQty;
+  const suggestedReorderQty = stockHealth === "HEALTHY" ? 0 : Math.max(reorderQty, target - available);
+
+  return {
+    available,
+    stockHealth,
+    inventoryValueMinor,
+    annualHoldingCostMinor,
+    dailyHoldingCostMinor,
+    suggestedReorderQty,
+  };
+}
+
+export interface ConsolidationCandidateItem {
+  shipmentId: string;
+  reference: string;
+  originCity: string;
+  destinationCity: string;
+  mode: string;
+  loadType: string;
+  weightKg: number;
+  volumeCbm?: number;
+  estimatedCostMinor?: number;
+  currency?: string;
+}
+
+export interface ConsolidationPoolResult {
+  originCity: string;
+  destinationCity: string;
+  mode: TransportMode;
+  loadType: "CONSOLIDATED_LTL" | "CONSOLIDATED_LCL";
+  items: ConsolidationCandidateItem[];
+  totalWeightKg: number;
+  totalVolumeCbm: number;
+  utilizationPct: number;
+  estimatedSavingsMinor: number;
+  currency: string;
+}
+
+const CONSOLIDATABLE_TYPES = new Set(["LTL", "LCL", "CONSOLIDATED"]);
+
+/** Pool >= 2 small LTL/LCL shipments on the same lane/mode within vehicle capacity. */
+export function poolConsolidatableShipments(
+  candidates: ConsolidationCandidateItem[],
+  options?: { maxWeightKg?: number; maxVolumeCbm?: number },
+): ConsolidationPoolResult[] {
+  const maxWeightKg = options?.maxWeightKg && options.maxWeightKg > 0 ? options.maxWeightKg : 15_000;
+  const maxVolumeCbm = options?.maxVolumeCbm && options.maxVolumeCbm > 0 ? options.maxVolumeCbm : 45;
+
+  const byLane = new Map<string, ConsolidationCandidateItem[]>();
+  for (const cand of candidates) {
+    const loadType = cand.loadType.trim().toUpperCase();
+    if (!CONSOLIDATABLE_TYPES.has(loadType)) continue;
+    const origin = cand.originCity.trim();
+    const dest = cand.destinationCity.trim();
+    if (!origin || !dest || origin === "—" || dest === "—") continue;
+    const mode = normalizeTransportMode(cand.mode);
+    const key = `${origin.toLowerCase()}->${dest.toLowerCase()}::${mode}`;
+    const list = byLane.get(key) ?? [];
+    list.push(cand);
+    byLane.set(key, list);
+  }
+
+  const pools: ConsolidationPoolResult[] = [];
+  for (const items of byLane.values()) {
+    if (items.length < 2) continue;
+    const sorted = [...items].sort((a, b) => b.weightKg - a.weightKg || a.reference.localeCompare(b.reference));
+    let bucket: ConsolidationCandidateItem[] = [];
+    let wSum = 0;
+    let vSum = 0;
+
+    const flush = () => {
+      if (bucket.length < 2) return;
+      const mode = normalizeTransportMode(bucket[0].mode);
+      const util = Math.round(
+        Math.min(100, Math.max((wSum / maxWeightKg) * 100, (vSum / maxVolumeCbm) * 100)) * 100,
+      ) / 100;
+      const separateCost = bucket.reduce((acc, item) => acc + Math.max(0, item.estimatedCostMinor ?? 0), 0);
+      const estimatedSavingsMinor =
+        separateCost > 0 ? Math.round(separateCost * 0.28) : (bucket.length - 1) * 4_500_000;
+      pools.push({
+        originCity: bucket[0].originCity.trim(),
+        destinationCity: bucket[0].destinationCity.trim(),
+        mode,
+        loadType: mode === "SEA" ? "CONSOLIDATED_LCL" : "CONSOLIDATED_LTL",
+        items: [...bucket],
+        totalWeightKg: Math.round(wSum * 1000) / 1000,
+        totalVolumeCbm: Math.round(vSum * 10000) / 10000,
+        utilizationPct: util,
+        estimatedSavingsMinor,
+        currency: bucket[0].currency?.trim().toUpperCase() || "NGN",
+      });
+    };
+
+    for (const item of sorted) {
+      const w = Math.max(0, Number.isFinite(item.weightKg) ? item.weightKg : 0);
+      const v =
+        typeof item.volumeCbm === "number" && Number.isFinite(item.volumeCbm) && item.volumeCbm > 0
+          ? item.volumeCbm
+          : Math.max(0.05, w / 333);
+      if (bucket.length > 0 && (wSum + w > maxWeightKg || vSum + v > maxVolumeCbm)) {
+        flush();
+        bucket = [item];
+        wSum = w;
+        vSum = v;
+      } else {
+        bucket.push(item);
+        wSum += w;
+        vSum += v;
+      }
+    }
+    flush();
+  }
+
+  return pools;
+}

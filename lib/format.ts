@@ -34,6 +34,21 @@ const TONES: Record<string, Tone> = {
   ACTION_NEEDED: "alert",
   NOTABLE: "waiting",
   INFO: "done",
+  // replenishment, consolidation & RMA states
+  PROPOSED: "waiting",
+  APPROVED: "progress",
+  ORDERED: "progress",
+  RECEIVED: "done",
+  OPEN: "waiting",
+  DISPATCHED: "done",
+  RETURN_REQUESTED: "waiting",
+  PICKUP_SCHEDULED: "progress",
+  INSPECTED: "progress",
+  RESTOCKED: "done",
+  REFURBISHED: "done",
+  SCRAPPED: "alert",
+  RECALLED: "alert",
+  REJECTED: "neutral",
 };
 
 export function toneFor(state: string): Tone {

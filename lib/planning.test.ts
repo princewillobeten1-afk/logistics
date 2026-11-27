@@ -3,9 +3,11 @@ import test from "node:test";
 import {
   KNOWN_HUB_KM,
   calculateShipmentPlan,
+  computeInventoryEconomics,
   estimateLaneKm,
   matchBestConveyance,
   normalizeTransportMode,
+  poolConsolidatableShipments,
   type ConveyanceCandidate,
 } from "./planning";
 
@@ -205,4 +207,83 @@ test("matchBestConveyance enforces reefer, hazmat, weight capacity, active/idle 
   // Load heavier than any idle compliant vehicle returns null
   const overweight = matchBestConveyance({ weightKg: 15000 }, fleet);
   assert.equal(overweight, null);
+});
+
+test("computeInventoryEconomics computes stock health, valuation, and carrying cost", () => {
+  const critical = computeInventoryEconomics({
+    onHand: 20,
+    reserved: 5,
+    safetyStock: 20,
+    reorderPoint: 40,
+    reorderQuantity: 80,
+    unitCostMinor: 500_000,
+    annualHoldingRate: 0.2,
+  });
+  assert.equal(critical.available, 15);
+  assert.equal(critical.stockHealth, "CRITICAL");
+  assert.equal(critical.inventoryValueMinor, 10_000_000);
+  assert.equal(critical.annualHoldingCostMinor, 2_000_000);
+  assert.equal(critical.dailyHoldingCostMinor, Math.round(2_000_000 / 365));
+  assert.ok(critical.suggestedReorderQty >= 80);
+
+  const healthy = computeInventoryEconomics({
+    onHand: 150,
+    reserved: 10,
+    safetyStock: 20,
+    reorderPoint: 40,
+    reorderQuantity: 80,
+    unitCostMinor: 500_000,
+    annualHoldingRate: 0.2,
+  });
+  assert.equal(healthy.stockHealth, "HEALTHY");
+  assert.equal(healthy.suggestedReorderQty, 0);
+});
+
+test("poolConsolidatableShipments groups >= 2 LTL/LCL orders on matching lane and mode", () => {
+  const pools = poolConsolidatableShipments([
+    {
+      shipmentId: "s1",
+      reference: "LG-1",
+      originCity: "Lagos",
+      destinationCity: "Abuja",
+      mode: "ROAD",
+      loadType: "LTL",
+      weightKg: 1100,
+      estimatedCostMinor: 10_000_000,
+    },
+    {
+      shipmentId: "s2",
+      reference: "LG-2",
+      originCity: "Lagos",
+      destinationCity: "Abuja",
+      mode: "ROAD",
+      loadType: "LTL",
+      weightKg: 1900,
+      estimatedCostMinor: 15_000_000,
+    },
+    {
+      shipmentId: "s3",
+      reference: "LG-3",
+      originCity: "Lagos",
+      destinationCity: "Kano",
+      mode: "ROAD",
+      loadType: "LTL",
+      weightKg: 900,
+    },
+    {
+      shipmentId: "s4",
+      reference: "LG-4",
+      originCity: "Lagos",
+      destinationCity: "Abuja",
+      mode: "ROAD",
+      loadType: "FTL",
+      weightKg: 8000,
+    },
+  ]);
+
+  assert.equal(pools.length, 1);
+  assert.equal(pools[0].loadType, "CONSOLIDATED_LTL");
+  assert.equal(pools[0].totalWeightKg, 3000);
+  assert.equal(pools[0].items.length, 2);
+  assert.equal(pools[0].estimatedSavingsMinor, Math.round(25_000_000 * 0.28));
 });

@@ -86,6 +86,8 @@ async def db(settings: Settings) -> AsyncIterator[Database]:
             " products, locations, warehouses, inventory, carriers,"
             " conveyances, drivers, routes, exceptions, documents,"
             " communications, claims, invoices, audit_logs, fx_rates,"
+            " replenishment_orders, consolidation_groups, consolidation_items,"
+            " return_authorizations,"
             # Accounts too, or a test using a fixed email collides with the
             # previous run. `organisations` is not truncated: the default org
             # is seeded by migration 015 and everything else points at it.
