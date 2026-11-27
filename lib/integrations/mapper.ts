@@ -19,7 +19,11 @@ export interface NormalizedLogisticsEvent {
   externalRef: string | null;
   shipmentRef: string | null;
   originCity: string | null;
+  originAddress?: string | null;
+  originCountry?: string | null;
   destinationCity: string | null;
+  destinationAddress?: string | null;
+  destinationCountry?: string | null;
   cargoDescription: string | null;
   weightKg: number | null;
   quantity: number | null;
@@ -27,6 +31,14 @@ export interface NormalizedLogisticsEvent {
   preferredMode: string | null;
   customerName: string | null;
   customerEmail: string | null;
+  shipperName?: string | null;
+  shipperPhone?: string | null;
+  shipperEmail?: string | null;
+  receiverName?: string | null;
+  receiverPhone?: string | null;
+  receiverEmail?: string | null;
+  hsCode?: string | null;
+  incoterm?: string | null;
   hazmat: boolean;
   reefer: boolean;
   currency: string;

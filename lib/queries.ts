@@ -1218,3 +1218,123 @@ export async function controlTowerSummary(): Promise<{
   };
 }
 
+// ------------------------------------------------ analytics, consolidation, RMA
+
+export type InsightRow = {
+  id: string;
+  period_start: Date;
+  period_end: Date;
+  topic: string;
+  headline: string;
+  narrative: string;
+  recommendation: string | null;
+  facts: Record<string, unknown>;
+  severity: string;
+  acknowledged_at: Date | null;
+  created_at: Date;
+};
+
+export async function recentInsights(limit = 20): Promise<InsightRow[]> {
+  try {
+    return await query<InsightRow>(
+      `SELECT id, period_start, period_end, topic, headline, narrative,
+              recommendation, facts, severity, acknowledged_at, created_at
+         FROM insights
+        ORDER BY created_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+  } catch (error) {
+    if ((error as { code?: string })?.code === "42P01") return [];
+    throw error;
+  }
+}
+
+export type ConsolidationGroupRow = {
+  id: string;
+  reference: string;
+  origin_city: string;
+  destination_city: string;
+  mode: string;
+  load_type: string;
+  status: string;
+  vehicle_capacity_kg: string | number;
+  total_weight_kg: string | number;
+  total_volume_cbm: string | number;
+  utilization_pct: string | number;
+  estimated_savings_minor: string | number;
+  currency: string;
+  shipment_refs: string[];
+  created_at: Date;
+};
+
+export async function listConsolidationGroups(
+  limit = 50,
+): Promise<ConsolidationGroupRow[]> {
+  try {
+    return await query<ConsolidationGroupRow>(
+      `SELECT g.id, g.reference, g.origin_city, g.destination_city, g.mode,
+              g.load_type, g.status, g.vehicle_capacity_kg, g.total_weight_kg,
+              g.total_volume_cbm, g.utilization_pct, g.estimated_savings_minor,
+              g.currency, g.created_at,
+              COALESCE(
+                array_agg(s.reference ORDER BY s.reference)
+                  FILTER (WHERE s.reference IS NOT NULL),
+                ARRAY[]::text[]
+              ) AS shipment_refs
+         FROM consolidation_groups g
+         LEFT JOIN consolidation_items ci ON ci.group_id = g.id
+         LEFT JOIN shipments s ON s.id = ci.shipment_id
+        GROUP BY g.id
+        ORDER BY g.created_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+  } catch (error) {
+    if ((error as { code?: string })?.code === "42P01") return [];
+    throw error;
+  }
+}
+
+export type ReturnAuthorizationRow = {
+  id: string;
+  rma_number: string;
+  state: string;
+  reason: string;
+  condition_notes: string | null;
+  sku: string;
+  quantity: number;
+  lot_number: string | null;
+  serial_number: string | null;
+  warehouse_code: string | null;
+  shipment_reference: string | null;
+  refund_minor: string | number;
+  currency: string;
+  disposition: string | null;
+  created_at: Date;
+};
+
+export async function listReturnAuthorizations(
+  limit = 100,
+): Promise<ReturnAuthorizationRow[]> {
+  try {
+    return await query<ReturnAuthorizationRow>(
+      `SELECT r.id, r.rma_number, r.state, r.reason, r.condition_notes,
+              r.sku, r.quantity, r.lot_number, r.serial_number,
+              w.code AS warehouse_code,
+              s.reference AS shipment_reference,
+              r.refund_minor, r.currency, r.disposition, r.created_at
+         FROM return_authorizations r
+         LEFT JOIN warehouses w ON w.id = r.warehouse_id
+         LEFT JOIN shipments s ON s.id = r.shipment_id
+        ORDER BY r.created_at DESC
+        LIMIT $1`,
+      [limit],
+    );
+  } catch (error) {
+    if ((error as { code?: string })?.code === "42P01") return [];
+    throw error;
+  }
+}
+
+
