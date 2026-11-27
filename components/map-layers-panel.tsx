@@ -7,6 +7,7 @@ import {
   RotateCcw,
   Route as RouteIcon,
   Sun,
+  Truck,
   Warehouse,
 } from "lucide-react";
 import {
@@ -34,6 +35,7 @@ export function MapLayersPanel({
     warehouses: number;
     gateways: number;
     routes: number;
+    drivers: number;
   };
   weatherStations: WeatherStationReading[];
   weatherLoading: boolean;
@@ -47,6 +49,7 @@ export function MapLayersPanel({
     layers.warehouses === DEFAULT_MAP_LAYERS.warehouses &&
     layers.gateways === DEFAULT_MAP_LAYERS.gateways &&
     layers.routes === DEFAULT_MAP_LAYERS.routes &&
+    layers.drivers === DEFAULT_MAP_LAYERS.drivers &&
     layers.weather === DEFAULT_MAP_LAYERS.weather;
 
   const primaryAttribution =
@@ -59,7 +62,7 @@ export function MapLayersPanel({
         <div className="map-layers-title">
           <strong>Map Layers</strong>
           <span className="font-mono text-xs text-faint">
-            {activeCount} of 4 enabled
+            {activeCount} of 5 enabled
           </span>
         </div>
         {!isDefault ? (
@@ -117,6 +120,22 @@ export function MapLayersPanel({
             <span className="layer-toggle-label">Active routes</span>
           </span>
           <span className="layer-toggle-count">{counts.routes}</span>
+        </button>
+
+        <button
+          type="button"
+          role="switch"
+          aria-checked={layers.drivers}
+          className="layer-toggle"
+          data-active={layers.drivers}
+          onClick={() => onToggle("drivers")}
+        >
+          <span className="layer-toggle-main">
+            <span className="layer-swatch layer-swatch-driver" aria-hidden="true" />
+            <Truck size={14} strokeWidth={2} aria-hidden="true" />
+            <span className="layer-toggle-label">Live drivers</span>
+          </span>
+          <span className="layer-toggle-count">{counts.drivers}</span>
         </button>
 
         <button

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { ThroughputChart } from "@/components/throughput-chart";
 import { relative } from "@/lib/format";
@@ -47,7 +48,11 @@ export default async function Analytics() {
         <h1>Analytics and reports</h1>
         <p>
           Operational volume, mode mix, carbon intensity, and AI usage metrics
-          computed directly from live shipment records.
+          computed directly from live shipment records. Looking for cross-department
+          proactive alerts, forecasts, and natural-language AI insights?{" "}
+          <Link href="/intelligence" className="bi-inline-link">
+            Open AI Business Intelligence →
+          </Link>
         </p>
       </div>
 

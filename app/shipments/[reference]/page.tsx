@@ -1,8 +1,7 @@
 import { notFound, unstable_rethrow } from "next/navigation";
 import { Assistant } from "./assistant";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
-import { MapsGroundingPanel } from "@/components/maps-grounding-panel";
-import { ShipmentCorridorMap } from "@/components/shipment-corridor-map";
+import { ShipmentCorridorSection } from "@/components/shipment-corridor-section";
 import { city, labelFor, money, relative, when } from "@/lib/format";
 import { getServerMapsApiKey } from "@/lib/maps-config";
 import { extractPointFromAddress, resolveLocationCoordinates } from "@/lib/maps-grounding";
@@ -65,15 +64,35 @@ export default async function ShipmentDetail({
   const destinationPoint =
     extractPointFromAddress(shipment.destination) ??
     resolveLocationCoordinates(destinationCity, locations);
-  const focusPoint =
-    originPoint && destinationPoint
-      ? {
-          lat: (originPoint.lat + destinationPoint.lat) / 2,
-          lng: (originPoint.lng + destinationPoint.lng) / 2,
-        }
-      : (originPoint ?? destinationPoint);
   const mapsApiKey = getServerMapsApiKey();
   const isAlert = ["EXCEPTION", "NEEDS_INFO", "AWAITING_APPROVAL"].includes(shipment.state);
+
+  const rawPlanDist = plan?.distance_km !== undefined ? Number(plan.distance_km) : NaN;
+  const legDistSum = legs.reduce((acc, l) => acc + (Number(l.distance_km) || 0), 0);
+  const plannedDistanceKm =
+    Number.isFinite(rawPlanDist) && rawPlanDist > 0
+      ? rawPlanDist
+      : legDistSum > 0
+        ? legDistSum
+        : null;
+  const rawPlanTransit = plan?.transit_hours !== undefined ? Number(plan.transit_hours) : NaN;
+  const plannedTransitHours =
+    Number.isFinite(rawPlanTransit) && rawPlanTransit > 0 ? rawPlanTransit : null;
+  const plannedModes = Array.isArray(plan?.modes)
+    ? plan.modes.map((m) => String(m))
+    : legs.map((l) => l.mode).filter(Boolean);
+  const rawLegsCount = plan?.legs !== undefined ? Number(plan.legs) : NaN;
+  const plannedLegsCount =
+    Number.isFinite(rawLegsCount) && rawLegsCount > 0
+      ? rawLegsCount
+      : legs.length > 0
+        ? legs.length
+        : null;
+  const plannedVehicle = plan?.vehicle ? String(plan.vehicle) : null;
+  const rawCo2e = plan?.co2e_kg !== undefined ? Number(plan.co2e_kg) : NaN;
+  const plannedCo2eKg = Number.isFinite(rawCo2e) && rawCo2e > 0 ? rawCo2e : null;
+  const meetsDeadline =
+    typeof plan?.meets_deadline === "boolean" ? plan.meets_deadline : null;
 
   return (
     <>
@@ -91,30 +110,26 @@ export default async function ShipmentDetail({
       <Assistant reference={shipment.reference} />
 
       <Panel
-        title="Corridor map & place intelligence"
+        title="Corridor map & route summary"
         hint={`${originCity} → ${destinationCity}`}
       >
-        <div className="corridor-grid">
-          <ShipmentCorridorMap
-            apiKey={mapsApiKey}
-            origin={originPoint}
-            destination={destinationPoint}
-            originLabel={String(shipment.origin?.address ?? originCity)}
-            destinationLabel={String(shipment.destination?.address ?? destinationCity)}
-            alert={isAlert}
-          />
-          <MapsGroundingPanel
-            title="Live Maps Corridor Briefing"
-            context={{
-              label: `${originCity} → ${destinationCity}`,
-              lat: focusPoint?.lat,
-              lng: focusPoint?.lng,
-              originCity,
-              destinationCity,
-              modes: Array.isArray(plan?.modes) ? (plan.modes as string[]) : undefined,
-            }}
-          />
-        </div>
+        <ShipmentCorridorSection
+          apiKey={mapsApiKey}
+          origin={originPoint}
+          destination={destinationPoint}
+          originCity={originCity}
+          destinationCity={destinationCity}
+          originLabel={String(shipment.origin?.address ?? originCity)}
+          destinationLabel={String(shipment.destination?.address ?? destinationCity)}
+          alert={isAlert}
+          plannedDistanceKm={plannedDistanceKm}
+          plannedTransitHours={plannedTransitHours}
+          plannedModes={plannedModes}
+          plannedLegsCount={plannedLegsCount}
+          plannedVehicle={plannedVehicle}
+          plannedCo2eKg={plannedCo2eKg}
+          meetsDeadline={meetsDeadline}
+        />
       </Panel>
 
       <div className="grid-2">

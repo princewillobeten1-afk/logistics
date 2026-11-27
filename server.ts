@@ -51,16 +51,52 @@ interface LocalStoreShape {
       shipment_id?: string;
       kind?: string;
       severity?: string;
-      resolved_at?: string | null;
+      state?: string;
       detail?: { summary?: string };
     }>;
-    approvals?: Array<{ status?: string; reason?: string }>;
+    approvals?: Array<{ state?: string; summary?: string }>;
+    drivers?: Array<{
+      name?: string;
+      active?: boolean;
+      duty_status?: string;
+      assigned_to?: string | null;
+      current_city?: string | null;
+      current_lat?: string | number | null;
+      current_lon?: string | number | null;
+      hos_drive_remaining_hours?: string | number | null;
+    }>;
     orders?: Array<{ reference: string; state: string }>;
     channels?: Array<{ channel?: string; state?: string; enabled?: boolean; credentials?: unknown; config?: Record<string, unknown> }>;
   };
   dataByOrg?: Record<
     string,
     {
+      shipments?: Array<{
+        reference: string;
+        state: string;
+        origin?: { city?: string };
+        destination?: { city?: string };
+        deadline?: string | null;
+        cargo?: { description?: string; hazmat?: boolean; reefer?: boolean };
+      }>;
+      exceptions?: Array<{
+        shipment_id?: string;
+        kind?: string;
+        severity?: string;
+        state?: string;
+        detail?: { summary?: string };
+      }>;
+      approvals?: Array<{ state?: string; summary?: string }>;
+      drivers?: Array<{
+        name?: string;
+        active?: boolean;
+        duty_status?: string;
+        assigned_to?: string | null;
+        current_city?: string | null;
+        current_lat?: string | number | null;
+        current_lon?: string | number | null;
+        hos_drive_remaining_hours?: string | number | null;
+      }>;
       channels?: Array<{ channel?: string; state?: string; enabled?: boolean; credentials?: unknown; config?: Record<string, unknown> }>;
     }
   >;
@@ -202,7 +238,7 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
       client = await pool.connect();
       await client.query("SET ROLE logistics_app");
       await client.query("SELECT set_config('app.current_org', $1, false)", [auth.orgId]);
-      const [shipRes, excRes, appRes] = await Promise.all([
+      const [shipRes, excRes, appRes, drvRes] = await Promise.all([
         client.query<{
           reference: string;
           state: string;
@@ -221,15 +257,20 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
         client.query<{ severity: string; kind: string }>(
           `SELECT severity, kind
              FROM exceptions
-            WHERE resolved_at IS NULL
+            WHERE state <> 'RESOLVED'
             ORDER BY created_at DESC
             LIMIT 6`,
         ),
         client.query<{ count: string }>(
           `SELECT count(*)::text AS count
              FROM approvals
-            WHERE status = 'PENDING'`,
+            WHERE state = 'PENDING'`,
         ),
+        client
+          .query<{ total: string }>(
+            `SELECT count(*)::text AS total FROM drivers WHERE active = true`,
+          )
+          .catch(() => ({ rows: [{ total: "0" }] })),
       ]);
       const ships = shipRes.rows
         .map(
@@ -239,10 +280,12 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
         .join("; ");
       const excs = excRes.rows.map((e) => `${e.severity} ${e.kind}`).join("; ");
       const pendingApprovals = Number(appRes.rows[0]?.count ?? 0);
+      const activeDrivers = Number(drvRes.rows[0]?.total ?? 0);
       return [
         `Active shipments (${shipRes.rows.length} shown): ${ships || "none currently recorded"}.`,
         `Open exceptions (${excRes.rows.length}): ${excs || "none"}.`,
         `Pending spending approvals: ${pendingApprovals}.`,
+        `Active drivers on roster: ${activeDrivers}.`,
       ].join(" ");
     } catch {
       pgUnavailableUntil = Date.now() + 60_000;
@@ -259,9 +302,18 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
   }
 
   const store = readLocalStore();
-  const shipments = (store?.data?.shipments ?? []).slice(0, 8);
-  const openExceptions = (store?.data?.exceptions ?? []).filter((e) => !e.resolved_at).slice(0, 6);
-  const pendingApprovals = (store?.data?.approvals ?? []).filter((a) => a.status === "PENDING").length;
+  const orgData = store?.dataByOrg?.[auth.orgId] ?? store?.data;
+  const shipments = (orgData?.shipments ?? []).slice(0, 8);
+  const openExceptions = (orgData?.exceptions ?? [])
+    .filter((e) => e.state !== "RESOLVED")
+    .slice(0, 6);
+  const pendingApprovals = (orgData?.approvals ?? []).filter(
+    (a) => a.state === "PENDING",
+  ).length;
+  const drivers = (orgData?.drivers ?? []).filter((d) => d.active !== false);
+  const availableDrivers = drivers.filter(
+    (d) => !d.assigned_to && (d.duty_status ?? "AVAILABLE") === "AVAILABLE",
+  );
 
   const shipsSummary = shipments
     .map(
@@ -272,11 +324,19 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
   const excSummary = openExceptions
     .map((e) => `${e.severity ?? "OPEN"} ${e.kind ?? "EXCEPTION"}${e.detail?.summary ? `: ${e.detail.summary.slice(0, 60)}` : ""}`)
     .join("; ");
+  const driverSummary = availableDrivers
+    .slice(0, 5)
+    .map(
+      (d) =>
+        `${d.name ?? "Driver"}${d.current_city ? ` near ${d.current_city}` : ""}${d.hos_drive_remaining_hours != null ? ` (${d.hos_drive_remaining_hours}h HOS)` : ""}`,
+    )
+    .join("; ");
 
   return [
     `Active shipments (${shipments.length} shown): ${shipsSummary || "none currently recorded"}.`,
     `Open exceptions (${openExceptions.length}): ${excSummary || "none"}.`,
     `Pending spending approvals: ${pendingApprovals}.`,
+    `Available nearby drivers (${availableDrivers.length}/${drivers.length}): ${driverSummary || "none currently idle"}.`,
   ].join(" ");
 }
 

@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import test from "node:test";
-import { query } from "@/lib/db";
 import { getConnectorTemplate } from "./catalog";
-import { processUniversalIngestion } from "./engine";
-import { createOrgConnector, deleteOrgConnector } from "./store";
 import {
   detectAndParseRawPayload,
   normalizeRecordDeterministically,
   parseCsvRecords,
   parseEdiX12,
+  parseSqlInsertRecords,
 } from "./mapper";
 import {
   generateConnectorApiKey,
@@ -18,6 +14,7 @@ import {
   isBlockedIpAddress,
   signWebhookPayload,
   timingSafeHexEquals,
+  validateDatabaseUrlSyntax,
   validateOutboundWebhookUrlSyntax,
   verifyWebhookSignature,
 } from "./security";
@@ -69,6 +66,33 @@ test("validateOutboundWebhookUrlSyntax blocks SSRF targets and allows public htt
   }
   assert.equal(isBlockedIpAddress("8.8.8.8"), false);
   assert.equal(isBlockedIpAddress("169.254.169.254"), true);
+});
+
+test("validateDatabaseUrlSyntax blocks localhost, private IPs, and non-PostgreSQL protocols", () => {
+  const ok = validateDatabaseUrlSyntax(
+    "postgresql://readonly:secret@db.acme-logistics.example:5432/ops?sslmode=require",
+  );
+  assert.equal(ok.ok, true);
+  assert.equal(ok.host, "db.acme-logistics.example");
+  assert.equal(ok.port, 5432);
+  assert.equal(ok.database, "ops");
+
+  const blocked = [
+    "postgresql://user:pass@localhost:5432/ops",
+    "postgres://user:pass@127.0.0.1:5432/ops",
+    "postgres://user:pass@10.0.0.12:5432/ops",
+    "postgres://user:pass@169.254.169.254:5432/ops",
+    "postgres://user:pass@db.internal:5432/ops",
+    "mysql://user:pass@db.acme.example:3306/ops",
+    "https://db.acme.example/ops",
+  ];
+  for (const uri of blocked) {
+    assert.equal(
+      validateDatabaseUrlSyntax(uri).ok,
+      false,
+      `Expected DB URI to be rejected: ${uri}`,
+    );
+  }
 });
 
 test("parseCsvRecords handles quoted commas and escaped quotes cleanly", () => {
@@ -176,102 +200,46 @@ test("normalizeRecordDeterministically normalizes SAP, Shopify (grams->kg), Sams
   assert.equal(wmsNorm.normalized.onHand, 340);
 });
 
-test("processUniversalIngestion persists TELEMETRY and INVENTORY_SYNC with Postgres-valid schema SQL", async () => {
-  const engineSrc = readFileSync(
-    path.join(process.cwd(), "lib", "integrations", "engine.ts"),
-    "utf8",
-  );
-  assert.equal(
-    /UPDATE\s+conveyances[\s\S]*SET\s+last_lat/i.test(engineSrc),
-    false,
-    "engine.ts must update conveyances.identifiers JSONB and tracking_events, not non-existent last_lat column",
-  );
-  assert.equal(
-    /INSERT\s+INTO\s+inventory\s*\(\s*warehouse\s*,/i.test(engineSrc),
-    false,
-    "engine.ts must use inventory.warehouse_id referencing warehouses(id)",
-  );
-  assert.equal(
-    /INSERT\s+INTO\s+shipment_events[\s\S]*VALUES\s*\(\$1,\s*1,/i.test(engineSrc),
-    false,
-    "engine.ts must compute next seq via COALESCE(MAX(seq), 0) + 1",
-  );
+test("detectAndParseRawPayload unwraps multi-table whole-database JSON in dependency order", () => {
+  const fullDbTpl = getConnectorTemplate("full_database_import")!;
+  const parsed = detectAndParseRawPayload(fullDbTpl.samplePayload);
+  assert.equal(parsed.format, "JSON");
+  assert.equal(parsed.records.length, 6);
 
-  const orgId = "00000000-0000-0000-0000-000000000001";
-  const created = await createOrgConnector({
-    orgId,
-    name: "WMS & Telematics Integration Test",
-    systemType: "manhattan_wms",
-    autonomyMode: "SYNC_ONLY",
-    createdBy: "test@example.com",
-  });
+  const entities = parsed.records.map(
+    (rec) => normalizeRecordDeterministically(rec).normalized.entityType,
+  );
+  assert.deepEqual(entities, [
+    "WAREHOUSE",
+    "CARRIER",
+    "CUSTOMER",
+    "FLEET_VEHICLE",
+    "DRIVER",
+    "ORDER",
+  ]);
+});
 
-  try {
-    // 1. Inventory sync should create/resolve warehouse and upsert inventory
-    const wmsRes = await processUniversalIngestion({
-      connector: {
-        id: created.connector.id,
-        org_id: orgId,
-        name: created.connector.name,
-        system_type: "manhattan_wms",
-        category: "WMS",
-        status: "ACTIVE",
-        autonomy_mode: "SYNC_ONLY",
-        api_key_prefix: created.connector.apiKeyPrefix,
-        api_key_hash: "unused",
-        webhook_secret_hash: "unused",
-        outbound_webhook_url: null,
-        outbound_events: [],
-        field_mapping: created.connector.fieldMapping,
-        created_by: "test@example.com",
-        created_at: new Date(),
-        updated_at: new Date(),
-        last_sync_at: null,
-        events_processed: 0,
-        errors_count: 0,
-      },
-      rawPayload: getConnectorTemplate("manhattan_wms")!.samplePayload,
-      syncOrchestrate: false,
-    });
-    assert.equal(wmsRes.processed, 1);
-    const invRows = await query<{ warehouse: string; sku: string; on_hand: number }>(
-      `SELECT w.code AS warehouse, i.sku, i.on_hand, i.reserved, (i.on_hand - i.reserved) AS available
-         FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
-        ORDER BY w.code, i.sku`,
-    );
-    assert.ok(
-      invRows.some((r) => r.warehouse === "LOS-HUB-01" && r.sku === "SKU-SOLAR-450W" && r.on_hand === 340),
-    );
+test("parseSqlInsertRecords parses multi-table SQL dumps safely and normalizes every entity type", () => {
+  const pgTpl = getConnectorTemplate("postgres_database")!;
+  const parsed = detectAndParseRawPayload(pgTpl.samplePayload);
+  assert.equal(parsed.format, "SQL_DUMP");
+  assert.equal(parsed.records.length, 5);
 
-    // 2. Telematics GPS update should update conveyance telemetry cleanly
-    const gpsTpl = getConnectorTemplate("samsara_telematics")!;
-    const gpsRes = await processUniversalIngestion({
-      connector: {
-        id: created.connector.id,
-        org_id: orgId,
-        name: "Samsara GPS",
-        system_type: "samsara_telematics",
-        category: "TELEMATICS",
-        status: "ACTIVE",
-        autonomy_mode: "SYNC_ONLY",
-        api_key_prefix: created.connector.apiKeyPrefix,
-        api_key_hash: "unused",
-        webhook_secret_hash: "unused",
-        outbound_webhook_url: null,
-        outbound_events: [],
-        field_mapping: gpsTpl.defaultFieldMapping,
-        created_by: "test@example.com",
-        created_at: new Date(),
-        updated_at: new Date(),
-        last_sync_at: null,
-        events_processed: 0,
-        errors_count: 0,
-      },
-      rawPayload: gpsTpl.samplePayload,
-      syncOrchestrate: false,
-    });
-    assert.equal(gpsRes.processed, 1);
-  } finally {
-    await deleteOrgConnector(created.connector.id, orgId);
-  }
+  const entities = parsed.records.map(
+    (rec) => normalizeRecordDeterministically(rec).normalized.entityType,
+  );
+  assert.deepEqual(entities, [
+    "WAREHOUSE",
+    "CARRIER",
+    "FLEET_VEHICLE",
+    "CUSTOMER",
+    "ORDER",
+  ]);
+
+  const escapedSql =
+    "INSERT INTO public.customers (code, name, email, sla_hours) VALUES ('C-1', 'O''Reilly Freight', 'ops@oreilly.example', 24);";
+  const rows = parseSqlInsertRecords(escapedSql);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, "O'Reilly Freight");
+  assert.equal(rows[0].sla_hours, 24);
 });

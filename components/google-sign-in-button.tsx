@@ -27,7 +27,7 @@ function formatGoogleAuthError(err: unknown): string {
         ? "Browser storage is blocked inside this embedded preview. Open sign-in in a new tab to continue."
         : "Your browser has third-party storage or cookies disabled. Enable storage for this site and try again.";
     case "auth/unauthorized-domain":
-      return `Google sign-in is not authorized for ${typeof window !== "undefined" ? window.location.hostname : "this domain"}.`;
+      return `Google sign-in is not authorized for ${typeof window !== "undefined" ? window.location.hostname : "this domain"}. Use email sign-in below or authorize this domain in Firebase Auth.`;
     case "auth/operation-not-allowed":
       return "Google sign-in provider is not enabled for this project.";
     case "auth/network-request-failed":
@@ -69,6 +69,7 @@ export function GoogleSignInButton({
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({

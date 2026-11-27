@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
-import { buildMapNetworkData } from "@/lib/map-data";
-import { listLocations, listShipments } from "@/lib/queries";
+import { runWithOrgScope } from "@/lib/db";
+import { buildMapDriverPins, buildMapNetworkData } from "@/lib/map-data";
+import { listDrivers, listLocations, listShipments } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -15,18 +16,23 @@ export async function GET() {
   }
 
   try {
-    const [locations, shipments] = await Promise.all([
-      listLocations(),
-      listShipments(),
-    ]);
-    const data = buildMapNetworkData(locations, shipments);
-    return NextResponse.json(
-      {
-        ...data,
-        fetchedAt: new Date().toISOString(),
-      },
-      { headers: { "Cache-Control": "no-store" } },
-    );
+    return await runWithOrgScope(user.orgId, async () => {
+      const [locations, shipments, drivers] = await Promise.all([
+        listLocations(),
+        listShipments(),
+        listDrivers(),
+      ]);
+      const data = buildMapNetworkData(locations, shipments);
+      const driverPins = buildMapDriverPins(drivers, locations);
+      return NextResponse.json(
+        {
+          ...data,
+          drivers: driverPins,
+          fetchedAt: new Date().toISOString(),
+        },
+        { headers: { "Cache-Control": "no-store" } },
+      );
+    });
   } catch (err) {
     return NextResponse.json(
       {

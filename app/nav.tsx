@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
@@ -8,10 +9,11 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  BookOpen,
+  BrainCircuit,
   ClipboardList,
   Compass,
   FileText,
-  Hexagon,
   Layers,
   LayoutGrid,
   Mail,
@@ -25,6 +27,7 @@ import {
   Settings,
   ShieldCheck,
   Ship,
+  SlidersHorizontal,
   Truck,
   Users,
   Warehouse,
@@ -33,6 +36,8 @@ import {
 
 const ICONS: Record<string, ReactNode> = {
   "/": <LayoutGrid size={16} strokeWidth={1.75} aria-hidden="true" />,
+  "/intelligence": <BrainCircuit size={16} strokeWidth={1.75} aria-hidden="true" />,
+  "/tactics": <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/map": <Map size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/orders": <ClipboardList size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/shipments": <Package size={16} strokeWidth={1.75} aria-hidden="true" />,
@@ -52,6 +57,7 @@ const ICONS: Record<string, ReactNode> = {
   "/activity": <Activity size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/queue": <Layers size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/integrations": <Plug size={16} strokeWidth={1.75} aria-hidden="true" />,
+  "/api-docs": <BookOpen size={16} strokeWidth={1.75} aria-hidden="true" />,
   "/settings": <Settings size={16} strokeWidth={1.75} aria-hidden="true" />,
 };
 
@@ -60,6 +66,8 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
     group: "Operations",
     items: [
       { href: "/", label: "Overview" },
+      { href: "/intelligence", label: "Business Intelligence" },
+      { href: "/tactics", label: "Logistics tactics" },
       { href: "/map", label: "Shipments map" },
       { href: "/orders", label: "Orders" },
       { href: "/shipments", label: "Shipments" },
@@ -97,12 +105,28 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
     group: "System",
     items: [
       { href: "/integrations", label: "Integrations" },
+      { href: "/api-docs", label: "API Docs" },
       { href: "/activity", label: "Activity" },
       { href: "/queue", label: "Work queue" },
       { href: "/settings", label: "Settings" },
     ],
   },
 ];
+
+function BrandEmblem() {
+  return (
+    <span className="brand-mark brand-mark-logo" aria-hidden="true">
+      <Image
+        src="/images/landing/control-tower-logo.jpg"
+        alt=""
+        width={28}
+        height={28}
+        className="brand-mark-img"
+        referrerPolicy="no-referrer"
+      />
+    </span>
+  );
+}
 
 function NavLinks({
   pathname,
@@ -156,11 +180,16 @@ export function NavShell({
 
   useEffect(() => {
     if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   return (
@@ -169,9 +198,7 @@ export function NavShell({
       <aside className="rail">
         <div className="brand">
           <div className="brand-lockup">
-            <span className="brand-mark" aria-hidden="true">
-              <Hexagon size={16} strokeWidth={2} />
-            </span>
+            <BrandEmblem />
             <div className="brand-text">
               <span>Control Tower</span>
               <strong>{orgName || "Workspace"}</strong>
@@ -182,12 +209,10 @@ export function NavShell({
         {account}
       </aside>
 
-      {/* Mobile compact sticky bar (<= 52px tall) */}
+      {/* Mobile compact sticky bar (<= 54px tall) */}
       <div className="mobile-bar">
         <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">
-            <Hexagon size={15} strokeWidth={2} />
-          </span>
+          <BrandEmblem />
           <div className="brand-text">
             <span>Control Tower</span>
             <strong>{orgName || "Workspace"}</strong>
@@ -228,9 +253,7 @@ export function NavShell({
             >
               <div className="brand">
                 <div className="brand-lockup">
-                  <span className="brand-mark" aria-hidden="true">
-                    <Hexagon size={16} strokeWidth={2} />
-                  </span>
+                  <BrandEmblem />
                   <div className="brand-text">
                     <span>Control Tower</span>
                     <strong>{orgName || "Workspace"}</strong>

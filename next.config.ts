@@ -19,6 +19,11 @@ const nextConfig: NextConfig = {
   // traced and bundled into the server build.
   serverExternalPackages: ["pg"],
   typescript: { ignoreBuildErrors: false },
+  experimental: {
+    serverActions: {
+      allowedOrigins: ["*.run.app", "localhost:3000", "127.0.0.1:3000"],
+    },
+  },
 };
 
 export default nextConfig;

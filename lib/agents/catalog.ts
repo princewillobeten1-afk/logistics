@@ -312,18 +312,18 @@ export const CORE_AGENTS: CoreAgentDefinition[] = [
     name: "Fleet Management Agent",
     domainId: "route_fleet",
     primaryRole:
-      "Monitors vehicle availability, driver schedules, licence compliance, fuel efficiency, and maintenance risk across fleet assets.",
+      "Locates nearby available drivers by GPS proximity, enforces Hours-of-Service (HOS) and licence compliance, and matches vehicle equipment (reefer, hazmat, payload) to live pickups.",
     capabilities: [
-      "Vehicle utilization and reefer/hazmat capacity matching",
-      "Driver licence expiry and dispatch eligibility checks",
-      "Idle capacity and fuel/maintenance risk flags",
+      "Geospatial nearby-driver discovery and approach ETA ranking",
+      "HOS driving/on-duty clock and licence expiry compliance gating",
+      "Vehicle utilization, reefer/hazmat matching, and stale GPS alerts",
     ],
     targetRoute: "/fleet",
     targetLabel: "Fleet",
     thinkingDepth: "LOW",
     quickPrompts: [
-      "Audit driver licence expirations, hazmat certifications, and idle vehicles ready for immediate dispatch.",
-      "Check assigned trucks with stale GPS telemetry and recommend fleet rebalancing actions.",
+      "Locate the nearest HOS-compliant, licence-valid drivers for every unassigned pickup and flag compliance blockers.",
+      "Audit driver licence expirations, low HOS clocks, hazmat certifications, and idle vehicles ready for immediate dispatch.",
     ],
   },
   {
@@ -619,8 +619,8 @@ const ORCHESTRATOR_KEYWORD_RULES: Array<{
 }> = [
   {
     agentId: "exception-resolution",
-    pattern: /exception|delay|sla|drift|incident|risk|breach|missing|stalled/i,
-    defaultSubtask: "Audit active exceptions, stalled work items, and SLA risks.",
+    pattern: /exception|delay|sla|drift|incident|risk|breach|missing|stalled|detention|dwell/i,
+    defaultSubtask: "Audit active exceptions, dock detention/dwell risks, stalled work items, and SLA breaches.",
   },
   {
     agentId: "human-escalation",
@@ -634,8 +634,8 @@ const ORCHESTRATOR_KEYWORD_RULES: Array<{
   },
   {
     agentId: "fleet-management",
-    pattern: /fleet|truck|vehicle|driver|licen[cs]e|fuel|maintenance|gps/i,
-    defaultSubtask: "Check vehicle availability, driver compliance, and fleet telemetry.",
+    pattern: /fleet|truck|vehicle|driver|nearby|closest|nearest|hos|hours of service|licen[cs]e|fuel|maintenance|gps|dispatch/i,
+    defaultSubtask: "Locate nearby HOS-compliant drivers, verify licence eligibility, and match fleet capacity.",
   },
   {
     agentId: "carrier-management",
@@ -644,8 +644,8 @@ const ORCHESTRATOR_KEYWORD_RULES: Array<{
   },
   {
     agentId: "warehouse-coordination",
-    pattern: /warehouse|inventory|stock|sku|pick|pack|dispatch|hub/i,
-    defaultSubtask: "Inspect hub inventory reservations, shortages, and dispatch readiness.",
+    pattern: /warehouse|inventory|stock|sku|pick|pack|dock|hub/i,
+    defaultSubtask: "Inspect hub inventory reservations, shortages, and dock dispatch readiness.",
   },
   {
     agentId: "order-management",
@@ -664,8 +664,8 @@ const ORCHESTRATOR_KEYWORD_RULES: Array<{
   },
   {
     agentId: "financial-management",
-    pattern: /financ|cost|budget|fx|currency|invoice|spend|margin/i,
-    defaultSubtask: "Evaluate transport costs, FX exposure, and spend caps.",
+    pattern: /financ|cost|budget|fx|currency|invoice|spend|margin|accessorial|detention/i,
+    defaultSubtask: "Evaluate transport costs, detention/accessorial exposure, FX rates, and spend caps.",
   },
   {
     agentId: "logistics-analytics",
@@ -674,8 +674,8 @@ const ORCHESTRATOR_KEYWORD_RULES: Array<{
   },
   {
     agentId: "workflow-automation",
-    pattern: /workflow|document|pod|waybill|customs|queue|dead[- ]letter|automation/i,
-    defaultSubtask: "Audit unverified documents, customs declarations, and queue health.",
+    pattern: /workflow|document|pod|e-pod|bol|e-bol|waybill|customs|queue|dead[- ]letter|automation/i,
+    defaultSubtask: "Audit unverified e-BOL/e-POD documents, customs declarations, and queue health.",
   },
   {
     agentId: "shipment-management",

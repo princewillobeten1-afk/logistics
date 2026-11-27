@@ -6,6 +6,7 @@ export interface MapLayerVisibility {
   warehouses: boolean;
   gateways: boolean;
   routes: boolean;
+  drivers: boolean;
   weather: boolean;
 }
 
@@ -13,6 +14,7 @@ export const DEFAULT_MAP_LAYERS: MapLayerVisibility = {
   warehouses: true,
   gateways: true,
   routes: true,
+  drivers: true,
   weather: true,
 };
 

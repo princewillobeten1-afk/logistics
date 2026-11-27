@@ -1,20 +1,18 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { motion } from "motion/react";
-import {
-  ArrowRight,
-  Bot,
-  Box,
-  Check,
-  Compass,
-  MessageSquare,
-  Plug,
-  ShieldCheck,
-} from "lucide-react";
-import { DecisionSimulator } from "./decision-simulator";
+import { AnimatePresence, motion } from "motion/react";
+import { ArrowRight, Check, Menu, X } from "lucide-react";
+import { ArchitectureBento } from "./architecture-bento";
+import { DispatchEditorialSection } from "./dispatch-editorial";
+import { FaqSection } from "./faq-section";
+import { HeroBackdrop } from "./hero-backdrop";
+import { HeroMetricsStrip } from "./hero-metrics";
+import { HeroWorkflowShowcase } from "./hero-workflow-showcase";
+import { IntegrationsShowcase } from "./integrations-showcase";
+import { TransformationStory } from "./transformation-story";
 
 interface LandingPageProps {
   isAuthenticated: boolean;
@@ -27,79 +25,14 @@ interface BriefingState {
 }
 
 const VOLUME_OPTIONS = [
-  "Under 500 shipments / month",
-  "500 – 2,500 shipments / month",
-  "2,500 – 10,000 shipments / month",
-  "10,000+ shipments / month",
-];
-
-const HERO_METRICS = [
-  { value: "4 modes", label: "Road, air, sea & rail planned natively" },
-  { value: "6-factor", label: "Weighted carrier scoring on every tender" },
-  { value: "< 12s", label: "Exception detection to carrier reroute" },
-  { value: "100%", label: "Spend bounded by versioned approval caps" },
-];
-
-const ARCHITECTURE_LAYERS = [
-  {
-    layer: "Ingest",
-    spec: "REST · EDI X12 · Webhooks · CSV",
-    guarantee: "Idempotent schema validation & dead-letter recovery",
-  },
-  {
-    layer: "Plan",
-    spec: "Deterministic corridor & fleet solver",
-    guarantee: "Reproducible transit, carbon & conveyance matching",
-  },
-  {
-    layer: "Gate",
-    spec: "Versioned spend caps & SLA floors",
-    guarantee: "Human-in-the-loop escalation before threshold breach",
-  },
-  {
-    layer: "Notify",
-    spec: "Telegram · WhatsApp · Email · Console",
-    guarantee: "Live ETA replies & exception updates on every lane",
-  },
-];
-
-const PROOF_OUTCOMES = [
-  {
-    metric: "−41%",
-    title: "Exception resolution time",
-    detail:
-      "Measured across 1,400 monthly cold-chain shipments within 90 days of moving from manual escalation threads to policy-gated rerouting.",
-  },
-  {
-    metric: "+$1.8M",
-    title: "Annualized freight savings",
-    detail:
-      "Captured across 62 active intermodal corridors by scoring contracted carriers automatically instead of defaulting to late spot bookings.",
-  },
-  {
-    metric: "99.4%",
-    title: "Policy gate compliance",
-    detail:
-      "Enforced across 14,200+ automated tenders with full tenant isolation, versioned spend ceilings, and auditable override logs.",
-  },
-];
-
-const TESTIMONIALS = [
-  {
-    quote:
-      "We replaced four spreadsheets and a shared inbox with one policy-gated workflow. Dispatchers now intervene only on the 6% of loads that genuinely breach a spend cap or customs hold.",
-    name: "Nadia Lindqvist",
-    role: "VP of Supply Chain · Nordhavn Cold Freight",
-  },
-  {
-    quote:
-      "Connecting our ERP order feed and Telegram customer updates took one afternoon. Missed dock windows dropped by more than a third in our first six weeks.",
-    name: "Chukwuemeka Okafor",
-    role: "Director of Fleet Operations · Meridian Intermodal",
-  },
+  "Under 500 shipments per month",
+  "500 to 2,500 shipments per month",
+  "2,500 to 10,000 shipments per month",
+  "10,000+ shipments per month",
 ];
 
 export function LandingPage({ isAuthenticated }: LandingPageProps) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [form, setForm] = useState<BriefingState>({
     email: "",
     volume: VOLUME_OPTIONS[1],
@@ -108,18 +41,34 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<BriefingState | null>(null);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    const onResize = () => {
+      if (window.innerWidth > 860) setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [mobileNavOpen]);
+
   const handleBriefingSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const cleanEmail = form.email.trim();
     const cleanStack = form.stack.trim();
 
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      setError("Enter a valid work email address so we can send your rollout plan.");
+      setError("Enter a valid work email address so we can prepare your rollout plan.");
       return;
     }
 
     if (cleanStack.length < 2) {
-      setError("List at least one system you want to connect (e.g., SAP, Shopify, EDI, CSV).");
+      setError("List at least one system you want to connect, such as SAP, Shopify, EDI, or CSV.");
       return;
     }
 
@@ -137,349 +86,359 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
       <header className="lp-header">
         <div className="lp-container lp-header-inner">
           <Link href="/" className="lp-brand">
-            <Compass size={19} aria-hidden="true" />
+            <span className="lp-brand-mark">
+              <Image
+                src="/images/landing/control-tower-logo.jpg"
+                alt="Control Tower logo"
+                width={32}
+                height={32}
+                priority
+                className="lp-brand-mark-img"
+                referrerPolicy="no-referrer"
+              />
+            </span>
             <span>Control Tower</span>
           </Link>
 
           <nav className="lp-nav" aria-label="Primary navigation">
-            <a href="#simulator">Simulator</a>
-            <a href="#platform">Platform</a>
-            <a href="#proof">Proof</a>
-            <a href="#connect">Connect</a>
+            <a href="#transformation">Why Switch</a>
+            <a href="#integrations">Integrations</a>
+            <a href="#governance">Architecture</a>
+            <a href="#dispatch">Dispatch</a>
+            <a href="#faq">FAQ</a>
           </nav>
 
           <div className="lp-header-cta">
             <Link
               href={isAuthenticated ? "/" : "/signup"}
-              className="lp-btn lp-btn-primary"
+              className="lp-btn lp-btn-primary lp-header-primary-btn"
             >
               <span>{isAuthenticated ? "Open Console" : "Launch Workspace"}</span>
               <ArrowRight size={15} aria-hidden="true" />
             </Link>
+
+            <button
+              type="button"
+              className="lp-mobile-toggle"
+              aria-expanded={mobileNavOpen}
+              aria-controls="lp-mobile-menu"
+              aria-label={mobileNavOpen ? "Close navigation menu" : "Open navigation menu"}
+              onClick={() => setMobileNavOpen((prev) => !prev)}
+            >
+              {mobileNavOpen ? (
+                <X size={20} aria-hidden="true" />
+              ) : (
+                <Menu size={20} aria-hidden="true" />
+              )}
+            </button>
           </div>
         </div>
+
+        <AnimatePresence initial={false}>
+          {mobileNavOpen ? (
+            <motion.nav
+              id="lp-mobile-menu"
+              className="lp-mobile-drawer"
+              aria-label="Mobile navigation"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <div className="lp-container lp-mobile-drawer-inner">
+                <div className="lp-mobile-links">
+                  <a href="#workflows" onClick={() => setMobileNavOpen(false)}>
+                    Live Workflows
+                  </a>
+                  <a href="#transformation" onClick={() => setMobileNavOpen(false)}>
+                    Why Teams Switch
+                  </a>
+                  <a href="#integrations" onClick={() => setMobileNavOpen(false)}>
+                    ERP &amp; Carrier Integrations
+                  </a>
+                  <a href="#governance" onClick={() => setMobileNavOpen(false)}>
+                    Governance &amp; Architecture
+                  </a>
+                  <a href="#dispatch" onClick={() => setMobileNavOpen(false)}>
+                    Operations &amp; Weekly Dispatch
+                  </a>
+                  <a href="#faq" onClick={() => setMobileNavOpen(false)}>
+                    Frequently Asked Questions
+                  </a>
+                </div>
+
+                <div className="lp-mobile-actions">
+                  <Link
+                    href={isAuthenticated ? "/" : "/signup"}
+                    className="lp-btn lp-btn-primary lp-btn-full"
+                    onClick={() => setMobileNavOpen(false)}
+                  >
+                    <span>{isAuthenticated ? "Open Console" : "Create Free Workspace"}</span>
+                    <ArrowRight size={15} aria-hidden="true" />
+                  </Link>
+                  <Link
+                    href={isAuthenticated ? "/integrations" : "/login"}
+                    className="lp-mobile-secondary-link"
+                    onClick={() => setMobileNavOpen(false)}
+                  >
+                    {isAuthenticated ? "Configure integrations" : "Sign in to existing console"}
+                  </Link>
+                </div>
+              </div>
+            </motion.nav>
+          ) : null}
+        </AnimatePresence>
       </header>
 
       <main>
-        {/* Hero Proposition */}
-        <section className="lp-hero">
+        {/* Editorial Hero + Architectural Bezel Obsidian Product Stage */}
+        <section id="workflows" className="lp-hero">
+          <HeroBackdrop />
+
           <div className="lp-container">
-            <div className="lp-hero-grid">
-              <motion.div
-                className="lp-hero-copy"
-                initial={{ opacity: 0, y: 14 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+            <motion.div
+              className="lp-hero-intro"
+              initial="hidden"
+              animate="visible"
+              variants={{
+                hidden: {},
+                visible: {
+                  transition: {
+                    staggerChildren: 0.065,
+                  },
+                },
+              }}
+            >
+              <motion.p
+                className="lp-eyebrow"
+                variants={{
+                  hidden: { opacity: 0, y: 10 },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    transition: { duration: 0.5, ease: [0.22, 1, 0.36, 1] },
+                  },
+                }}
               >
-                <p className="lp-eyebrow">AUTONOMOUS FREIGHT OPERATIONS</p>
-                <h1 className="lp-h1">
-                  Freight that plans, scores, and recovers itself.
-                </h1>
-                <p className="lp-lead">
-                  Plug your ERP, carrier contracts, and fleet telematics into one
-                  control tower. Deterministic code calculates corridors and ranks
-                  bids, while policy-gated agents resolve delays and notify
-                  customers before an SLA slips.
-                </p>
-
-                <div className="lp-hero-actions">
-                  <Link
-                    href={isAuthenticated ? "/" : "/signup"}
-                    className="lp-btn lp-btn-primary lp-btn-lg"
-                  >
-                    <span>
-                      {isAuthenticated ? "Return to Console" : "Create Free Workspace"}
-                    </span>
-                    <ArrowRight size={16} aria-hidden="true" />
-                  </Link>
-
-                  <Link
-                    href={isAuthenticated ? "/integrations" : "/login"}
-                    className="lp-link-quiet"
-                  >
-                    {isAuthenticated ? "Configure integrations →" : "Sign in to console →"}
-                  </Link>
-                </div>
-
-                <p className="lp-hero-meta">
-                  Road · Air · Sea · Rail · SAP, Shopify, EDI X12 &amp; Telegram ready
-                </p>
-              </motion.div>
+                Enterprise Freight Orchestration · SAP, EDI X12 &amp; Fleet Telematics
+              </motion.p>
+              <motion.h1
+                className="lp-h1"
+                variants={{
+                  hidden: { opacity: 0, y: 14 },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    transition: { duration: 0.56, ease: [0.22, 1, 0.36, 1] },
+                  },
+                }}
+              >
+                Never pay spot premiums{" "}
+                <span className="lp-h1-muted">for a preventable delay.</span>
+              </motion.h1>
+              <motion.p
+                className="lp-lead"
+                variants={{
+                  hidden: { opacity: 0, y: 14 },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    transition: { duration: 0.56, ease: [0.22, 1, 0.36, 1] },
+                  },
+                }}
+              >
+                Control Tower unifies your ERP orders, carrier rate cards, live
+                GPS, and weather hazards on one operational plane—scoring
+                contracted backup lanes in seconds and executing recoveries
+                strictly inside your approved spend ceilings.
+              </motion.p>
 
               <motion.div
-                className="lp-hero-media"
-                initial={{ opacity: 0, y: 18 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.55, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+                className="lp-hero-actions"
+                variants={{
+                  hidden: { opacity: 0, y: 12 },
+                  visible: {
+                    opacity: 1,
+                    y: 0,
+                    transition: { duration: 0.52, ease: [0.22, 1, 0.36, 1] },
+                  },
+                }}
               >
-                <div className="lp-photo-frame lp-hero-frame">
-                  <Image
-                    src="/images/landing/hero-terminal.jpg"
-                    alt="Twilight intermodal container port and rail freight terminal with illuminated gantry cranes"
-                    fill
-                    priority
-                    sizes="(max-width: 960px) 100vw, 50vw"
-                    className="lp-photo-img"
-                    referrerPolicy="no-referrer"
-                  />
-                  <div className="lp-photo-scrim" aria-hidden="true" />
-                  <div className="lp-photo-caption">
-                    <span>INTERMODAL CORRIDOR DISPATCH</span>
-                    <span>POLICY-GATED AUTONOMY · MULTI-TENANT</span>
-                  </div>
-                </div>
-              </motion.div>
-            </div>
+                <Link
+                  href={isAuthenticated ? "/" : "/signup"}
+                  className="lp-btn lp-btn-primary lp-btn-lg"
+                >
+                  <span>
+                    {isAuthenticated ? "Open Live Console" : "Start Free Workspace"}
+                  </span>
+                  <ArrowRight size={16} aria-hidden="true" />
+                </Link>
 
-            {/* Full-Width 4-Column Hairline Metric Strip */}
-            <div className="lp-metric-strip" aria-label="Core platform capabilities">
-              {HERO_METRICS.map((item) => (
-                <div key={item.label} className="lp-metric-cell">
-                  <strong className="lp-metric-value">{item.value}</strong>
-                  <span className="lp-metric-label">{item.label}</span>
-                </div>
-              ))}
-            </div>
+                <Link
+                  href={isAuthenticated ? "/integrations" : "/login"}
+                  className="lp-link-quiet"
+                >
+                  <span>{isAuthenticated ? "Configure Integrations" : "Sign In to Console"}</span>
+                  <ArrowRight size={14} aria-hidden="true" />
+                </Link>
+              </motion.div>
+            </motion.div>
+
+            <HeroMetricsStrip />
+
+            <motion.div
+              className="lp-hero-stage-wrap"
+              initial={{ opacity: 0, y: 24, scale: 0.988 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ duration: 0.65, delay: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <HeroWorkflowShowcase />
+            </motion.div>
           </div>
         </section>
 
-        {/* Section 01: Interactive Decision Engine Simulator */}
-        <section id="simulator" className="lp-section">
+        {/* Section 01: Problem Agitation & Before/After Transformation Story */}
+        <section id="transformation" className="lp-section lp-section-alt">
           <div className="lp-container">
             <div className="lp-section-head">
-              <div className="lp-section-index">01. Interactive Decision Engine</div>
+              <div className="lp-section-index">01. Operational &amp; Margin Impact</div>
               <div className="lp-section-head-grid">
                 <h2 className="lp-h2">
-                  Test the deterministic planner and policy gate live.
+                  The hidden cost of manual dispatch{" "}
+                  <span className="lp-h2-muted">across high-stakes lanes.</span>
                 </h2>
                 <p className="lp-section-sub">
-                  Adjust corridor, transport mode, cargo certification, weight, and
-                  autonomous spend ceiling. Every score, transit window, and gate
-                  decision below is computed by the exact planning and carrier
-                  scoring modules running inside Control Tower.
+                  When weather closes a corridor or a vessel berths late,
+                  disconnected portals push teams into reactive spot tenders and
+                  missed receiving windows. Compare legacy exception handling
+                  with Control Tower across three real lanes.
                 </p>
               </div>
             </div>
 
-            <DecisionSimulator />
+            <TransformationStory isAuthenticated={isAuthenticated} />
           </div>
         </section>
 
-        {/* Section 02: Asymmetric Capabilities Bento */}
-        <section id="platform" className="lp-section lp-section-alt">
+        {/* Section 02: Tabbed ERP, EDI & Carrier Integration Showcase */}
+        <section id="integrations" className="lp-section">
           <div className="lp-container">
             <div className="lp-section-head">
-              <div className="lp-section-index">02. Built for Real Freight Operations</div>
+              <div className="lp-section-index">02. Enterprise System Integration</div>
               <div className="lp-section-head-grid">
                 <h2 className="lp-h2">
-                  One deterministic core. Every ERP, carrier, and channel wired in.
+                  Unify your existing logistics stack{" "}
+                  <span className="lp-h2-muted">without replacing your ERP.</span>
                 </h2>
                 <p className="lp-section-sub">
-                  Built for logistics teams that cannot afford opaque black-box
-                  bookings. Keep your existing ERP and carrier relationships while
-                  automating intake, dispatch, and exception recovery.
+                  Stream purchase orders, EDI load tenders, fleet telematics,
+                  and dispatch channels through schema-validated adapters with
+                  idempotent ingestion and full audit replay.
                 </p>
               </div>
             </div>
 
-            <div className="lp-bento">
-              {/* Row 1: Marquee 2-col Photo Card */}
-              <article className="lp-bento-card lp-bento-span-2 lp-bento-media-card">
-                <Image
-                  src="/images/landing/cargo-aircraft.jpg"
-                  alt="Wide-body cargo aircraft loading ULD containers at dusk"
-                  fill
-                  sizes="(max-width: 960px) 100vw, 66vw"
-                  className="lp-photo-img"
-                  referrerPolicy="no-referrer"
-                />
-                <div className="lp-bento-media-scrim" aria-hidden="true" />
-                <div className="lp-bento-media-content">
-                  <div className="lp-bento-kicker">
-                    <Plug size={15} aria-hidden="true" />
-                    <span>Universal Integration Hub</span>
-                  </div>
-                  <h3>Drop in your existing ERP, WMS, or telematics in hours.</h3>
-                  <p>
-                    Ingest orders, inventory snapshots, and GPS beacons through
-                    signed API keys, EDI X12 parsers, CSV drops, or native webhooks
-                    for SAP, NetSuite, Shopify, and Samsara—with automatic payload
-                    normalization and dead-letter replay.
-                  </p>
-                </div>
-              </article>
-
-              {/* Row 1: 1-col Card */}
-              <article className="lp-bento-card">
-                <div className="lp-bento-icon" aria-hidden="true">
-                  <ShieldCheck size={18} />
-                </div>
-                <h3>Policy-Gated Spend Autonomy</h3>
-                <p>
-                  Versioned spend ceilings, deadline on-time floors, and lane
-                  constraints govern every agent action. Routine tenders clear
-                  automatically; anything above ceiling stops for one-tap human
-                  approval.
-                </p>
-                <div className="lp-bento-foot">
-                  <span>Row-level tenant isolation</span>
-                  <span>Cryptographic audit trail</span>
-                </div>
-              </article>
-
-              {/* Row 2: 1-col Card */}
-              <article className="lp-bento-card">
-                <div className="lp-bento-icon" aria-hidden="true">
-                  <MessageSquare size={18} />
-                </div>
-                <h3>Omnichannel Dispatch &amp; Support</h3>
-                <p>
-                  Shippers, drivers, and warehouse teams ask for live ETAs, report
-                  delays, or book freight directly over Telegram, WhatsApp, email,
-                  and embedded web chat—backed by real shipment state.
-                </p>
-                <div className="lp-bento-foot">
-                  <span>Live Telegram &amp; WhatsApp bots</span>
-                  <span>Zero stale status replies</span>
-                </div>
-              </article>
-
-              {/* Row 2: 2-col Architecture Card */}
-              <article className="lp-bento-card lp-bento-span-2">
-                <div className="lp-bento-head-row">
-                  <div className="lp-bento-kicker-plain">
-                    <Box size={16} aria-hidden="true" />
-                    <span>Interactive 3D Fleet &amp; Autonomous Pipeline</span>
-                  </div>
-                  <div className="lp-bento-kicker-plain">
-                    <Bot size={16} aria-hidden="true" />
-                    <span>Voice &amp; Agent Copilot</span>
-                  </div>
-                </div>
-                <h3>Inspect live road, air, sea, and rail units with zero blind spots.</h3>
-                <p>
-                  Every shipment flows through four auditable stages—from raw order
-                  ingest to 3D conveyance telemetry, carrier negotiation, and
-                  proactive customer escalation.
-                </p>
-
-                <div className="lp-arch-table" role="table" aria-label="Execution pipeline stages">
-                  {ARCHITECTURE_LAYERS.map((row) => (
-                    <div key={row.layer} className="lp-arch-row" role="row">
-                      <span className="lp-arch-layer" role="cell">
-                        {row.layer}
-                      </span>
-                      <span className="lp-arch-spec" role="cell">
-                        {row.spec}
-                      </span>
-                      <span className="lp-arch-guarantee" role="cell">
-                        {row.guarantee}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
+            <IntegrationsShowcase isAuthenticated={isAuthenticated} />
           </div>
         </section>
 
-        {/* Section 03: Quantified Proof of Impact */}
-        <section id="proof" className="lp-section">
+        {/* Section 03: Deep Obsidian Multimodal Bento & Governance Showcase */}
+        <section id="governance" className="lp-section lp-section-dark">
+          <div className="lp-dark-section-glow" aria-hidden="true" />
           <div className="lp-container">
-            <div className="lp-proof-grid">
-              <div className="lp-proof-media-col">
-                <div className="lp-photo-frame lp-proof-frame">
-                  <Image
-                    src="/images/landing/freight-corridor.jpg"
-                    alt="Modern freight transport crossing a misty cable-stayed highway bridge at dawn"
-                    fill
-                    sizes="(max-width: 960px) 100vw, 44vw"
-                    className="lp-photo-img"
-                    referrerPolicy="no-referrer"
-                  />
-                  <div className="lp-photo-scrim" aria-hidden="true" />
-                  <div className="lp-photo-caption">
-                    <span>CORRIDOR RELIABILITY BENCHMARK</span>
-                    <span>62 ACTIVE LANES · Q1–Q4 AUDIT</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="lp-proof-content-col">
-                <div className="lp-section-index">03. Operational Outcomes</div>
+            <div className="lp-section-head">
+              <div className="lp-section-index">03. Deterministic Core &amp; Governance</div>
+              <div className="lp-section-head-grid">
                 <h2 className="lp-h2">
-                  Measurable gains before the first quarter closes.
+                  Built for operational speed.{" "}
+                  <span className="lp-h2-muted">Governed for financial audit.</span>
                 </h2>
-
-                <div className="lp-outcomes-list">
-                  {PROOF_OUTCOMES.map((item) => (
-                    <div key={item.title} className="lp-outcome-row">
-                      <div className="lp-outcome-metric">{item.metric}</div>
-                      <div className="lp-outcome-copy">
-                        <h3>{item.title}</h3>
-                        <p>{item.detail}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="lp-quotes-grid">
-                  {TESTIMONIALS.map((item) => (
-                    <blockquote key={item.name} className="lp-quote-card">
-                      <p>&ldquo;{item.quote}&rdquo;</p>
-                      <footer>
-                        <strong>{item.name}</strong>
-                        <span>{item.role}</span>
-                      </footer>
-                    </blockquote>
-                  ))}
-                </div>
+                <p className="lp-section-sub">
+                  Corridor routing and carrier scoring run in reproducible
+                  application code, while versioned pre-award spend ceilings
+                  protect every dollar committed.
+                </p>
               </div>
             </div>
+
+            <ArchitectureBento />
           </div>
         </section>
 
-        {/* Section 04: Interactive Deployment & Briefing Conversion */}
+        {/* Section 04: Field Operations Photography & Weekly Dispatch Newsletter */}
+        <section id="dispatch" className="lp-section lp-section-alt">
+          <div className="lp-container">
+            <div className="lp-section-head">
+              <div className="lp-section-index">04. Field Operations &amp; Weekly Dispatch</div>
+              <div className="lp-section-head-grid">
+                <h2 className="lp-h2">
+                  Production corridor teardowns,{" "}
+                  <span className="lp-h2-muted">documented every Tuesday.</span>
+                </h2>
+                <p className="lp-section-sub">
+                  Our weekly operations briefing examines real port-to-rail
+                  handovers, cold-chain compliance audits, contract-versus-spot
+                  benchmarks, and enforceable spend rules.
+                </p>
+              </div>
+            </div>
+
+            <DispatchEditorialSection />
+          </div>
+        </section>
+
+        {/* Section 05: Frequently Asked Questions */}
+        <section id="faq" className="lp-section">
+          <div className="lp-container">
+            <FaqSection />
+          </div>
+        </section>
+
+        {/* Section 06: Deployment & Briefing Conversion */}
         <section id="connect" className="lp-section lp-section-alt">
           <div className="lp-container">
             <div className="lp-connect-grid">
               <div className="lp-connect-copy">
-                <div className="lp-section-index">04. Deploy on Your Network</div>
-                <h2 className="lp-h2">Plug in your first corridor today.</h2>
+                <div className="lp-section-index">06. Rapid Network Deployment</div>
+                <h2 className="lp-h2">
+                  Deploy across priority lanes{" "}
+                  <span className="lp-h2-muted">in under two weeks.</span>
+                </h2>
                 <p className="lp-section-sub">
-                  Start immediately in a tenant-isolated workspace or request a
-                  tailored integration walkthrough for your ERP, EDI, and messaging
-                  channels.
+                  Start by shadow-scoring live tenders alongside your existing
+                  TMS in a tenant-isolated workspace, or outline your stack to
+                  generate a tailored connector rollout sequence.
                 </p>
 
                 <ol className="lp-rollout-steps">
                   <li>
-                    <span className="lp-rollout-num">Day 1</span>
+                    <span className="lp-rollout-num">Step 1</span>
                     <div>
-                      <strong>Connect order &amp; carrier feeds</strong>
+                      <strong>Connect order feeds &amp; rate cards</strong>
                       <p>
-                        Provision an API key, import CSV rate cards, or link your
-                        existing ERP webhook in minutes.
+                        Provision scoped API credentials, validate CSV carrier
+                        tariffs in dry-run mode, or bind your ERP webhooks.
                       </p>
                     </div>
                   </li>
                   <li>
-                    <span className="lp-rollout-num">Day 3</span>
+                    <span className="lp-rollout-num">Step 2</span>
                     <div>
-                      <strong>Shadow-score live corridor tenders</strong>
+                      <strong>Establish policy ceilings &amp; escalation</strong>
                       <p>
-                        Compare deterministic 6-factor carrier recommendations
-                        against current manual bookings with zero risk.
+                        Define lane-level spend caps, SLA deadline floors, and
+                        operator approval gates before activating live tenders.
                       </p>
                     </div>
                   </li>
                   <li>
-                    <span className="lp-rollout-num">Week 2</span>
+                    <span className="lp-rollout-num">Step 3</span>
                     <div>
-                      <strong>Activate policy-gated autonomous dispatch</strong>
+                      <strong>Enable policy-gated recovery</strong>
                       <p>
-                        Turn on spend-capped bookings, exception rerouting, and
-                        Telegram or WhatsApp customer updates.
+                        Score backup carriers deterministically, intercept
+                        corridor delays early, and maintain complete finance
+                        auditability.
                       </p>
                     </div>
                   </li>
@@ -491,12 +450,13 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                     className="lp-btn lp-btn-primary lp-btn-lg"
                   >
                     <span>
-                      {isAuthenticated ? "Go to Dashboard" : "Create Free Workspace"}
+                      {isAuthenticated ? "Open Live Console" : "Start Free Workspace"}
                     </span>
                     <ArrowRight size={16} aria-hidden="true" />
                   </Link>
                   <Link href="/login" className="lp-link-quiet">
-                    Existing operator? Sign in →
+                    <span>Existing operator? Sign in</span>
+                    <ArrowRight size={14} aria-hidden="true" />
                   </Link>
                 </div>
               </div>
@@ -507,8 +467,8 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                     <div className="lp-success-icon" aria-hidden="true">
                       <Check size={20} />
                     </div>
-                    <span className="lp-eyebrow-mono">ROLLOUT BRIEFING PREPARED</span>
-                    <h3>Architecture checklist ready for {submitted.email}</h3>
+                    <span className="lp-sub-label">Rollout Checklist Ready</span>
+                    <h3>Integration outline prepared for {submitted.email}</h3>
                     <p>
                       Configured for <strong>{submitted.volume}</strong> integrating{" "}
                       <strong>{submitted.stack}</strong>.
@@ -518,19 +478,19 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                       <li>
                         <Check size={14} aria-hidden="true" />
                         <span>
-                          Connector mapping &amp; idempotency keys for {submitted.stack}
+                          Connector mapping and idempotency keys for {submitted.stack}
                         </span>
                       </li>
                       <li>
                         <Check size={14} aria-hidden="true" />
                         <span>
-                          Custom spend-cap policy template calibrated to your monthly volume
+                          Spend-cap policy configuration matched to your shipment volume
                         </span>
                       </li>
                       <li>
                         <Check size={14} aria-hidden="true" />
                         <span>
-                          Live sandbox workspace with Telegram &amp; webhook testing enabled
+                          Tenant-isolated workspace ready for live webhooks and channel bots
                         </span>
                       </li>
                     </ul>
@@ -543,7 +503,7 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                         <span>
                           {isAuthenticated
                             ? "Open Integrations Hub"
-                            : "Launch Sandbox Now"}
+                            : "Create Workspace"}
                         </span>
                         <ArrowRight size={15} aria-hidden="true" />
                       </Link>
@@ -559,11 +519,12 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                 ) : (
                   <form onSubmit={handleBriefingSubmit} noValidate className="lp-form">
                     <div className="lp-form-head">
-                      <span className="lp-eyebrow-mono">ARCHITECTURE BRIEFING</span>
-                      <h3>Map your logistics stack</h3>
+                      <span className="lp-sub-label">Integration Architecture Plan</span>
+                      <h3>Request your rollout checklist</h3>
                       <p>
-                        Tell us your monthly load volume and systems—we will
-                        generate a direct integration plan.
+                        Provide your monthly shipment volume and core logistics
+                        systems to generate a scoped connector, idempotency, and
+                        policy-cap sequence.
                       </p>
                     </div>
 
@@ -573,7 +534,7 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                         id="briefing-email"
                         type="email"
                         autoComplete="email"
-                        placeholder="ops@company.com"
+                        placeholder="you@company.com"
                         value={form.email}
                         onChange={(e) => setForm({ ...form, email: e.target.value })}
                         required
@@ -602,7 +563,7 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                       <input
                         id="briefing-stack"
                         type="text"
-                        placeholder="e.g. SAP S/4HANA, Shopify, EDI X12, Samsara, Telegram"
+                        placeholder="SAP, NetSuite, EDI X12, Samsara, Telegram"
                         value={form.stack}
                         onChange={(e) => setForm({ ...form, stack: e.target.value })}
                         required
@@ -616,12 +577,12 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
                     ) : null}
 
                     <button type="submit" className="lp-btn lp-btn-primary lp-btn-full">
-                      <span>Generate Integration Plan</span>
+                      <span>Request Integration Blueprint</span>
                       <ArrowRight size={15} aria-hidden="true" />
                     </button>
 
                     <p className="lp-form-foot">
-                      No credit card required · Tenant-isolated deployment
+                      Clean tenant-isolated workspace provisioned immediately upon signup.
                     </p>
                   </form>
                 )}
@@ -636,17 +597,28 @@ export function LandingPage({ isAuthenticated }: LandingPageProps) {
         <div className="lp-container lp-footer-inner">
           <div className="lp-footer-brand">
             <Link href="/" className="lp-brand">
-              <Compass size={17} aria-hidden="true" />
+              <span className="lp-brand-mark lp-brand-mark-sm">
+                <Image
+                  src="/images/landing/control-tower-logo.jpg"
+                  alt="Control Tower logo"
+                  width={26}
+                  height={26}
+                  className="lp-brand-mark-img"
+                  referrerPolicy="no-referrer"
+                />
+              </span>
               <span>Control Tower</span>
             </Link>
-            <p>Deterministic freight planning &amp; policy-gated autonomy.</p>
+            <p>Deterministic freight orchestration and policy-gated recovery.</p>
           </div>
 
           <div className="lp-footer-links">
-            <a href="#simulator">Simulator</a>
-            <a href="#platform">Platform</a>
-            <a href="#proof">Proof</a>
-            <a href="#connect">Connect</a>
+            <a href="#workflows">Workflows</a>
+            <a href="#transformation">Why Switch</a>
+            <a href="#integrations">Integrations</a>
+            <a href="#governance">Architecture</a>
+            <a href="#dispatch">Dispatch</a>
+            <a href="#faq">FAQ</a>
             <Link href="/login">Sign in</Link>
             <Link href="/signup">Create Workspace</Link>
           </div>

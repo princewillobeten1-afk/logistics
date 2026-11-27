@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { Live } from "@/app/live";
+import { AgentDiagnosticsPanel } from "@/components/agent-diagnostics-panel";
 import { relative } from "@/lib/format";
 import {
   activityFeed,
@@ -78,6 +79,8 @@ export default async function Activity({
       </div>
 
       <Live label="agent and system activity" />
+
+      <AgentDiagnosticsPanel />
 
       <div className="filters">
         <Link href="/activity" data-active={!selected}>

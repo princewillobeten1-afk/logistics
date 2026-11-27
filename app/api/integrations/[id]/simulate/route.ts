@@ -7,7 +7,7 @@ import { getOrgConnector } from "@/lib/integrations/store";
 
 export const dynamic = "force-dynamic";
 
-const MAX_BYTES = 512 * 1024;
+const MAX_BYTES = 2 * 1024 * 1024;
 
 export async function POST(
   req: NextRequest,
@@ -52,7 +52,7 @@ export async function POST(
 
   if (body.payload === undefined || body.payload === null || body.payload === "") {
     return NextResponse.json(
-      { error: "Provide a JSON, CSV, or EDI X12 payload to ingest." },
+      { error: "Provide a JSON, SQL dump, CSV, NDJSON, or EDI X12 payload to ingest." },
       { status: 400 },
     );
   }
@@ -63,7 +63,7 @@ export async function POST(
       : Buffer.byteLength(JSON.stringify(body.payload), "utf8");
   if (serializedSize > MAX_BYTES) {
     return NextResponse.json(
-      { error: "Payload exceeds the 512 KB single-request limit." },
+      { error: "Payload exceeds the 2 MB single-request limit." },
       { status: 413 },
     );
   }
@@ -75,18 +75,28 @@ export async function POST(
     idempotencyKey: body.idempotencyKey?.trim() || null,
     actorEmail: user.email,
     syncOrchestrate: true,
-    maxRecords: 50,
+    maxRecords: 250,
   });
 
-  revalidatePath("/integrations");
-  revalidatePath("/orders");
-  revalidatePath("/shipments");
-  revalidatePath("/planning");
-  revalidatePath("/exceptions");
-  revalidatePath("/fleet");
-  revalidatePath("/warehouses");
-  revalidatePath("/queue");
-  revalidatePath("/activity");
+  for (const path of [
+    "/",
+    "/integrations",
+    "/orders",
+    "/shipments",
+    "/planning",
+    "/carriers",
+    "/fleet",
+    "/warehouses",
+    "/customers",
+    "/approvals",
+    "/exceptions",
+    "/map",
+    "/analytics",
+    "/queue",
+    "/activity",
+  ]) {
+    revalidatePath(path);
+  }
 
   return NextResponse.json(result, { status: result.processed > 0 ? 201 : 200 });
 }

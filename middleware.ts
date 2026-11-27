@@ -27,6 +27,8 @@ const PUBLIC_PATHS = new Set([
   "/signup",
   "/forgot-password",
   "/reset-password",
+  "/api/auth/login",
+  "/api/auth/signup",
   "/api/auth/google",
   "/api/auth/session",
   "/api/webhooks/whatsapp",
@@ -37,12 +39,8 @@ const PUBLIC_PATHS = new Set([
   "/api/v1/shipments",
 ]);
 
-// Of those, the ones that make no sense once already signed in. Deliberately
-// not /forgot-password or /reset-password — a signed-in visitor may still be
-// resetting a *different* account's password, or have followed an emailed
-// link from a session that is stale on this device, and bouncing them to "/"
-// would strand the reset rather than complete it.
-const REDIRECT_IF_AUTHENTICATED = new Set(["/login", "/signup"]);
+// Routes that may carry ?expired to clear a stale session cookie.
+const AUTH_ENTRY_PATHS = new Set(["/login", "/signup"]);
 
 export function middleware(request: NextRequest) {
   const { pathname, search, searchParams } = request.nextUrl;
@@ -69,36 +67,29 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (REDIRECT_IF_AUTHENTICATED.has(pathname) && hasCookie) {
-    if (searchParams.has("expired")) {
-      const res = NextResponse.next({ request: { headers } });
-      const proto = (request.headers.get("x-forwarded-proto") ?? "").toLowerCase();
-      const origin = (request.headers.get("origin") ?? "").toLowerCase();
-      const host = (
-        request.headers.get("x-forwarded-host") ??
-        request.headers.get("host") ??
-        ""
-      ).toLowerCase();
-      const isHttps =
-        proto.includes("https") ||
-        origin.startsWith("https://") ||
-        host.endsWith(".run.app") ||
-        request.nextUrl.protocol === "https:";
-      res.cookies.set(SESSION_COOKIE, "", {
-        httpOnly: true,
-        sameSite: isHttps ? "none" : "lax",
-        secure: isHttps,
-        partitioned: isHttps,
-        path: "/",
-        maxAge: 0,
-      });
-      return res;
-    }
-
-    const url = request.nextUrl.clone();
-    url.pathname = "/";
-    url.search = "";
-    return NextResponse.redirect(url);
+  if (AUTH_ENTRY_PATHS.has(pathname) && hasCookie && searchParams.has("expired")) {
+    const res = NextResponse.next({ request: { headers } });
+    const proto = (request.headers.get("x-forwarded-proto") ?? "").toLowerCase();
+    const origin = (request.headers.get("origin") ?? "").toLowerCase();
+    const host = (
+      request.headers.get("x-forwarded-host") ??
+      request.headers.get("host") ??
+      ""
+    ).toLowerCase();
+    const isHttps =
+      proto.includes("https") ||
+      origin.startsWith("https://") ||
+      host.endsWith(".run.app") ||
+      request.nextUrl.protocol === "https:";
+    res.cookies.set(SESSION_COOKIE, "", {
+      httpOnly: true,
+      sameSite: isHttps ? "none" : "lax",
+      secure: isHttps,
+      partitioned: isHttps,
+      path: "/",
+      maxAge: 0,
+    });
+    return res;
   }
 
   return NextResponse.next({ request: { headers } });

@@ -20,8 +20,8 @@ export function QuickOrderDrawer({
   const [originCity, setOriginCity] = useState("");
   const [destinationCity, setDestinationCity] = useState("");
   const [cargoDescription, setCargoDescription] = useState("");
-  const [weightKg, setWeightKg] = useState("250");
-  const [quantity, setQuantity] = useState("10");
+  const [weightKg, setWeightKg] = useState("");
+  const [quantity, setQuantity] = useState("");
   const [preferredMode, setPreferredMode] = useState("ROAD");
   const [deadlineIso, setDeadlineIso] = useState("");
   const [notes, setNotes] = useState("");
@@ -111,7 +111,7 @@ export function QuickOrderDrawer({
                   id="quick-customer"
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="e.g. Zenith Pharma Group"
+                  placeholder="Customer or consignee name"
                 />
               </label>
 
@@ -123,7 +123,7 @@ export function QuickOrderDrawer({
                     required
                     value={originCity}
                     onChange={(e) => setOriginCity(e.target.value)}
-                    placeholder="e.g. Lagos"
+                    placeholder="Origin city"
                   />
                 </label>
 
@@ -134,7 +134,7 @@ export function QuickOrderDrawer({
                     required
                     value={destinationCity}
                     onChange={(e) => setDestinationCity(e.target.value)}
-                    placeholder="e.g. Kano"
+                    placeholder="Destination city"
                   />
                 </label>
               </div>
@@ -146,7 +146,7 @@ export function QuickOrderDrawer({
                   required
                   value={cargoDescription}
                   onChange={(e) => setCargoDescription(e.target.value)}
-                  placeholder="e.g. 40 cartons medical supplies"
+                  placeholder="Cargo description"
                 />
               </label>
 

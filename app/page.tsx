@@ -37,6 +37,7 @@ export default async function Overview() {
       modeVolumeTrend={summary.modeVolumeTrend}
       todayQuoteBookingTrend={summary.todayQuoteBookingTrend}
       todayModeVolumeTrend={summary.todayModeVolumeTrend}
+      performanceTrend7d={summary.performanceTrend7d}
       shipments={summary.shipments}
       locations={summary.locations}
       deadCount={dead.length}

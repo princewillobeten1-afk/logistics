@@ -23,6 +23,8 @@ const ROUTE_META: Record<string, { group: string; label: string }> = {
   "/communications": { group: "Records", label: "Communications" },
   "/documents": { group: "Records", label: "Documents" },
   "/analytics": { group: "Records", label: "Analytics" },
+  "/integrations": { group: "System", label: "Integrations" },
+  "/api-docs": { group: "System", label: "API Docs" },
   "/activity": { group: "System", label: "Activity" },
   "/queue": { group: "System", label: "Work queue" },
   "/settings": { group: "System", label: "Settings" },

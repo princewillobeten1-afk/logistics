@@ -93,3 +93,67 @@ test("work_items insert accurately parses columns when shipment_id is omitted", 
   assert.equal(inserted?.state, "DONE");
   assert.equal(inserted?.reference, null);
 });
+
+test("orchestrator keyword routing and agent context cover nearby drivers, HOS, detention, and channel contacts", async () => {
+  const { selectOrchestratorSpecialists } = await import("./catalog");
+
+  const fleetRoute = selectOrchestratorSpecialists(
+    "Find nearby HOS-compliant drivers around Lagos for urgent dispatch",
+  ).map((s) => s.agentId);
+  assert.ok(
+    fleetRoute.includes("fleet-management"),
+    `Expected fleet-management in ${JSON.stringify(fleetRoute)}`,
+  );
+
+  const detentionRoute = selectOrchestratorSpecialists(
+    "Audit dock detention and dwell accessorial fees plus unverified e-POD",
+  ).map((s) => s.agentId);
+  assert.ok(detentionRoute.includes("exception-resolution"));
+  assert.ok(detentionRoute.includes("financial-management"));
+
+  // Regression: expired driver licence days_to_expiry must remain negative
+  const expiredDate = new Date(Date.now() - 10 * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  await query(
+    `INSERT INTO drivers (
+       name, phone, licence_number, licence_expiry, hazmat_certified,
+       current_lat, current_lon, current_city, duty_status,
+       hos_drive_remaining_hours, hos_duty_remaining_hours
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [
+      "Regression Expired Driver",
+      "+2348011112222",
+      "CDL-EXP-REG-1",
+      expiredDate,
+      false,
+      6.5244,
+      3.3792,
+      "Lagos",
+      "AVAILABLE",
+      8.0,
+      11.0,
+    ],
+  );
+
+  const fleetCtx = await gatherOperationalContext("fleet-management");
+  assert.ok(fleetCtx.snapshot.logisticsReadiness);
+  const driversSnap = (fleetCtx.snapshot.drivers ?? []) as Array<{
+    name: string;
+    days_to_expiry: string | null;
+  }>;
+  const regDrv = driversSnap.find((d) => d.name === "Regression Expired Driver");
+  assert.ok(regDrv, "Registered driver should appear in fleet-management context");
+  assert.ok(
+    Number(regDrv!.days_to_expiry) < 0,
+    `Expected negative days_to_expiry, got ${regDrv!.days_to_expiry}`,
+  );
+
+  // Regression: channel_contacts query without alias must succeed for support agents
+  const contacts = await query<{ channel: string }>(
+    `SELECT channel FROM channel_contacts ORDER BY last_seen_at DESC LIMIT 5`,
+  );
+  assert.ok(Array.isArray(contacts));
+});
+

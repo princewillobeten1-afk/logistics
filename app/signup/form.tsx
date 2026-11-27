@@ -1,44 +1,109 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useFormStatus } from "react-dom";
+import { useState, type FormEvent } from "react";
 import { GoogleSignInButton } from "@/components/google-sign-in-button";
 
-import { signUpAction, type SignUpState } from "./actions";
-
 const MIN_PASSWORD_LENGTH = 10;
-
-// Disabled only while genuinely submitting. Gating the button on validation
-// instead produces a dead control with no explanation of what is wrong — and
-// with `cursor: progress` on it, one that looks like it is already working.
-// The inline hints below, the native minLength, and signUp()'s own checks all
-// still catch a bad password; none of them require a button that cannot be
-// pressed.
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <button
-      type="submit"
-      className="auth-submit"
-      data-pending={pending}
-      disabled={pending}
-    >
-      {pending ? "Creating your workspace…" : "Create workspace"}
-    </button>
-  );
-}
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function SignUpForm() {
-  const [state, action] = useActionState<SignUpState, FormData>(signUpAction, {
-    error: null,
-  });
   const [companyName, setCompanyName] = useState("");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newTabUrl, setNewTabUrl] = useState<string | null>(null);
 
   const mismatch = confirm.length > 0 && password !== confirm;
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+
+    setError(null);
+    setNewTabUrl(null);
+
+    const trimmedCompany = companyName.trim();
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+
+    if (trimmedCompany.length < 2) {
+      setError("Enter your company name (at least 2 characters).");
+      return;
+    }
+    if (!trimmedName) {
+      setError("Enter your name.");
+      return;
+    }
+    if (!EMAIL_RE.test(trimmedEmail)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setPending(true);
+    try {
+      const res = await fetch("/api/auth/signup", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          companyName: trimmedCompany,
+          name: trimmedName,
+          email: trimmedEmail,
+          password,
+          confirm,
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        redirectTo?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setError(data.error ?? "Could not create workspace. Please try again.");
+        setPending(false);
+        return;
+      }
+
+      const checkRes = await fetch("/api/auth/session", {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const checkData = (await checkRes.json().catch(() => ({}))) as {
+        authenticated?: boolean;
+      };
+      if (!checkData.authenticated) {
+        setNewTabUrl(window.location.href);
+        setError(
+          "Your browser blocked session cookies inside this embedded preview.",
+        );
+        setPending(false);
+        return;
+      }
+
+      window.location.assign(data.redirectTo ?? "/");
+    } catch {
+      setError("Unable to reach the workspace service. Please try again.");
+      setPending(false);
+    }
+  }
 
   return (
     <div className="auth-stack">
@@ -51,7 +116,7 @@ export function SignUpForm() {
         <span>or create with email</span>
       </div>
 
-      <form action={action} className="auth-form">
+      <form onSubmit={handleSubmit} noValidate className="auth-form">
         <div className="auth-field">
           <label htmlFor="signup-company">Company name</label>
           <input
@@ -74,6 +139,8 @@ export function SignUpForm() {
             type="text"
             autoComplete="name"
             required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
           />
         </div>
 
@@ -88,6 +155,8 @@ export function SignUpForm() {
             autoCapitalize="off"
             spellCheck={false}
             required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
           />
         </div>
 
@@ -141,13 +210,32 @@ export function SignUpForm() {
           </p>
         ) : null}
 
-        {state.error ? (
-          <p className="auth-error" role="alert">
-            {state.error}
-          </p>
+        {error ? (
+          <div className="auth-error" role="alert">
+            <span>{error}</span>
+            {newTabUrl ? (
+              <div style={{ marginTop: "0.35rem" }}>
+                <a
+                  href={newTabUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="auth-link"
+                >
+                  Open in a new tab to create workspace →
+                </a>
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
-        <SubmitButton />
+        <button
+          type="submit"
+          className="auth-submit"
+          data-pending={pending}
+          disabled={pending}
+        >
+          {pending ? "Creating your workspace…" : "Create workspace"}
+        </button>
       </form>
     </div>
   );

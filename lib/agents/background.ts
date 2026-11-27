@@ -124,6 +124,7 @@ export function scheduleBackgroundAgent(
 export type OperationsSweepScope =
   | "full"
   | "exceptions"
+  | "fleet"
   | "supply"
   | "finance"
   | "customer";
@@ -132,6 +133,7 @@ const SWEEP_WORKFLOWS: Record<OperationsSweepScope, BackendWorkflow[]> = {
   full: [
     "background.orchestrate",
     "exceptions.triage",
+    "planning.fleet_dispatch",
     "tracking.monitor",
     "warehouses.inventory_balance",
     "finance.cost_audit",
@@ -142,6 +144,7 @@ const SWEEP_WORKFLOWS: Record<OperationsSweepScope, BackendWorkflow[]> = {
     "exceptions.triage",
     "approvals.escalation_gate",
   ],
+  fleet: ["planning.fleet_dispatch", "planning.optimize_routes"],
   supply: [
     "orders.validate_intake",
     "warehouses.inventory_balance",

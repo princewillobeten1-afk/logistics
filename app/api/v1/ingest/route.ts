@@ -5,7 +5,7 @@ import { authenticateConnectorApiKey } from "@/lib/integrations/store";
 
 export const dynamic = "force-dynamic";
 
-const MAX_BODY_BYTES = 512 * 1024;
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 function extractApiKey(req: NextRequest): string | null {
   const auth = req.headers.get("authorization");
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
   const contentLength = Number(req.headers.get("content-length") ?? 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
     return NextResponse.json(
-      { error: "Payload exceeds the 512 KB request limit." },
+      { error: "Payload exceeds the 2 MB request limit." },
       { status: 413 },
     );
   }
@@ -49,13 +49,13 @@ export async function POST(req: NextRequest) {
   const rawText = await req.text();
   if (!rawText.trim()) {
     return NextResponse.json(
-      { error: "Request body is empty. Send JSON, CSV, or EDI X12 payload." },
+      { error: "Request body is empty. Send JSON, SQL dump, CSV, NDJSON, or EDI X12 payload." },
       { status: 400 },
     );
   }
   if (Buffer.byteLength(rawText, "utf8") > MAX_BODY_BYTES) {
     return NextResponse.json(
-      { error: "Payload exceeds the 512 KB request limit." },
+      { error: "Payload exceeds the 2 MB request limit." },
       { status: 413 },
     );
   }
@@ -72,18 +72,28 @@ export async function POST(req: NextRequest) {
     idempotencyKey,
     actorEmail: `api@${connector.system_type}`,
     syncOrchestrate: true,
-    maxRecords: 50,
+    maxRecords: 250,
   });
 
-  revalidatePath("/integrations");
-  revalidatePath("/orders");
-  revalidatePath("/shipments");
-  revalidatePath("/planning");
-  revalidatePath("/exceptions");
-  revalidatePath("/fleet");
-  revalidatePath("/warehouses");
-  revalidatePath("/queue");
-  revalidatePath("/activity");
+  for (const path of [
+    "/",
+    "/integrations",
+    "/orders",
+    "/shipments",
+    "/planning",
+    "/carriers",
+    "/fleet",
+    "/warehouses",
+    "/customers",
+    "/approvals",
+    "/exceptions",
+    "/map",
+    "/analytics",
+    "/queue",
+    "/activity",
+  ]) {
+    revalidatePath(path);
+  }
 
   return NextResponse.json(
     {
@@ -96,6 +106,8 @@ export async function POST(req: NextRequest) {
       processed: result.processed,
       duplicates: result.duplicates,
       failed: result.failed,
+      entityCounts: result.entityCounts,
+      takeoverSummary: result.takeoverSummary,
       results: result.outcomes.map((o) => ({
         index: o.index,
         status: o.status,

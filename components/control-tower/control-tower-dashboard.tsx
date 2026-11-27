@@ -18,6 +18,7 @@ import {
 import dynamic from "next/dynamic";
 import { CarrierWireframe } from "@/components/control-tower/carrier-wireframe";
 import { ControlTowerCharts } from "@/components/control-tower/control-tower-charts";
+import { PerformanceTrendChart } from "@/components/control-tower/performance-trend-chart";
 
 const Carrier3DStage = dynamic(
   () =>
@@ -39,6 +40,7 @@ import { resolveLocationCoordinates } from "@/lib/maps-grounding";
 import type {
   ControlTowerKpis,
   ControlTowerShipmentItem,
+  DailyPerformancePoint,
   ModeVolumePoint,
   QuoteBookingPoint,
 } from "@/lib/queries";
@@ -131,6 +133,7 @@ export function ControlTowerDashboard({
   modeVolumeTrend,
   todayQuoteBookingTrend,
   todayModeVolumeTrend,
+  performanceTrend7d,
   shipments,
   locations,
   deadCount,
@@ -141,6 +144,7 @@ export function ControlTowerDashboard({
   modeVolumeTrend: ModeVolumePoint[];
   todayQuoteBookingTrend: QuoteBookingPoint[];
   todayModeVolumeTrend: ModeVolumePoint[];
+  performanceTrend7d: DailyPerformancePoint[];
   shipments: ControlTowerShipmentItem[];
   locations: {
     id: string;
@@ -229,12 +233,12 @@ export function ControlTowerDashboard({
 
   const originCoords = useMemo(() => {
     const pt = resolveLocationCoordinates(selectedOriginCity, locations);
-    return pt ? { lat: pt.lat, lon: pt.lng } : { lat: 6.6018, lon: 3.3515 };
+    return pt ? { lat: pt.lat, lon: pt.lng } : null;
   }, [selectedOriginCity, locations]);
 
   const destCoords = useMemo(() => {
     const pt = resolveLocationCoordinates(selectedDestCity, locations);
-    return pt ? { lat: pt.lat, lon: pt.lng } : { lat: 9.0579, lon: 7.4951 };
+    return pt ? { lat: pt.lat, lon: pt.lng } : null;
   }, [selectedDestCity, locations]);
 
   function handleExportCsv() {
@@ -386,7 +390,13 @@ export function ControlTowerDashboard({
         </div>
       </dl>
 
-      {/* 3. 2-Column Analytical Charts Row */}
+      {/* 3. 7-Day Operational Performance Trends (Shipments, Emissions, Cost/Shipment) */}
+      <PerformanceTrendChart
+        data={performanceTrend7d}
+        currency={kpis.currency}
+      />
+
+      {/* 4. 2-Column Analytical Charts Row */}
       <ControlTowerCharts
         quoteBookingTrend={quoteBookingTrend}
         modeVolumeTrend={modeVolumeTrend}
@@ -593,9 +603,11 @@ export function ControlTowerDashboard({
                     Shipped via {selected.carrier_name ?? "Assigned Carrier"}
                   </strong>
                   <span>
-                    Coordinates:{" "}
-                    {(selected.last_lat ?? originCoords.lat).toFixed(4)}° N,{" "}
-                    {(selected.last_lon ?? originCoords.lon).toFixed(4)}° E
+                    {selected.last_lat != null && selected.last_lon != null
+                      ? `Coordinates: ${selected.last_lat.toFixed(4)}° N, ${selected.last_lon.toFixed(4)}° E`
+                      : originCoords
+                        ? `Origin hub: ${originCoords.lat.toFixed(4)}° N, ${originCoords.lon.toFixed(4)}° E`
+                        : "Awaiting live GPS telemetry"}
                   </span>
                 </div>
                 <Link
@@ -691,7 +703,7 @@ export function ControlTowerDashboard({
 
         {/* Column 3: Live Corridor Vector Map */}
         <section className="ct-card ct-map-col" aria-label="Live Corridor Map">
-          {selected ? (
+          {selected && originCoords && destCoords ? (
             <CorridorVectorMap
               reference={selected.reference}
               state={selected.state}
@@ -705,7 +717,11 @@ export function ControlTowerDashboard({
             />
           ) : (
             <div className="ct-empty-mini">
-              <p>No active routes mapped.</p>
+              <p>
+                {selected
+                  ? "Configure hub coordinates in Warehouses to visualize this corridor."
+                  : "No active routes mapped."}
+              </p>
             </div>
           )}
         </section>

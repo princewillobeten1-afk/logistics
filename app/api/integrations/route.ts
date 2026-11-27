@@ -12,6 +12,7 @@ import {
   listOrgIntegrationEvents,
 } from "@/lib/integrations/store";
 import { verifySameOriginRequest } from "@/lib/integrations/security";
+import type { IntegrationConnectionMode } from "@/lib/local-store";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,14 @@ const VALID_AUTONOMY = new Set<AutonomyMode>([
   "SYNC_ONLY",
 ]);
 
+const VALID_CONNECTION_MODES = new Set<IntegrationConnectionMode>([
+  "PUSH_WEBHOOK",
+  "PULL_API",
+  "POSTGRES_DB",
+  "WEBSITE_EMBED",
+  "FILE_IMPORT",
+]);
+
 export async function POST(req: NextRequest) {
   if (!verifySameOriginRequest(req.headers)) {
     return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
@@ -58,6 +67,12 @@ export async function POST(req: NextRequest) {
   let body: {
     name?: string;
     systemType?: string;
+    connectionMode?: IntegrationConnectionMode;
+    autoTakeover?: boolean;
+    sourceUrl?: string | null;
+    sourceAuthHeader?: string | null;
+    databaseUrl?: string | null;
+    dbTables?: string[];
     autonomyMode?: AutonomyMode;
     outboundWebhookUrl?: string | null;
     outboundEvents?: string[];
@@ -82,6 +97,11 @@ export async function POST(req: NextRequest) {
       ? body.autonomyMode
       : "FULL_AUTONOMOUS";
 
+  const connectionMode =
+    body.connectionMode && VALID_CONNECTION_MODES.has(body.connectionMode)
+      ? body.connectionMode
+      : undefined;
+
   const cleanFieldMapping: Record<string, string> = {};
   if (body.fieldMapping && typeof body.fieldMapping === "object") {
     for (const [k, v] of Object.entries(body.fieldMapping)) {
@@ -99,6 +119,19 @@ export async function POST(req: NextRequest) {
         typeof body.systemType === "string" && body.systemType.trim()
           ? body.systemType.trim()
           : "custom_rest_webhook",
+      connectionMode,
+      autoTakeover: body.autoTakeover !== false,
+      sourceUrl:
+        typeof body.sourceUrl === "string" ? body.sourceUrl.trim() || null : null,
+      sourceAuthHeader:
+        typeof body.sourceAuthHeader === "string"
+          ? body.sourceAuthHeader.trim() || null
+          : null,
+      databaseUrl:
+        typeof body.databaseUrl === "string" ? body.databaseUrl.trim() || null : null,
+      dbTables: Array.isArray(body.dbTables)
+        ? body.dbTables.filter((x): x is string => typeof x === "string").slice(0, 60)
+        : undefined,
       autonomyMode,
       outboundWebhookUrl:
         typeof body.outboundWebhookUrl === "string"
@@ -120,6 +153,7 @@ export async function POST(req: NextRequest) {
       after: {
         connectorId: created.connector.id,
         systemType: created.connector.systemType,
+        connectionMode: created.connector.connectionMode,
         autonomyMode: created.connector.autonomyMode,
       },
     });

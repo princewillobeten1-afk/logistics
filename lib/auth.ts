@@ -326,7 +326,8 @@ export async function signIn(
     return { ok: false, error: "Invalid email or password." };
   }
 
-  return { ok: true, user: await startSession(row, meta) };
+  const started = await startSessionWithCookie(row, meta);
+  return { ok: true, user: started.user, cookie: started.cookie };
 }
 
 export async function signInWithGoogle(
@@ -422,7 +423,9 @@ export async function signInWithGoogle(
  * there is no invite system yet, so joining an *existing* org still goes
  * through `python -m logistics.cli create-user`.
  */
-export type SignUpResult = { ok: true; user: SessionUser } | { ok: false; error: string };
+export type SignUpResult =
+  | { ok: true; user: SessionUser; cookie?: SessionCookieMeta }
+  | { ok: false; error: string };
 
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "org";
@@ -578,7 +581,8 @@ export async function signUp(
     throw err;
   }
 
-  return { ok: true, user: await startSession(row, meta) };
+  const started = await startSessionWithCookie(row, meta);
+  return { ok: true, user: started.user, cookie: started.cookie };
 }
 
 // ---------------------------------------------------------- forgot password

@@ -11,12 +11,14 @@ import {
 } from "@/components/google-network-map";
 import type { MapShipmentItem } from "@/components/network-map";
 import { city, toneFor } from "@/lib/format";
+import type { MapDriverPin } from "@/lib/map-data";
 import { formatStateLabel } from "@/lib/view-helpers";
 
 type MapRefreshResponse = {
   points?: GoogleMapPoint[];
   lanes?: GoogleMapLane[];
   active?: MapShipmentItem[];
+  drivers?: MapDriverPin[];
   fetchedAt?: string;
   error?: string;
 };
@@ -26,15 +28,18 @@ export function MapViewClient({
   initialPoints,
   initialLanes,
   initialActive,
+  initialDrivers = [],
 }: {
   apiKey: string;
   initialPoints: GoogleMapPoint[];
   initialLanes: GoogleMapLane[];
   initialActive: MapShipmentItem[];
+  initialDrivers?: MapDriverPin[];
 }) {
   const [points, setPoints] = useState<GoogleMapPoint[]>(initialPoints);
   const [lanes, setLanes] = useState<GoogleMapLane[]>(initialLanes);
   const [active, setActive] = useState<MapShipmentItem[]>(initialActive);
+  const [drivers, setDrivers] = useState<MapDriverPin[]>(initialDrivers);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
@@ -64,6 +69,7 @@ export function MapViewClient({
       if (Array.isArray(data.points)) setPoints(data.points);
       if (Array.isArray(data.lanes)) setLanes(data.lanes);
       if (Array.isArray(data.active)) setActive(data.active);
+      if (Array.isArray(data.drivers)) setDrivers(data.drivers);
       if (data.fetchedAt) setLastRefreshedAt(data.fetchedAt);
     } catch {
       setRefreshError("Network error while refreshing shipment and location data.");
@@ -78,25 +84,17 @@ export function MapViewClient({
         <header>
           <h2>Network</h2>
           <span className="hint">
-            {points.length} sites · {lanes.length} active lane(s)
+            {points.length} sites · {lanes.length} active lane(s) · {drivers.length} GPS driver(s)
           </span>
         </header>
-        {points.length === 0 ? (
-          <div className="empty">
-            <span className="empty-icon" aria-hidden="true">
-              <PackageOpen size={18} strokeWidth={1.75} />
-            </span>
-            <strong>No locations yet</strong>
-            <div className="empty-hint">
-              The map draws itself once your warehouses, ports and airports are
-              configured.
-            </div>
-          </div>
-        ) : (
-          <div className="body">
-            <GoogleNetworkMap apiKey={apiKey} points={points} lanes={lanes} />
-          </div>
-        )}
+        <div className="body">
+          <GoogleNetworkMap
+            apiKey={apiKey}
+            points={points}
+            lanes={lanes}
+            drivers={drivers}
+          />
+        </div>
       </section>
 
       <section className="panel">

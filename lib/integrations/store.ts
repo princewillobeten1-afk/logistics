@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { identityQuery, pool } from "@/lib/db";
 import type {
+  IntegrationConnectionMode,
   IntegrationConnectorRecord,
   IntegrationEventRecord,
 } from "@/lib/local-store";
@@ -13,7 +14,10 @@ import {
   generateConnectorApiKey,
   generateWebhookSecret,
   hashSecret,
+  sealWebhookSecret,
   timingSafeHexEquals,
+  unsealWebhookSecret,
+  validateDatabaseUrlSyntax,
   validateOutboundWebhookUrlSyntax,
 } from "./security";
 
@@ -23,6 +27,12 @@ export interface PublicConnector {
   name: string;
   systemType: string;
   category: SystemCategory;
+  connectionMode: IntegrationConnectionMode;
+  autoTakeover: boolean;
+  sourceUrl: string | null;
+  hasSourceAuth: boolean;
+  hasDatabaseConfig: boolean;
+  dbTables: string[];
   status: "ACTIVE" | "PAUSED";
   autonomyMode: AutonomyMode;
   apiKeyPrefix: string;
@@ -72,6 +82,12 @@ async function ensureIntegrationTables(): Promise<void> {
         name TEXT NOT NULL,
         system_type TEXT NOT NULL,
         category TEXT NOT NULL,
+        connection_mode TEXT NOT NULL DEFAULT 'PUSH_WEBHOOK',
+        auto_takeover BOOLEAN NOT NULL DEFAULT true,
+        source_url TEXT,
+        source_auth_sealed TEXT,
+        db_config_sealed TEXT,
+        db_tables JSONB NOT NULL DEFAULT '[]'::jsonb,
         status TEXT NOT NULL DEFAULT 'ACTIVE',
         autonomy_mode TEXT NOT NULL DEFAULT 'FULL_AUTONOMOUS',
         api_key_prefix TEXT NOT NULL,
@@ -88,6 +104,24 @@ async function ensureIntegrationTables(): Promise<void> {
         errors_count INTEGER NOT NULL DEFAULT 0
       )
     `);
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS connection_mode TEXT NOT NULL DEFAULT 'PUSH_WEBHOOK'`,
+    );
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS auto_takeover BOOLEAN NOT NULL DEFAULT true`,
+    );
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS source_url TEXT`,
+    );
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS source_auth_sealed TEXT`,
+    );
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS db_config_sealed TEXT`,
+    );
+    await pool.query(
+      `ALTER TABLE integration_connectors ADD COLUMN IF NOT EXISTS db_tables JSONB NOT NULL DEFAULT '[]'::jsonb`,
+    );
     await pool.query(`
       CREATE TABLE IF NOT EXISTS integration_events (
         id TEXT PRIMARY KEY,
@@ -119,6 +153,20 @@ async function ensureIntegrationTables(): Promise<void> {
   }
 }
 
+export function unsealConnectorSecrets(row: IntegrationConnectorRecord): {
+  sourceAuthHeader: string | null;
+  databaseUrl: string | null;
+} {
+  return {
+    sourceAuthHeader: row.source_auth_sealed
+      ? unsealWebhookSecret(row.source_auth_sealed)
+      : null,
+    databaseUrl: row.db_config_sealed
+      ? unsealWebhookSecret(row.db_config_sealed)
+      : null,
+  };
+}
+
 function toPublicConnector(row: IntegrationConnectorRecord): PublicConnector {
   return {
     id: row.id,
@@ -126,6 +174,12 @@ function toPublicConnector(row: IntegrationConnectorRecord): PublicConnector {
     name: row.name,
     systemType: row.system_type,
     category: (row.category as SystemCategory) || "CUSTOM",
+    connectionMode: row.connection_mode || "PUSH_WEBHOOK",
+    autoTakeover: row.auto_takeover !== false,
+    sourceUrl: row.source_url ?? null,
+    hasSourceAuth: Boolean(row.source_auth_sealed),
+    hasDatabaseConfig: Boolean(row.db_config_sealed),
+    dbTables: Array.isArray(row.db_tables) ? row.db_tables : [],
     status: row.status === "PAUSED" ? "PAUSED" : "ACTIVE",
     autonomyMode: row.autonomy_mode || "FULL_AUTONOMOUS",
     apiKeyPrefix: row.api_key_prefix,
@@ -215,6 +269,12 @@ export async function createOrgConnector(input: {
   orgId: string;
   name: string;
   systemType: string;
+  connectionMode?: IntegrationConnectionMode;
+  autoTakeover?: boolean;
+  sourceUrl?: string | null;
+  sourceAuthHeader?: string | null;
+  databaseUrl?: string | null;
+  dbTables?: string[];
   autonomyMode?: AutonomyMode;
   outboundWebhookUrl?: string | null;
   outboundEvents?: string[];
@@ -241,6 +301,46 @@ export async function createOrgConnector(input: {
     normalizedWebhookUrl = check.normalizedUrl ?? null;
   }
 
+  let normalizedSourceUrl: string | null = null;
+  if (input.sourceUrl?.trim()) {
+    const check = validateOutboundWebhookUrlSyntax(input.sourceUrl);
+    if (!check.ok) {
+      throw new Error(
+        (check.error ?? "Invalid source API URL.").replace(
+          /Outbound webhook/gi,
+          "Source API",
+        ),
+      );
+    }
+    normalizedSourceUrl = check.normalizedUrl ?? null;
+  }
+
+  let dbConfigSealed: string | null = null;
+  if (input.databaseUrl?.trim()) {
+    const dbCheck = validateDatabaseUrlSyntax(input.databaseUrl);
+    if (!dbCheck.ok) {
+      throw new Error(dbCheck.error ?? "Invalid PostgreSQL database URI.");
+    }
+    dbConfigSealed = sealWebhookSecret(input.databaseUrl.trim());
+  }
+
+  const sourceAuthSealed = input.sourceAuthHeader?.trim()
+    ? sealWebhookSecret(input.sourceAuthHeader.trim())
+    : null;
+
+  const connectionMode: IntegrationConnectionMode =
+    input.connectionMode ??
+    (dbConfigSealed
+      ? "POSTGRES_DB"
+      : normalizedSourceUrl
+        ? "PULL_API"
+        : template?.defaultConnectionMode ?? "PUSH_WEBHOOK");
+
+  const autoTakeover = input.autoTakeover !== false;
+  const dbTables = Array.isArray(input.dbTables)
+    ? input.dbTables.filter((t): t is string => typeof t === "string" && t.trim().length > 0).slice(0, 60)
+    : [];
+
   const key = generateConnectorApiKey();
   const secret = generateWebhookSecret();
   const id = `conn_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -251,14 +351,15 @@ export async function createOrgConnector(input: {
   const outboundEvents =
     Array.isArray(input.outboundEvents) && input.outboundEvents.length > 0
       ? input.outboundEvents
-      : ["shipment.created", "shipment.planned", "exception.detected", "approval.decided"];
+      : ["shipment.created", "shipment.booked", "exception.detected", "approval.decided"];
 
   const rows = await identityQuery<IntegrationConnectorRecord>(
     `INSERT INTO integration_connectors
        (id, org_id, name, system_type, category, status, autonomy_mode,
         api_key_prefix, api_key_hash, webhook_secret_hash,
-        outbound_webhook_url, outbound_events, field_mapping, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14)
+        outbound_webhook_url, outbound_events, field_mapping, created_by,
+        connection_mode, auto_takeover, source_url, source_auth_sealed, db_config_sealed, db_tables)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17, $18, $19, $20::jsonb)
      RETURNING *`,
     [
       id,
@@ -275,6 +376,12 @@ export async function createOrgConnector(input: {
       JSON.stringify(outboundEvents),
       JSON.stringify(fieldMapping),
       input.createdBy,
+      connectionMode,
+      autoTakeover,
+      normalizedSourceUrl,
+      sourceAuthSealed,
+      dbConfigSealed,
+      JSON.stringify(dbTables),
     ],
   );
 
@@ -292,6 +399,11 @@ export async function updateOrgConnector(
     name?: string;
     status?: "ACTIVE" | "PAUSED";
     autonomyMode?: AutonomyMode;
+    autoTakeover?: boolean;
+    sourceUrl?: string | null;
+    sourceAuthHeader?: string | null;
+    databaseUrl?: string | null;
+    dbTables?: string[];
     outboundWebhookUrl?: string | null;
     outboundEvents?: string[];
     fieldMapping?: Record<string, string>;
@@ -313,11 +425,52 @@ export async function updateOrgConnector(
     }
   }
 
+  let nextSourceUrl = existing.source_url ?? null;
+  if (patch.sourceUrl !== undefined) {
+    if (!patch.sourceUrl || !patch.sourceUrl.trim()) {
+      nextSourceUrl = null;
+    } else {
+      const check = validateOutboundWebhookUrlSyntax(patch.sourceUrl);
+      if (!check.ok) {
+        throw new Error(
+          (check.error ?? "Invalid source API URL.").replace(
+            /Outbound webhook/gi,
+            "Source API",
+          ),
+        );
+      }
+      nextSourceUrl = check.normalizedUrl ?? null;
+    }
+  }
+
+  let nextSourceAuthSealed = existing.source_auth_sealed ?? null;
+  if (patch.sourceAuthHeader !== undefined) {
+    nextSourceAuthSealed = patch.sourceAuthHeader?.trim()
+      ? sealWebhookSecret(patch.sourceAuthHeader.trim())
+      : null;
+  }
+
+  let nextDbConfigSealed = existing.db_config_sealed ?? null;
+  if (patch.databaseUrl !== undefined) {
+    if (!patch.databaseUrl || !patch.databaseUrl.trim()) {
+      nextDbConfigSealed = null;
+    } else {
+      const check = validateDatabaseUrlSyntax(patch.databaseUrl);
+      if (!check.ok) {
+        throw new Error(check.error ?? "Invalid PostgreSQL database URI.");
+      }
+      nextDbConfigSealed = sealWebhookSecret(patch.databaseUrl.trim());
+    }
+  }
+
   const nextName = patch.name?.trim() || existing.name;
   const nextStatus = patch.status === "PAUSED" ? "PAUSED" : patch.status === "ACTIVE" ? "ACTIVE" : existing.status;
   const nextAutonomy = patch.autonomyMode ?? existing.autonomy_mode;
+  const nextAutoTakeover =
+    patch.autoTakeover !== undefined ? patch.autoTakeover : existing.auto_takeover !== false;
   const nextOutboundEvents = patch.outboundEvents ?? existing.outbound_events;
   const nextMapping = patch.fieldMapping ?? existing.field_mapping;
+  const nextDbTables = patch.dbTables ?? existing.db_tables ?? [];
 
   const rows = await identityQuery<IntegrationConnectorRecord>(
     `UPDATE integration_connectors
@@ -327,8 +480,13 @@ export async function updateOrgConnector(
             outbound_webhook_url = $4,
             outbound_events = $5::jsonb,
             field_mapping = $6::jsonb,
+            auto_takeover = $7,
+            source_url = $8,
+            source_auth_sealed = $9,
+            db_config_sealed = $10,
+            db_tables = $11::jsonb,
             updated_at = now()
-      WHERE id = $7 AND org_id = $8
+      WHERE id = $12 AND org_id = $13
       RETURNING *`,
     [
       nextName,
@@ -337,6 +495,11 @@ export async function updateOrgConnector(
       nextWebhookUrl,
       JSON.stringify(nextOutboundEvents),
       JSON.stringify(nextMapping),
+      nextAutoTakeover,
+      nextSourceUrl,
+      nextSourceAuthSealed,
+      nextDbConfigSealed,
+      JSON.stringify(nextDbTables),
       id,
       orgId,
     ],

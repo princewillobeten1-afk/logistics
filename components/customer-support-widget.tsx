@@ -183,7 +183,7 @@ export function CustomerSupportWidget() {
                 className="support-ref-input"
                 value={reference}
                 onChange={(e) => setReference(e.target.value)}
-                placeholder="Optional shipment ref (e.g. LG-00001)"
+                placeholder="Optional shipment reference"
                 aria-label="Shipment reference"
               />
             </div>
@@ -196,28 +196,6 @@ export function CustomerSupportWidget() {
                     change, or report an issue. Actionable requests start
                     fulfillment automatically.
                   </p>
-                  <div className="support-quick-prompts">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        sendMessage(
-                          "Book 30 cartons of medical supplies (280 kg) from Lagos to Abuja",
-                        )
-                      }
-                    >
-                      Book new shipment (Lagos → Abuja)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        sendMessage(
-                          "Route 20 pallets of retail cargo (600 kg) from Port Harcourt to Kano",
-                        )
-                      }
-                    >
-                      Plan corridor (Port Harcourt → Kano)
-                    </button>
-                  </div>
                 </div>
               ) : (
                 turns.map((turn, idx) => (

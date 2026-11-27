@@ -1,6 +1,10 @@
+import Image from "next/image";
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { currentUser } from "@/lib/auth";
 import { LoginForm } from "./form";
 
+export const dynamic = "force-dynamic";
 export const metadata = { title: "Sign in · Control Tower" };
 
 export default async function LoginPage({
@@ -9,13 +13,32 @@ export default async function LoginPage({
   searchParams: Promise<{ next?: string; reset?: string; expired?: string }>;
 }) {
   const { next, reset, expired } = await searchParams;
+  if (!expired) {
+    const user = await currentUser();
+    if (user) {
+      const target = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+      redirect(target);
+    }
+  }
 
   return (
     <main className="auth-page">
       <div className="auth-shell">
         <aside className="auth-showcase" aria-label="Platform capabilities">
           <div className="auth-showcase-head">
-            <span>Control Tower</span>
+            <div className="lp-auth-logo-lock">
+              <span className="lp-brand-mark lp-brand-mark-sm">
+                <Image
+                  src="/images/landing/control-tower-logo.jpg"
+                  alt="Control Tower logo"
+                  width={26}
+                  height={26}
+                  className="lp-brand-mark-img"
+                  referrerPolicy="no-referrer"
+                />
+              </span>
+              <span>Control Tower</span>
+            </div>
             <h2>Autonomous Logistics Operations</h2>
             <p>
               Deterministic planning and carrier scoring paired with policy-gated
@@ -54,7 +77,19 @@ export default async function LoginPage({
         <div className="auth-card">
           <div className="auth-brand">
             <div className="lp-auth-brand-row">
-              <span>Control Tower</span>
+              <div className="lp-auth-logo-lock">
+                <span className="lp-brand-mark lp-brand-mark-sm">
+                  <Image
+                    src="/images/landing/control-tower-logo.jpg"
+                    alt="Control Tower logo"
+                    width={24}
+                    height={24}
+                    className="lp-brand-mark-img"
+                    referrerPolicy="no-referrer"
+                  />
+                </span>
+                <span>Control Tower</span>
+              </div>
               <Link href="/" className="auth-link">
                 ← Back to overview
               </Link>

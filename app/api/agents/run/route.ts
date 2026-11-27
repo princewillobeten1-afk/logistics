@@ -7,6 +7,7 @@ import {
 import { MissingGeminiKeyError } from "@/lib/agents/gemini-client";
 import { executeAgentTask } from "@/lib/agents/orchestrator";
 import { currentUser } from "@/lib/auth";
+import { runWithOrgScope } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -45,12 +46,14 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const execution = await executeAgentTask({
-      agentId: agent.id as CoreAgentId,
-      task: task || agent.quickPrompts[0],
-      reference: body.reference?.trim() || undefined,
-      actorEmail: user.email,
-    });
+    const execution = await runWithOrgScope(user.orgId, () =>
+      executeAgentTask({
+        agentId: agent.id as CoreAgentId,
+        task: task || agent.quickPrompts[0],
+        reference: body.reference?.trim() || undefined,
+        actorEmail: user.email,
+      }),
+    );
 
     return NextResponse.json({
       agent: {

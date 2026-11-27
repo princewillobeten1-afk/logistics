@@ -1,23 +1,16 @@
-import { Empty, Offline, Panel, Pill } from "@/app/components";
-import {
-  InventoryPolicyForm,
-  ReplenishmentOrderActions,
-  ReplenishmentSweepButton,
-} from "@/components/lifecycle-panels";
-import { AddWarehouseForm, StarterNetworkButton } from "@/components/network-crud";
-import { money, relative } from "@/lib/format";
-import { computeInventoryEconomics } from "@/lib/planning";
-import { listInventory, listReplenishmentOrders, listWarehouses } from "@/lib/queries";
+import { Empty, Offline, Panel } from "@/app/components";
+import { InventoryReservationChart } from "@/components/warehouses/inventory-reservation-chart";
+import { listInventory, listShipments, listWarehouses } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
 export default async function Warehouses() {
-  let warehouses, inventory, replenishments;
+  let warehouses, inventory, shipments;
   try {
-    [warehouses, inventory, replenishments] = await Promise.all([
+    [warehouses, inventory, shipments] = await Promise.all([
       listWarehouses(),
       listInventory(),
-      listReplenishmentOrders(),
+      listShipments(),
     ]);
   } catch (error) {
     return (
@@ -32,59 +25,44 @@ export default async function Warehouses() {
 
   const totalOnHand = inventory.reduce((a, r) => a + r.on_hand, 0);
   const totalReserved = inventory.reduce((a, r) => a + r.reserved, 0);
+  const generatedAtIso = new Date().toISOString();
 
-  const enrichedInventory = inventory.map((row) => {
-    const econ = computeInventoryEconomics({
-      onHand: row.on_hand,
-      reserved: row.reserved,
-      safetyStock: Number(row.safety_stock ?? 20),
-      reorderPoint: Number(row.reorder_point ?? 40),
-      reorderQuantity: Number(row.reorder_quantity ?? 100),
-      unitCostMinor: Number(row.unit_cost_minor ?? 0),
-      annualHoldingRate: Number(row.annual_holding_rate ?? 0.2),
-    });
-    return { ...row, econ };
-  });
+  const trendWarehouses = warehouses.map((w) => ({
+    code: w.code,
+    name: w.name,
+    active: w.active,
+  }));
 
-  const totalStockValueMinor = enrichedInventory.reduce(
-    (sum, r) => sum + r.econ.inventoryValueMinor,
-    0,
-  );
-  const totalAnnualHoldingMinor = enrichedInventory.reduce(
-    (sum, r) => sum + r.econ.annualHoldingCostMinor,
-    0,
-  );
-  const lowStockCount = enrichedInventory.filter(
-    (r) => r.econ.stockHealth !== "HEALTHY",
-  ).length;
+  const trendShipments = shipments.map((s) => ({
+    id: s.id,
+    reference: s.reference,
+    state: s.state,
+    cargo: s.cargo,
+    allocation: s.allocation,
+    origin: s.origin,
+    created_at:
+      s.created_at instanceof Date
+        ? s.created_at.toISOString()
+        : String(s.created_at),
+    updated_at:
+      s.updated_at instanceof Date
+        ? s.updated_at.toISOString()
+        : s.updated_at
+          ? String(s.updated_at)
+          : null,
+  }));
 
   return (
     <>
-      <div
-        className="page-head"
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <div>
-          <h1>Warehouse operations</h1>
-          <p>
-            Stock, carrying cost control, and automated replenishment.{" "}
-            <strong>Dispatch lead time</strong> makes allocation deadline-aware,
-            while safety stock &amp; reorder points prevent stockouts without
-            inflating holding expenses.
-          </p>
-        </div>
-        {warehouses.length === 0 ? <StarterNetworkButton /> : <StarterNetworkButton compact />}
+      <div className="page-head">
+        <h1>Warehouse operations</h1>
+        <p>
+          Stock and dispatch capability. <strong>Dispatch lead time</strong> is
+          what makes allocation deadline-aware rather than merely stock-aware —
+          the nearest warehouse is not the fastest when it takes twice as long
+          to get goods onto a vehicle.
+        </p>
       </div>
-
-      <Panel title="Add warehouse & stock" hint="create a fulfillment site with initial inventory">
-        <AddWarehouseForm />
-      </Panel>
 
       <dl className="tiles">
         <div className="tile">
@@ -93,23 +71,31 @@ export default async function Warehouses() {
           <small>{warehouses.filter((w) => w.active).length} active</small>
         </div>
         <div className="tile">
-          <dt>Available units</dt>
-          <dd>{(totalOnHand - totalReserved).toLocaleString()}</dd>
-          <small>
-            {totalOnHand.toLocaleString()} on hand · {totalReserved.toLocaleString()} reserved
-          </small>
+          <dt>Units on hand</dt>
+          <dd>{totalOnHand.toLocaleString()}</dd>
+        </div>
+        <div className="tile warn">
+          <dt>Reserved</dt>
+          <dd>{totalReserved.toLocaleString()}</dd>
+          <small>held against open shipments</small>
         </div>
         <div className="tile">
-          <dt>Stock valuation</dt>
-          <dd>{money(totalStockValueMinor, "NGN")}</dd>
-          <small>Carrying cost {money(totalAnnualHoldingMinor, "NGN")}/yr</small>
-        </div>
-        <div className={lowStockCount > 0 ? "tile warn" : "tile"}>
-          <dt>Below reorder point</dt>
-          <dd>{lowStockCount}</dd>
-          <small>{replenishments.filter((r) => r.status !== "RECEIVED" && r.status !== "CANCELLED").length} open PO(s)</small>
+          <dt>Available</dt>
+          <dd>{(totalOnHand - totalReserved).toLocaleString()}</dd>
         </div>
       </dl>
+
+      <Panel
+        title="Inventory vs. reservations (30 days)"
+        hint="on-hand levels compared with reservation demand"
+      >
+        <InventoryReservationChart
+          warehouses={trendWarehouses}
+          inventory={inventory}
+          shipments={trendShipments}
+          generatedAtIso={generatedAtIso}
+        />
+      </Panel>
 
       <Panel title="Sites" hint="dispatch lead drives allocation" flush>
         {warehouses.length === 0 ? (
@@ -148,7 +134,9 @@ export default async function Warehouses() {
                         {w.city ?? "—"}
                         {w.country ? `, ${w.country}` : ""}
                       </td>
-                      <td className={`num${lead >= 16 ? " text-warn" : ""}`}>
+                      <td
+                        className={`num${lead >= 16 ? " text-warn" : ""}`}
+                      >
                         {lead} h
                       </td>
                       <td className="num">{w.skus ?? 0}</td>
@@ -171,8 +159,8 @@ export default async function Warehouses() {
         )}
       </Panel>
 
-      <Panel title="Inventory & carrying economics" hint={`${enrichedInventory.length} lines`} flush>
-        {enrichedInventory.length === 0 ? (
+      <Panel title="Inventory" hint={`${inventory.length} lines`} flush>
+        {inventory.length === 0 ? (
           <Empty message="No stock recorded" />
         ) : (
           <div
@@ -186,45 +174,23 @@ export default async function Warehouses() {
                 <tr>
                   <th scope="col">Warehouse</th>
                   <th scope="col">SKU</th>
-                  <th scope="col">Health</th>
+                  <th scope="col">On hand</th>
+                  <th scope="col">Reserved</th>
                   <th scope="col">Available</th>
-                  <th scope="col">On hand / Res</th>
-                  <th scope="col">Safety / ROP</th>
-                  <th scope="col">Unit Cost</th>
-                  <th scope="col">Annual Holding</th>
                   <th scope="col">Utilisation</th>
                 </tr>
               </thead>
               <tbody>
-                {enrichedInventory.map((row) => {
+                {inventory.map((row) => {
                   const used = row.on_hand > 0 ? row.reserved / row.on_hand : 0;
-                  const tone =
-                    row.econ.stockHealth === "CRITICAL"
-                      ? "DEAD"
-                      : row.econ.stockHealth === "REORDER"
-                        ? "SOURCING"
-                        : "OK";
                   return (
                     <tr key={`${row.warehouse}-${row.sku}`}>
                       <td className="ref">{row.warehouse}</td>
                       <td className="num">{row.sku}</td>
-                      <td>
-                        <Pill state={tone} />
-                      </td>
+                      <td className="num">{row.on_hand}</td>
+                      <td className="num">{row.reserved}</td>
                       <td className="num">{row.available}</td>
-                      <td className="num">
-                        {row.on_hand} / {row.reserved}
-                      </td>
-                      <td className="num text-faint">
-                        {row.safety_stock} / {row.reorder_point}
-                      </td>
-                      <td className="num">
-                        {money(row.unit_cost_minor, row.currency || "NGN")}
-                      </td>
-                      <td className="num">
-                        {money(row.econ.annualHoldingCostMinor, row.currency || "NGN")}/yr
-                      </td>
-                      <td style={{ width: 140 }}>
+                      <td style={{ width: 160 }}>
                         <span
                           className="bar"
                           data-tone={used > 0.9 ? "alert" : used > 0.7 ? "warn" : undefined}
@@ -241,63 +207,11 @@ export default async function Warehouses() {
         )}
       </Panel>
 
-      <Panel
-        title="Configure safety stock & carrying cost policy"
-        hint="tune reorder thresholds per SKU"
-      >
-        <InventoryPolicyForm warehouses={warehouses.map((w) => w.code)} />
-      </Panel>
-
-      <Panel
-        title="Automated replenishment orders"
-        hint="triggered when available stock falls at or below reorder point"
-      >
-        <div style={{ marginBottom: 14 }}>
-          <ReplenishmentSweepButton />
-        </div>
-        {replenishments.length === 0 ? (
-          <Empty
-            message="No replenishment proposals"
-            hint="Click Check Reorder Points to generate PO proposals for any low-stock SKUs."
-          />
-        ) : (
-          <div className="scroller" tabIndex={0} role="region" aria-label="Replenishment orders">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Reference</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Warehouse / SKU</th>
-                  <th scope="col">Qty</th>
-                  <th scope="col">Est. PO Cost</th>
-                  <th scope="col">Trigger</th>
-                  <th scope="col">Created</th>
-                  <th scope="col">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {replenishments.map((r) => (
-                  <tr key={r.id}>
-                    <td className="ref">{r.reference}</td>
-                    <td>
-                      <Pill state={r.status} />
-                    </td>
-                    <td className="num">
-                      {r.warehouse_code} / {r.sku}
-                    </td>
-                    <td className="num">{r.quantity}</td>
-                    <td className="num">{money(r.estimated_cost_minor, r.currency)}</td>
-                    <td>{r.reason ?? "—"}</td>
-                    <td className="num text-faint">{relative(r.created_at)}</td>
-                    <td>
-                      <ReplenishmentOrderActions id={r.id} status={r.status} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+      <Panel title="Picking and packing" hint="warehouse floor tasks">
+        <Empty
+          message="No open picking tasks"
+          hint="Stock is reserved against a shipment as soon as it is allocated. Picking instructions for the warehouse floor are not issued from here yet."
+        />
       </Panel>
     </>
   );

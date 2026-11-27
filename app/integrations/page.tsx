@@ -1,4 +1,6 @@
 import { headers } from "next/headers";
+import Link from "next/link";
+import { BookOpen } from "lucide-react";
 import { requireUser } from "@/lib/auth";
 import { SYSTEM_CONNECTOR_TEMPLATES } from "@/lib/integrations/catalog";
 import {
@@ -23,13 +25,22 @@ export default async function IntegrationsPage() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>System integrations</h1>
-        <p>
-          Connect any ERP, TMS, WMS, storefront, GPS fleet feed, EDI X12 gateway, or
-          custom webhook. The autonomous agent normalizes incoming payloads, executes
-          planning and dispatch, and pushes status updates back to your systems.
-        </p>
+      <div className="page-head docs-page-head">
+        <div className="docs-page-head-copy">
+          <h1>System integrations</h1>
+          <p>
+            Connect your company website, live PostgreSQL database, ERP/WMS/TMS/GPS API, or
+            full database export. Control Tower imports your master data and orders
+            automatically, then takes over route planning, carrier scoring, fleet dispatch,
+            and status callbacks end-to-end.
+          </p>
+        </div>
+        <div className="docs-page-head-actions">
+          <Link href="/api-docs" className="btn">
+            <BookOpen size={14} strokeWidth={1.9} aria-hidden="true" />
+            <span>ERP / TMS API Docs</span>
+          </Link>
+        </div>
       </div>
 
       <IntegrationsHub

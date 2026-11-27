@@ -1,9 +1,16 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { currentUser } from "@/lib/auth";
 import { SignUpForm } from "./form";
 
+export const dynamic = "force-dynamic";
 export const metadata = { title: "Create your workspace · Control Tower" };
 
-export default function SignUpPage() {
+export default async function SignUpPage() {
+  const user = await currentUser();
+  if (user) {
+    redirect("/");
+  }
   return (
     <main className="auth-page">
       <div className="auth-shell">

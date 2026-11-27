@@ -13,8 +13,8 @@ export function OrderIntakeForm() {
   const [originCity, setOriginCity] = useState("");
   const [destinationCity, setDestinationCity] = useState("");
   const [cargoDescription, setCargoDescription] = useState("");
-  const [weightKg, setWeightKg] = useState("250");
-  const [quantity, setQuantity] = useState("10");
+  const [weightKg, setWeightKg] = useState("");
+  const [quantity, setQuantity] = useState("");
   const [deadlineIso, setDeadlineIso] = useState("");
   const [preferredMode, setPreferredMode] = useState("ROAD");
   const [reefer, setReefer] = useState(false);
@@ -65,7 +65,7 @@ export function OrderIntakeForm() {
             id="order-customer"
             value={customerName}
             onChange={(e) => setCustomerName(e.target.value)}
-            placeholder="e.g. Kora Retail Ltd"
+            placeholder="Customer or consignee name"
           />
         </label>
 
@@ -76,7 +76,7 @@ export function OrderIntakeForm() {
             required
             value={originCity}
             onChange={(e) => setOriginCity(e.target.value)}
-            placeholder="e.g. Lagos"
+            placeholder="Origin city"
           />
         </label>
 
@@ -87,7 +87,7 @@ export function OrderIntakeForm() {
             required
             value={destinationCity}
             onChange={(e) => setDestinationCity(e.target.value)}
-            placeholder="e.g. Abuja"
+            placeholder="Destination city"
           />
         </label>
 
@@ -98,7 +98,7 @@ export function OrderIntakeForm() {
             required
             value={cargoDescription}
             onChange={(e) => setCargoDescription(e.target.value)}
-            placeholder="e.g. Medical consumables"
+            placeholder="Cargo description"
           />
         </label>
 

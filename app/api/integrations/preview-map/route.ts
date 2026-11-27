@@ -3,12 +3,13 @@ import { currentUser } from "@/lib/auth";
 import {
   detectAndParseRawPayload,
   normalizeExternalRecord,
+  normalizeRecordDeterministically,
 } from "@/lib/integrations/mapper";
 import { getOrgConnector } from "@/lib/integrations/store";
 
 export const dynamic = "force-dynamic";
 
-const MAX_BYTES = 256 * 1024;
+const MAX_BYTES = 2 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
   const user = await currentUser();
@@ -30,7 +31,7 @@ export async function POST(req: NextRequest) {
 
   if (body.payload === undefined || body.payload === null || body.payload === "") {
     return NextResponse.json(
-      { error: "Paste any JSON, CSV, or EDI X12 payload to preview mapping." },
+      { error: "Paste any JSON, SQL dump, CSV, NDJSON, or EDI X12 payload to preview mapping." },
       { status: 400 },
     );
   }
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
       : Buffer.byteLength(JSON.stringify(body.payload), "utf8");
   if (size > MAX_BYTES) {
     return NextResponse.json(
-      { error: "Preview payload exceeds 256 KB limit." },
+      { error: "Preview payload exceeds 2 MB limit." },
       { status: 413 },
     );
   }
@@ -64,7 +65,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const sampleRecords = parsed.records.slice(0, 5);
+  const entityBreakdown: Record<string, number> = {};
+  for (const rec of parsed.records.slice(0, 500)) {
+    const { normalized } = normalizeRecordDeterministically(rec, mapping);
+    entityBreakdown[normalized.entityType] =
+      (entityBreakdown[normalized.entityType] ?? 0) + 1;
+  }
+
+  const sampleRecords = parsed.records.slice(0, 8);
   const normalizedRecords = await Promise.all(
     sampleRecords.map((rec) =>
       normalizeExternalRecord(rec, {
@@ -87,6 +95,7 @@ export async function POST(req: NextRequest) {
     format: parsed.format,
     totalRecordsDetected: parsed.records.length,
     previewedCount: normalizedRecords.length,
+    entityBreakdown,
     records: normalizedRecords,
     suggestedFieldMapping: mergedSuggestedMappings,
   });

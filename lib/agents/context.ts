@@ -1,3 +1,8 @@
+import {
+  computeLogisticsReadiness,
+  findNearbyDrivers,
+  resolveCityCoordinates,
+} from "@/lib/driver-dispatch";
 import { query } from "@/lib/db";
 import {
   activePolicy,
@@ -17,6 +22,7 @@ import {
   listDocuments,
   listDrivers,
   listInventory,
+  listLocations,
   listOrders,
   listShipments,
   listWarehouses,
@@ -54,6 +60,7 @@ function summarizeShipment(s: Awaited<ReturnType<typeof listShipments>>[number])
           currency: s.plan.currency,
           meets_deadline: s.plan.meets_deadline,
           vehicle: s.plan.vehicle ?? s.plan.assigned_vehicle ?? null,
+          assigned_driver: s.plan.assigned_driver_name ?? null,
           customs_required: s.plan.customs_required ?? false,
         }
       : null,
@@ -66,6 +73,68 @@ function summarizeShipment(s: Awaited<ReturnType<typeof listShipments>>[number])
       : null,
     updated_at: safeIso(s.updated_at) ?? new Date().toISOString(),
   };
+}
+
+function buildNearbyDriverMatchesForShipments(
+  shipments: Awaited<ReturnType<typeof listShipments>>,
+  drivers: Awaited<ReturnType<typeof listDrivers>>,
+  locations: Awaited<ReturnType<typeof listLocations>>,
+) {
+  const candidates = shipments
+    .filter((s) =>
+      ["ALLOCATED", "PLANNED", "SOURCING", "BOOKED", "EXCEPTION"].includes(s.state),
+    )
+    .slice(0, 8);
+
+  return candidates.map((s) => {
+    const originCity =
+      typeof s.origin?.city === "string"
+        ? s.origin.city
+        : typeof s.origin?.address === "string"
+          ? s.origin.address
+          : null;
+    const target = resolveCityCoordinates(originCity, locations);
+    if (!target) {
+      return {
+        reference: s.reference,
+        originCity,
+        nearestDrivers: [],
+        note: "Origin coordinates unavailable",
+      };
+    }
+    const matches = findNearbyDrivers(
+      drivers,
+      target,
+      {
+        maxRadiusKm: 450,
+        requireHazmat: Boolean(s.cargo?.hazmat),
+        requireReefer: Boolean(s.cargo?.reefer || s.cargo?.temperature_c),
+        minPayloadKg:
+          typeof s.cargo?.weight_kg === "number" ? s.cargo.weight_kg : undefined,
+      },
+      locations,
+    ).slice(0, 3);
+
+    return {
+      reference: s.reference,
+      originCity,
+      nearestDrivers: matches.map((m) => ({
+        driverId: m.driver.id,
+        name: m.driver.name,
+        city: m.driver.current_city ?? null,
+        distanceKm: m.distanceKm,
+        roadDistanceKm: m.roadDistanceKm,
+        etaMinutes: m.etaMinutes,
+        dutyStatus: m.dutyStatus,
+        hosDriveRemainingHours: m.hosDriveRemainingHours,
+        equipmentType: m.driver.equipment_type ?? "DRY_VAN",
+        vehicleRegistration: m.driver.vehicle_registration ?? null,
+        eligible: m.eligible,
+        blockingReasons: m.blockingReasons,
+        matchScore: m.matchScore,
+      })),
+    };
+  });
 }
 
 export async function gatherOperationalContext(
@@ -142,41 +211,58 @@ export async function gatherOperationalContext(
     agentId === "exception-resolution" ||
     agentId === "human-escalation"
   ) {
-    const [shipments, exceptions, approvals, dead, policy] = await Promise.all([
-      listShipments(),
-      openExceptions(),
-      openApprovals(),
-      deadWork(),
-      activePolicy(),
-    ]);
+    const [shipments, exceptions, approvals, dead, policy, drivers, documents] =
+      await Promise.all([
+        listShipments(),
+        openExceptions(),
+        openApprovals(),
+        deadWork(),
+        activePolicy(),
+        listDrivers(),
+        listDocuments(),
+      ]);
     base.activeShipments = shipments.slice(0, 8).map(summarizeShipment);
     base.openExceptions = exceptions.slice(0, 8);
     base.pendingApprovals = approvals.slice(0, 8);
     base.stalledDeadWork = dead.slice(0, 6);
     base.activePolicy = policy;
+    base.logisticsReadiness = computeLogisticsReadiness({
+      drivers,
+      shipments,
+      documents,
+    });
   }
 
   if (agentId === "shipment-management" || agentId === "shipment-tracking") {
-    const [shipments, exceptions, documents, customs] = await Promise.all([
-      listShipments(),
-      openExceptions(),
-      listDocuments(),
-      listCustoms(),
-    ]);
+    const [shipments, exceptions, documents, customs, drivers] =
+      await Promise.all([
+        listShipments(),
+        openExceptions(),
+        listDocuments(),
+        listCustoms(),
+        listDrivers(),
+      ]);
     base.shipments = shipments.slice(0, 10).map(summarizeShipment);
     base.openExceptions = exceptions.slice(0, 8);
     base.unverifiedDocuments = documents.filter((d) => !d.verified_at).slice(0, 8);
     base.customsDeclarations = customs.slice(0, 8);
+    base.logisticsReadiness = computeLogisticsReadiness({
+      drivers,
+      shipments,
+      documents,
+    });
   }
 
   if (agentId === "route-optimization" || agentId === "fleet-management") {
-    const [shipments, conveyances, drivers, legs, lanes] = await Promise.all([
-      listShipments(),
-      listConveyances(),
-      listDrivers(),
-      legStats(),
-      laneStats(),
-    ]);
+    const [shipments, conveyances, drivers, legs, lanes, locations] =
+      await Promise.all([
+        listShipments(),
+        listConveyances(),
+        listDrivers(),
+        legStats(),
+        laneStats(),
+        listLocations(),
+      ]);
     base.planningAndTransitShipments = shipments
       .filter((s) => !["CLOSED", "CANCELLED", "FAILED"].includes(s.state))
       .slice(0, 18)
@@ -185,6 +271,15 @@ export async function gatherOperationalContext(
     base.drivers = drivers;
     base.legStatsByMode = legs;
     base.topLanes = lanes.slice(0, 10);
+    base.nearbyDriverRecommendations = buildNearbyDriverMatchesForShipments(
+      shipments,
+      drivers,
+      locations,
+    );
+    base.logisticsReadiness = computeLogisticsReadiness({
+      drivers,
+      shipments,
+    });
   }
 
   if (agentId === "carrier-management") {
@@ -227,8 +322,10 @@ export async function gatherOperationalContext(
         draft: Record<string, unknown> | null;
         last_seen_at: Date;
       }>(
-        `SELECT id, channel, display_name, escalated_at, escalation_reason, draft, last_seen_at
-           FROM channel_contacts ORDER BY last_seen_at DESC LIMIT 20`,
+        `SELECT c.id, c.channel, c.display_name, c.escalated_at, c.escalation_reason, c.draft, c.last_seen_at
+           FROM channel_contacts c
+          ORDER BY c.last_seen_at DESC
+          LIMIT 20`,
       ),
       listShipments(),
     ]);
@@ -247,17 +344,29 @@ export async function gatherOperationalContext(
   }
 
   if (agentId === "financial-management" || agentId === "logistics-analytics") {
-    const [shipments, legs, rates, policy, approvals, usage, daily, carriers] =
-      await Promise.all([
-        listShipments(),
-        legStats(),
-        latestRates(),
-        activePolicy(),
-        openApprovals(),
-        modelUsage(),
-        throughput(),
-        listCarriers(),
-      ]);
+    const [
+      shipments,
+      legs,
+      rates,
+      policy,
+      approvals,
+      usage,
+      daily,
+      carriers,
+      drivers,
+      documents,
+    ] = await Promise.all([
+      listShipments(),
+      legStats(),
+      latestRates(),
+      activePolicy(),
+      openApprovals(),
+      modelUsage(),
+      throughput(),
+      listCarriers(),
+      listDrivers(),
+      listDocuments(),
+    ]);
     base.shipments = shipments.slice(0, 20).map(summarizeShipment);
     base.legStatsByMode = legs;
     base.fxRates = rates;
@@ -266,6 +375,11 @@ export async function gatherOperationalContext(
     base.modelUsageLast24h = usage;
     base.throughputLast14d = daily;
     base.carriers = carriers;
+    base.logisticsReadiness = computeLogisticsReadiness({
+      drivers,
+      shipments,
+      documents,
+    });
   }
 
   if (agentId === "workflow-automation") {

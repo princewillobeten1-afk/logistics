@@ -1,6 +1,12 @@
 import type { GoogleMapLane, GoogleMapPoint } from "@/components/google-network-map";
 import type { MapShipmentItem } from "@/components/network-map";
+import {
+  getDriverCoordinates,
+  normalizeDutyStatus,
+  type DriverDutyStatus,
+} from "@/lib/driver-dispatch";
 import { city } from "@/lib/format";
+import type { DriverRow, LocationRow } from "@/lib/queries";
 
 export type LocationRecord = {
   id: string;
@@ -63,6 +69,74 @@ function serializeShipment(s: ShipmentRecord): MapShipmentItem {
         ? s.updated_at.toISOString()
         : String(s.updated_at),
   };
+}
+
+export interface MapDriverPin {
+  id: string;
+  name: string;
+  phone: string | null;
+  city: string | null;
+  lat: number;
+  lon: number;
+  inferredFromCity: boolean;
+  dutyStatus: DriverDutyStatus;
+  hosDriveRemainingHours: number;
+  hosDutyRemainingHours: number;
+  vehicleRegistration: string | null;
+  equipmentType: string;
+  hazmatCertified: boolean;
+  reeferCapable: boolean;
+  assignedTo: string | null;
+  licenceExpired: boolean;
+  lastPingAt: string | null;
+}
+
+export function buildMapDriverPins(
+  drivers: DriverRow[],
+  locations: LocationRow[] = [],
+): MapDriverPin[] {
+  const pins: MapDriverPin[] = [];
+  for (const d of drivers) {
+    if (d.active === false) continue;
+    const coords = getDriverCoordinates(d, locations);
+    if (!coords) continue;
+    const licenceDays =
+      d.days_to_expiry !== null && Number.isFinite(Number(d.days_to_expiry))
+        ? Number(d.days_to_expiry)
+        : null;
+    pins.push({
+      id: d.id,
+      name: d.name,
+      phone: d.phone,
+      city: d.current_city ?? null,
+      lat: coords.lat,
+      lon: coords.lon,
+      inferredFromCity: coords.inferredFromCity,
+      dutyStatus: normalizeDutyStatus(d),
+      hosDriveRemainingHours:
+        typeof d.hos_drive_remaining_hours === "number" &&
+        Number.isFinite(d.hos_drive_remaining_hours)
+          ? d.hos_drive_remaining_hours
+          : 9.5,
+      hosDutyRemainingHours:
+        typeof d.hos_duty_remaining_hours === "number" &&
+        Number.isFinite(d.hos_duty_remaining_hours)
+          ? d.hos_duty_remaining_hours
+          : 12.0,
+      vehicleRegistration: d.vehicle_registration ?? null,
+      equipmentType: d.equipment_type ?? "DRY_VAN",
+      hazmatCertified: Boolean(d.hazmat_certified),
+      reeferCapable:
+        Boolean(d.reefer_capable) ||
+        (d.equipment_type ?? "").toUpperCase() === "REEFER",
+      assignedTo: d.assigned_to ?? null,
+      licenceExpired: licenceDays !== null && licenceDays < 0,
+      lastPingAt: d.last_ping_at
+        ? new Date(d.last_ping_at).toISOString()
+        : null,
+    });
+  }
+  return pins;
 }
 
 export function buildMapNetworkData(

@@ -1,7 +1,17 @@
-import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
-import { AddFleetForms, StarterNetworkButton } from "@/components/network-crud";
+import { Empty, Offline, Panel, ShipmentLink } from "@/app/components";
+import {
+  FleetDispatchConsole,
+  type DispatchShipmentOption,
+} from "@/components/fleet-dispatch-console";
+import { computeLogisticsReadiness, normalizeDutyStatus } from "@/lib/driver-dispatch";
 import { relative } from "@/lib/format";
-import { listConveyances, listDrivers } from "@/lib/queries";
+import {
+  listConveyances,
+  listDocuments,
+  listDrivers,
+  listLocations,
+  listShipments,
+} from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -16,9 +26,15 @@ function licenceTone(days: string | null): string | null {
 }
 
 export default async function Fleet() {
-  let vehicles, drivers;
+  let vehicles, drivers, locations, shipments, documents;
   try {
-    [vehicles, drivers] = await Promise.all([listConveyances(), listDrivers()]);
+    [vehicles, drivers, locations, shipments, documents] = await Promise.all([
+      listConveyances(),
+      listDrivers(),
+      listLocations(),
+      listShipments(),
+      listDocuments(),
+    ]);
   } catch (error) {
     return (
       <>
@@ -36,33 +52,50 @@ export default async function Fleet() {
     return t === "warn" || t === "crit";
   });
 
+  const readiness = computeLogisticsReadiness({
+    drivers,
+    shipments,
+    documents,
+  });
+
+  const activeShipments: DispatchShipmentOption[] = shipments
+    .filter(
+      (s) =>
+        !["CLOSED", "CANCELLED", "FAILED", "DELIVERED", "POD_VERIFIED"].includes(
+          s.state,
+        ),
+    )
+    .slice(0, 40)
+    .map((s) => ({
+      id: s.id,
+      reference: s.reference,
+      state: s.state,
+      originCity: typeof s.origin?.city === "string" ? s.origin.city : null,
+      destinationCity:
+        typeof s.destination?.city === "string" ? s.destination.city : null,
+      hazmat: Boolean(s.cargo?.hazmat),
+      reefer: Boolean(s.cargo?.reefer || s.cargo?.temp_controlled),
+      weightKg:
+        s.cargo?.weight_kg !== undefined && Number.isFinite(Number(s.cargo.weight_kg))
+          ? Number(s.cargo.weight_kg)
+          : null,
+      assignedDriverName:
+        typeof (s.plan as Record<string, unknown> | null)?.assigned_driver_name ===
+        "string"
+          ? String((s.plan as Record<string, unknown>).assigned_driver_name)
+          : null,
+    }));
+
   return (
     <>
-      <div
-        className="page-head"
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        <div>
-          <h1>Fleet</h1>
-          <p>
-            Vehicles and drivers, with what each is currently committed to. An
-            assignment here comes from a shipment leg rather than from the vehicle
-            record — a conveyance row says a truck exists, not that anyone can
-            dispatch it today.
-          </p>
-        </div>
-        {vehicles.length === 0 ? <StarterNetworkButton /> : <StarterNetworkButton compact />}
+      <div className="page-head">
+        <h1>Fleet &amp; Driver Dispatch</h1>
+        <p>
+          Locate nearby drivers by live GPS, verify Hours-of-Service (HOS)
+          clocks and licence validity, and dispatch compliant drivers directly
+          onto active shipments.
+        </p>
       </div>
-
-      <Panel title="Register vehicle & driver" hint="available immediately to cuOpt fleet optimization">
-        <AddFleetForms />
-      </Panel>
 
       {expiring.length > 0 ? (
         <div className="banner" data-tone="warn">
@@ -83,8 +116,10 @@ export default async function Fleet() {
           <dd>{working}</dd>
         </div>
         <div className="tile">
-          <dt>Drivers</dt>
-          <dd>{drivers.length}</dd>
+          <dt>Drivers ready</dt>
+          <dd>
+            {readiness.driversDispatchReady} / {drivers.length}
+          </dd>
         </div>
         <div className="tile">
           <dt>Hazmat certified</dt>
@@ -92,11 +127,18 @@ export default async function Fleet() {
         </div>
       </dl>
 
+      <FleetDispatchConsole
+        initialDrivers={drivers}
+        initialLocations={locations}
+        initialShipments={activeShipments}
+        initialReadiness={readiness}
+      />
+
       <Panel title="Vehicles" hint={`${vehicles.length} on file`} flush>
         {vehicles.length === 0 ? (
           <Empty
             message="No vehicles yet"
-            hint="Vehicles are registered against a carrier by an administrator."
+            hint="Vehicles are registered against a carrier by an administrator or synced from fleet telematics."
           />
         ) : (
           <div
@@ -161,11 +203,11 @@ export default async function Fleet() {
         )}
       </Panel>
 
-      <Panel title="Drivers" hint={`${drivers.length} on file`} flush>
+      <Panel title="Drivers roster" hint={`${drivers.length} on file`} flush>
         {drivers.length === 0 ? (
           <Empty
             message="No drivers yet"
-            hint="Drivers are registered against a carrier by an administrator."
+            hint="Use Register driver above or connect an ELD / TMS integration."
           />
         ) : (
           <div
@@ -178,25 +220,79 @@ export default async function Fleet() {
               <thead>
                 <tr>
                   <th scope="col">Name</th>
-                  <th scope="col">Carrier</th>
-                  <th scope="col">Phone</th>
+                  <th scope="col">Location / GPS</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">HOS Clock</th>
+                  <th scope="col">Equipment</th>
                   <th scope="col">Licence</th>
                   <th scope="col">Expires</th>
-                  <th scope="col">Hazmat</th>
                   <th scope="col">Assigned to</th>
                 </tr>
               </thead>
               <tbody>
                 {drivers.map((d) => {
                   const tone = licenceTone(d.days_to_expiry);
+                  const duty = normalizeDutyStatus(d);
+                  const hosDrive =
+                    typeof d.hos_drive_remaining_hours === "number"
+                      ? d.hos_drive_remaining_hours
+                      : 9.5;
                   return (
                     <tr key={d.id}>
-                      <td>{d.name}</td>
-                      <td className="text-muted">
-                        {d.carrier_code ?? "unassigned"}
+                      <td>
+                        <div className="font-semibold">{d.name}</div>
+                        <div className="font-mono text-xs text-faint">
+                          {d.phone ?? d.carrier_code ?? "—"}
+                        </div>
                       </td>
-                      <td className="num text-muted">
-                        {d.phone ?? "—"}
+                      <td>
+                        <div>{d.current_city ?? "—"}</div>
+                        {d.current_lat && d.current_lon ? (
+                          <div className="font-mono text-xs text-faint">
+                            {Number(d.current_lat).toFixed(3)},{" "}
+                            {Number(d.current_lon).toFixed(3)}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-faint">No GPS ping</div>
+                        )}
+                      </td>
+                      <td>
+                        <span
+                          className="status-tag"
+                          data-tone={
+                            duty === "AVAILABLE"
+                              ? "ok"
+                              : duty === "ON_ROUTE"
+                                ? "warn"
+                                : "neutral"
+                          }
+                        >
+                          {duty.replace(/_/g, " ").toLowerCase()}
+                        </span>
+                      </td>
+                      <td className="num">
+                        <span
+                          className={
+                            hosDrive < 2.5 ? "text-crit font-semibold" : undefined
+                          }
+                        >
+                          {hosDrive.toFixed(1)}h drive
+                        </span>
+                      </td>
+                      <td className="text-xs">
+                        <span className="font-mono">
+                          {d.vehicle_registration ?? d.equipment_type ?? "DRY_VAN"}
+                        </span>
+                        {d.hazmat_certified ? (
+                          <span className="tag" style={{ marginLeft: 4 }}>
+                            hazmat
+                          </span>
+                        ) : null}
+                        {d.reefer_capable ? (
+                          <span className="tag" style={{ marginLeft: 4 }}>
+                            reefer
+                          </span>
+                        ) : null}
                       </td>
                       <td className="num">{d.licence_number ?? "—"}</td>
                       <td className="num">
@@ -214,13 +310,6 @@ export default async function Fleet() {
                           </span>
                         ) : (
                           "—"
-                        )}
-                      </td>
-                      <td>
-                        {d.hazmat_certified ? (
-                          <span className="tag">yes</span>
-                        ) : (
-                          <span className="text-faint">no</span>
                         )}
                       </td>
                       <td className="ref">

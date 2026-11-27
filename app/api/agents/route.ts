@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
 import { AGENT_DOMAINS, CORE_AGENTS } from "@/lib/agents/catalog";
+import { runWithOrgScope } from "@/lib/db";
 import { recentAgentRuns } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +13,9 @@ export async function GET() {
   }
 
   try {
-    const recentRuns = await recentAgentRuns(25);
+    const recentRuns = await runWithOrgScope(user.orgId, () =>
+      recentAgentRuns(25),
+    );
     return NextResponse.json({
       domains: AGENT_DOMAINS,
       agents: CORE_AGENTS,

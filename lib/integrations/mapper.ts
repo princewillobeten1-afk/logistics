@@ -3,7 +3,13 @@ import { generateAgentJson, getServerGeminiKey } from "@/lib/agents/gemini-clien
 import type { AutonomousIntent } from "@/lib/agents/autonomous";
 import type { CanonicalEntityType } from "./catalog";
 
-export type DetectedPayloadFormat = "JSON" | "CSV" | "EDI_X12" | "TEXT";
+export type DetectedPayloadFormat =
+  | "JSON"
+  | "CSV"
+  | "EDI_X12"
+  | "SQL_DUMP"
+  | "NDJSON"
+  | "TEXT";
 
 export interface NormalizedLogisticsEvent {
   entityType: CanonicalEntityType;
@@ -13,11 +19,7 @@ export interface NormalizedLogisticsEvent {
   externalRef: string | null;
   shipmentRef: string | null;
   originCity: string | null;
-  originAddress?: string | null;
-  originCountry?: string | null;
   destinationCity: string | null;
-  destinationAddress?: string | null;
-  destinationCountry?: string | null;
   cargoDescription: string | null;
   weightKg: number | null;
   quantity: number | null;
@@ -25,14 +27,6 @@ export interface NormalizedLogisticsEvent {
   preferredMode: string | null;
   customerName: string | null;
   customerEmail: string | null;
-  shipperName?: string | null;
-  shipperPhone?: string | null;
-  shipperEmail?: string | null;
-  receiverName?: string | null;
-  receiverPhone?: string | null;
-  receiverEmail?: string | null;
-  hsCode?: string | null;
-  incoterm?: string | null;
   hazmat: boolean;
   reefer: boolean;
   currency: string;
@@ -47,6 +41,26 @@ export interface NormalizedLogisticsEvent {
   sku: string | null;
   onHand: number | null;
   reserved: number | null;
+  // Master Data (Customers, Warehouses, Carriers, Fleet, Drivers)
+  customerCode?: string | null;
+  customerPhone?: string | null;
+  slaHours?: number | null;
+  paymentTerms?: string | null;
+  warehouseName?: string | null;
+  warehouseCountry?: string | null;
+  warehouseLeadHours?: number | null;
+  carrierCode?: string | null;
+  carrierName?: string | null;
+  carrierModes?: string[] | null;
+  carrierOnTimeRate?: number | null;
+  vehicleKind?: string | null;
+  vehicleMode?: string | null;
+  capacityKg?: number | null;
+  capacityCbm?: number | null;
+  driverName?: string | null;
+  driverPhone?: string | null;
+  driverLicence?: string | null;
+  driverLicenceExpiry?: string | null;
   // Exceptions & Updates
   severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | null;
   statusUpdate: string | null;
@@ -293,15 +307,194 @@ export function parseEdiX12(raw: string): NormalizedLogisticsEvent | null {
   };
 }
 
+/**
+ * Safely parses SQL INSERT dumps (PostgreSQL, MySQL, SQLite) into structured JS records
+ * without ever executing SQL. Supports multi-row VALUES (...), (...); single-quoted strings
+ * with '' or \' escapes, NULL, booleans, and numeric literals.
+ */
+export function parseSqlInsertRecords(raw: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  const stmtRegex =
+    /INSERT\s+INTO\s+(?:[`"\[]?[\w-]+[`"\]]?\.)?[`"\[]?([\w-]+)[`"\]]?\s*\(([^)]+)\)\s*VALUES\s*([\s\S]*?);/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = stmtRegex.exec(raw)) !== null) {
+    const tableName = match[1].trim();
+    const columns = match[2]
+      .split(",")
+      .map((c) => c.trim().replace(/^[`"\[]|[`"\]]$/g, ""))
+      .filter(Boolean);
+    if (columns.length === 0) continue;
+
+    const valuesSection = match[3];
+    let i = 0;
+    const len = valuesSection.length;
+
+    while (i < len) {
+      while (i < len && valuesSection[i] !== "(") i += 1;
+      if (i >= len) break;
+      i += 1; // skip '('
+
+      const tupleValues: unknown[] = [];
+      let cur = "";
+      let inStr = false;
+      let quoteChar = "'";
+      let wasQuoted = false;
+
+      while (i < len) {
+        const ch = valuesSection[i];
+        const next = valuesSection[i + 1];
+
+        if (inStr) {
+          if (ch === "\\" && next !== undefined) {
+            cur += next;
+            i += 2;
+            continue;
+          }
+          if (ch === quoteChar && next === quoteChar) {
+            cur += quoteChar;
+            i += 2;
+            continue;
+          }
+          if (ch === quoteChar) {
+            inStr = false;
+            i += 1;
+            continue;
+          }
+          cur += ch;
+          i += 1;
+          continue;
+        }
+
+        if (ch === "'" || ch === '"') {
+          inStr = true;
+          quoteChar = ch;
+          wasQuoted = true;
+          cur = "";
+          i += 1;
+          continue;
+        }
+
+        if (ch === "," || ch === ")") {
+          tupleValues.push(coerceSqlLiteral(cur, wasQuoted));
+          cur = "";
+          wasQuoted = false;
+          i += 1;
+          if (ch === ")") break;
+          continue;
+        }
+
+        cur += ch;
+        i += 1;
+      }
+
+      if (tupleValues.length > 0) {
+        const obj: Record<string, unknown> = { _tableHint: tableName };
+        for (let c = 0; c < columns.length; c += 1) {
+          obj[columns[c]] = tupleValues[c] ?? null;
+        }
+        records.push(obj);
+      }
+    }
+  }
+
+  return records;
+}
+
+function coerceSqlLiteral(raw: string, wasQuoted: boolean): unknown {
+  if (wasQuoted) return raw;
+  const t = raw.trim();
+  if (!t || /^null$/i.test(t)) return null;
+  if (/^true$/i.test(t)) return true;
+  if (/^false$/i.test(t)) return false;
+  const num = Number(t);
+  if (Number.isFinite(num)) return num;
+  return t;
+}
+
+const MULTI_TABLE_KEYS_IN_ORDER = [
+  "locations",
+  "warehouses",
+  "facilities",
+  "hubs",
+  "depots",
+  "carriers",
+  "transporters",
+  "customers",
+  "clients",
+  "accounts",
+  "conveyances",
+  "fleet",
+  "vehicles",
+  "trucks",
+  "drivers",
+  "inventory",
+  "stock",
+  "orders",
+  "shipments",
+  "deliveries",
+  "loads",
+  "telemetry",
+  "gps",
+  "exceptions",
+  "incidents",
+  "records",
+  "events",
+];
+
+function unwrapJsonObjectRecords(obj: Record<string, unknown>): Record<string, unknown>[] {
+  const loweredKeyMap = new Map<string, string>();
+  for (const k of Object.keys(obj)) {
+    loweredKeyMap.set(k.toLowerCase(), k);
+  }
+
+  const collected: Record<string, unknown>[] = [];
+  for (const canonicalTable of MULTI_TABLE_KEYS_IN_ORDER) {
+    const actualKey = loweredKeyMap.get(canonicalTable);
+    if (!actualKey) continue;
+    const val = obj[actualKey];
+    if (
+      Array.isArray(val) &&
+      val.length > 0 &&
+      typeof val[0] === "object" &&
+      val[0] !== null
+    ) {
+      const attachHint = canonicalTable !== "records" && canonicalTable !== "events";
+      for (const item of val) {
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          const rec = item as Record<string, unknown>;
+          collected.push(
+            attachHint && !rec._tableHint
+              ? { ...rec, _tableHint: canonicalTable }
+              : rec,
+          );
+        }
+      }
+    }
+  }
+
+  if (collected.length > 0) {
+    return collected;
+  }
+  return [obj];
+}
+
 export function detectAndParseRawPayload(
   rawInput: string | Record<string, unknown> | Record<string, unknown>[],
   contentType?: string | null,
 ): PayloadParseResult {
   if (typeof rawInput !== "string") {
-    const arr = Array.isArray(rawInput) ? rawInput : [rawInput];
+    if (Array.isArray(rawInput)) {
+      return {
+        format: "JSON",
+        records: rawInput.filter(
+          (r): r is Record<string, unknown> => Boolean(r && typeof r === "object"),
+        ),
+      };
+    }
     return {
       format: "JSON",
-      records: arr.filter((r): r is Record<string, unknown> => Boolean(r && typeof r === "object")),
+      records: unwrapJsonObjectRecords(rawInput),
     };
   }
 
@@ -315,7 +508,15 @@ export function detectAndParseRawPayload(
     return { format: "EDI_X12", records: [{ _ediRaw: trimmed }], rawText: trimmed };
   }
 
-  // JSON / JSON Array / Envelope detection
+  // SQL INSERT dump detection
+  if (/\bINSERT\s+INTO\s+/i.test(trimmed)) {
+    const sqlRecords = parseSqlInsertRecords(trimmed);
+    if (sqlRecords.length > 0) {
+      return { format: "SQL_DUMP", records: sqlRecords, rawText: trimmed };
+    }
+  }
+
+  // JSON / JSON Array / Multi-table whole-database JSON export detection
   const ct = (contentType ?? "").toLowerCase();
   if (
     ct.includes("json") ||
@@ -333,27 +534,33 @@ export function detectAndParseRawPayload(
         };
       }
       if (parsed && typeof parsed === "object") {
-        const obj = parsed as Record<string, unknown>;
-        // Unwrap common batch envelopes: { records: [...] }, { orders: [...] }, { events: [...] }, { shipments: [...] }
-        for (const batchKey of ["records", "orders", "shipments", "events", "items"]) {
-          const maybeArr = obj[batchKey];
-          if (
-            Array.isArray(maybeArr) &&
-            maybeArr.length > 0 &&
-            typeof maybeArr[0] === "object" &&
-            maybeArr[0] !== null &&
-            batchKey !== "items" // keep order line items inside parent order unless it's clearly a top-level batch
-          ) {
-            return {
-              format: "JSON",
-              records: maybeArr as Record<string, unknown>[],
-            };
-          }
-        }
-        return { format: "JSON", records: [obj] };
+        return {
+          format: "JSON",
+          records: unwrapJsonObjectRecords(parsed as Record<string, unknown>),
+        };
       }
     } catch {
-      // Fall through to CSV / text detection
+      // Try NDJSON (newline-delimited JSON objects)
+      const ndLines = trimmed
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (ndLines.length >= 2 && ndLines.every((l) => l.startsWith("{") && l.endsWith("}"))) {
+        const ndRecords: Record<string, unknown>[] = [];
+        for (const line of ndLines) {
+          try {
+            const parsedLine = JSON.parse(line);
+            if (parsedLine && typeof parsedLine === "object" && !Array.isArray(parsedLine)) {
+              ndRecords.push(parsedLine as Record<string, unknown>);
+            }
+          } catch {
+            // Skip malformed line
+          }
+        }
+        if (ndRecords.length > 0) {
+          return { format: "NDJSON", records: ndRecords, rawText: trimmed };
+        }
+      }
     }
   }
 
@@ -669,92 +876,6 @@ export function normalizeRecordDeterministically(
       "customer",
     ]);
 
-  const originCountry =
-    asString(fromMap("originCountry")) ??
-    pickFirstString(record, [
-      "origin_country",
-      "originCountry",
-      "Shipment.Origin.Country",
-      "SourceLocation.Country",
-      "pickup.country",
-    ]);
-
-  const originAddress =
-    asString(fromMap("originAddress")) ??
-    pickFirstString(record, [
-      "origin_address",
-      "originAddress",
-      "Shipment.Shipper.Address",
-      "SourceLocation.Address",
-      "pickup.address",
-    ]);
-
-  const destinationCountry =
-    asString(fromMap("destinationCountry")) ??
-    pickFirstString(record, [
-      "destination_country",
-      "destinationCountry",
-      "Shipment.Destination.Country",
-      "DestinationLocation.Country",
-      "delivery.country",
-    ]);
-
-  const destinationAddress =
-    asString(fromMap("destinationAddress")) ??
-    pickFirstString(record, [
-      "destination_address",
-      "destinationAddress",
-      "Shipment.Consignee.Address",
-      "DestinationLocation.Address",
-      "delivery.address",
-    ]);
-
-  const shipperName = pickFirstString(record, [
-    "shipper_name",
-    "shipperName",
-    "Shipment.Shipper.CompanyName",
-    "ShipFromParty.BusinessPartnerName",
-  ]);
-  const shipperPhone = pickFirstString(record, [
-    "shipper_phone",
-    "shipperPhone",
-    "Shipment.Shipper.Phone",
-  ]);
-  const shipperEmail = pickFirstString(record, [
-    "shipper_email",
-    "shipperEmail",
-    "Shipment.Shipper.Email",
-  ]);
-  const receiverName = pickFirstString(record, [
-    "receiver_name",
-    "receiverName",
-    "Shipment.Consignee.CompanyName",
-    "ShipToParty.BusinessPartnerName",
-  ]);
-  const receiverPhone = pickFirstString(record, [
-    "receiver_phone",
-    "receiverPhone",
-    "Shipment.Consignee.Phone",
-  ]);
-  const receiverEmail = pickFirstString(record, [
-    "receiver_email",
-    "receiverEmail",
-    "Shipment.Consignee.Email",
-    "ShipToParty.ContactEmail",
-  ]);
-  const hsCode = pickFirstString(record, [
-    "hs_code",
-    "hsCode",
-    "CargoSummary.HSCode",
-    "Customs.HSCode",
-  ]);
-  const incoterm = pickFirstString(record, [
-    "incoterm",
-    "incoterms",
-    "Shipment.Incoterm",
-    "Incoterm",
-  ]);
-
   const customerEmail =
     asString(fromMap("customerEmail")) ??
     pickFirstString(record, [
@@ -833,6 +954,82 @@ export function normalizeRecordDeterministically(
     asNumber(fromMap("reserved")) ??
     pickFirstNumber(record, ["qtyAllocated", "reserved", "allocated"]);
 
+  // Master Data fields (Customers, Warehouses, Carriers, Fleet, Drivers)
+  const tableHint = (asString(record._tableHint) ?? "").toLowerCase();
+
+  const customerCode =
+    asString(fromMap("customerCode")) ??
+    pickFirstString(record, ["customer_code", "customerCode", "account_code", "client_code", "code"]);
+  const customerPhone =
+    asString(fromMap("customerPhone")) ??
+    pickFirstString(record, ["contact_phone", "customer_phone", "phone", "mobile", "tel"]);
+  const slaHours =
+    asNumber(fromMap("slaHours")) ??
+    pickFirstNumber(record, ["sla_hours", "slaHours", "sla"]);
+  const paymentTerms =
+    asString(fromMap("paymentTerms")) ??
+    pickFirstString(record, ["payment_terms", "paymentTerms", "terms"]);
+
+  const warehouseName =
+    asString(fromMap("warehouseName")) ??
+    pickFirstString(record, ["warehouse_name", "warehouseName", "facility_name", "hub_name", "name"]);
+  const warehouseCountry =
+    asString(fromMap("warehouseCountry")) ??
+    pickFirstString(record, ["country", "country_code", "countryCode"]);
+  const warehouseLeadHours =
+    asNumber(fromMap("warehouseLeadHours")) ??
+    pickFirstNumber(record, ["lead_time_hours", "leadTimeHours", "lead_hours"]);
+
+  const carrierCode =
+    asString(fromMap("carrierCode")) ??
+    pickFirstString(record, ["carrier_code", "carrierCode", "scac", "code"]);
+  const carrierName =
+    asString(fromMap("carrierName")) ??
+    pickFirstString(record, ["carrier_name", "carrierName", "company_name", "name"]);
+  const rawCarrierModes = getPathValue(record, "modes") ?? getPathValue(record, "carrier_modes");
+  const carrierModes: string[] | null = Array.isArray(rawCarrierModes)
+    ? rawCarrierModes
+        .map((m) => String(m).trim().toUpperCase())
+        .filter(Boolean)
+    : typeof rawCarrierModes === "string" && rawCarrierModes.trim()
+      ? rawCarrierModes
+          .replace(/^\{|\}$/g, "")
+          .split(/[,;|]+/)
+          .map((m) => m.trim().toUpperCase())
+          .filter(Boolean)
+      : null;
+  const carrierOnTimeRate =
+    asNumber(fromMap("carrierOnTimeRate")) ??
+    pickFirstNumber(record, ["on_time_rate", "onTimeRate", "otp", "reliability"]);
+
+  const vehicleKind =
+    asString(fromMap("vehicleKind")) ??
+    pickFirstString(record, ["vehicle_kind", "vehicleKind", "kind", "vehicle_type", "asset_type"]);
+  const vehicleMode =
+    asString(fromMap("vehicleMode")) ??
+    pickFirstString(record, ["vehicle_mode", "mode", "transport_mode"]);
+  const capacityKg =
+    asNumber(fromMap("capacityKg")) ??
+    pickFirstNumber(record, ["capacity_kg", "capacityKg", "max_weight_kg", "payload_kg"]);
+  const capacityCbm =
+    asNumber(fromMap("capacityCbm")) ??
+    pickFirstNumber(record, ["capacity_cbm", "capacityCbm", "volume_cbm"]);
+
+  const driverName =
+    asString(fromMap("driverName")) ??
+    pickFirstString(record, ["driver_name", "driverName", "full_name", "fullName", "name"]);
+  const driverPhone =
+    asString(fromMap("driverPhone")) ??
+    pickFirstString(record, ["driver_phone", "phone", "mobile"]);
+  const driverLicence =
+    asString(fromMap("driverLicence")) ??
+    pickFirstString(record, ["licence_number", "license_number", "licenceNumber", "licenseNumber", "cdl_number", "licence"]);
+  const driverLicenceExpiry =
+    asString(fromMap("driverLicenceExpiry")) ??
+    pickFirstString(record, ["licence_expiry", "license_expiry", "licenceExpiry", "licenseExpiry"]);
+
+  const genericCity = pickFirstString(record, ["city", "hub_city", "location_city"]);
+
   const notes =
     asString(fromMap("notes")) ??
     pickFirstString(record, [
@@ -865,9 +1062,16 @@ export function normalizeRecordDeterministically(
   let severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | null = null;
 
   const isTempExcursion = temperatureC !== null && (temperatureC > 8 || temperatureC < -25);
+  const isWarehouseTable = /(warehouse|facility|facilities|depot|hub|location|site|plant)/i.test(tableHint);
+  const isCarrierTable = /(carrier|transporter|hauler|haulier|liner|airline|freight_partner)/i.test(tableHint);
+  const isFleetTable = /(conveyance|vehicle|truck|fleet|trailer|vessel|aircraft|asset)/i.test(tableHint);
+  const isDriverTable = /(driver|operator|chauffeur|captain|pilot)/i.test(tableHint);
+  const isCustomerTable = /(customer|client|consignee|account|company|buyer)/i.test(tableHint);
+
   if (
     /exception|delay|damage|incident|accident|alert|breakdown|breach/i.test(rawEventHint) ||
     /exception|delay|damage|breakdown|breach/i.test(notes ?? "") ||
+    /(exception|incident|claim|alert)/i.test(tableHint) ||
     isTempExcursion
   ) {
     entityType = "EXCEPTION";
@@ -876,14 +1080,53 @@ export function normalizeRecordDeterministically(
       ? "CRITICAL"
       : "HIGH";
   } else if (
+    isWarehouseTable ||
+    (warehouseCode && !sku && !destinationCity && (warehouseName || genericCity || warehouseCountry))
+  ) {
+    entityType = "WAREHOUSE";
+    intent = "PLANNING_ROUTING";
+  } else if (
+    isCarrierTable ||
+    (carrierModes && carrierModes.length > 0 && !destinationCity && !originCity)
+  ) {
+    entityType = "CARRIER";
+    intent = "PLANNING_ROUTING";
+  } else if (
+    isDriverTable ||
+    (driverLicence && !destinationCity && !originCity)
+  ) {
+    entityType = "DRIVER";
+    intent = "FLEET_OPTIMIZE";
+  } else if (
+    (isFleetTable && latitude === null && longitude === null) ||
+    (vehicleRegistration &&
+      latitude === null &&
+      longitude === null &&
+      !destinationCity &&
+      (capacityKg !== null || vehicleKind !== null))
+  ) {
+    entityType = "FLEET_VEHICLE";
+    intent = "FLEET_OPTIMIZE";
+  } else if (
+    isCustomerTable ||
+    ((slaHours !== null || paymentTerms !== null) &&
+      !originCity &&
+      !destinationCity &&
+      !sku)
+  ) {
+    entityType = "CUSTOMER";
+    intent = "NEW_ORDER";
+  } else if (
     (latitude !== null && longitude !== null) ||
-    /gps|telemetry|location|position/i.test(rawEventHint)
+    /gps|telemetry|location|position/i.test(rawEventHint) ||
+    /(telemetry|gps|position)/i.test(tableHint)
   ) {
     entityType = "TELEMETRY";
     intent = "TRACKING_INQUIRY";
   } else if (
     (sku && (onHand !== null || reserved !== null)) ||
-    /inventory|stock|warehouse|wms/i.test(rawEventHint)
+    /inventory|stock|warehouse|wms/i.test(rawEventHint) ||
+    /(inventory|stock|sku)/i.test(tableHint)
   ) {
     entityType = "INVENTORY_SYNC";
     intent = "PLANNING_ROUTING";
@@ -904,28 +1147,51 @@ export function normalizeRecordDeterministically(
     intent = "NEW_ORDER";
   }
 
+  const resolvedOriginCity = originCity ?? (entityType === "WAREHOUSE" ? genericCity : null);
+  const resolvedCustomerName =
+    customerName ?? (entityType === "CUSTOMER" ? pickFirstString(record, ["name", "company_name", "company"]) : null);
+  const resolvedWarehouseCode =
+    warehouseCode ?? (entityType === "WAREHOUSE" ? pickFirstString(record, ["code", "id"]) : null);
+
   const hasCoreOrder = Boolean(originCity && destinationCity);
   const hasCoreTelemetry = Boolean(latitude !== null && longitude !== null);
   const hasCoreInventory = Boolean(sku && (onHand !== null || reserved !== null));
   const hasCoreUpdate = Boolean(shipmentRef || (entityType === "EXCEPTION" && notes));
+  const hasCoreMasterData =
+    (entityType === "WAREHOUSE" && Boolean(resolvedWarehouseCode || warehouseName || genericCity)) ||
+    (entityType === "CARRIER" && Boolean(carrierName || carrierCode)) ||
+    (entityType === "CUSTOMER" && Boolean(resolvedCustomerName || customerCode || customerEmail)) ||
+    (entityType === "FLEET_VEHICLE" && Boolean(vehicleRegistration || externalRef)) ||
+    (entityType === "DRIVER" && Boolean(driverName || driverLicence));
 
   const needsAiInference = !(
     hasCoreOrder ||
     hasCoreTelemetry ||
     hasCoreInventory ||
-    hasCoreUpdate
+    hasCoreUpdate ||
+    hasCoreMasterData
   );
 
   const summaryParts = [
     entityType === "ORDER"
       ? `External order ${externalRef ?? ""}${originCity && destinationCity ? ` (${originCity} → ${destinationCity})` : ""}`
-      : entityType === "TELEMETRY"
-        ? `GPS update for ${vehicleRegistration ?? shipmentRef ?? "vehicle"} (${latitude?.toFixed(4)}, ${longitude?.toFixed(4)})`
-        : entityType === "INVENTORY_SYNC"
-          ? `Inventory sync ${warehouseCode ?? "WH"} · ${sku ?? "SKU"} (on hand: ${onHand ?? "—"})`
-          : entityType === "EXCEPTION"
-            ? `External exception alert${shipmentRef ? ` on ${shipmentRef}` : ""}: ${notes ?? statusUpdate ?? "disruption"}`
-            : `${entityType.replace(/_/g, " ").toLowerCase()} for ${shipmentRef ?? externalRef ?? "record"}`,
+      : entityType === "WAREHOUSE"
+        ? `Warehouse ${resolvedWarehouseCode ?? ""} ${warehouseName ?? genericCity ?? ""}`.trim()
+        : entityType === "CARRIER"
+          ? `Carrier ${carrierName ?? carrierCode ?? "partner"}${carrierModes?.length ? ` (${carrierModes.join("/")})` : ""}`
+          : entityType === "CUSTOMER"
+            ? `Customer ${resolvedCustomerName ?? customerCode ?? "account"}${slaHours ? ` · SLA ${slaHours}h` : ""}`
+            : entityType === "FLEET_VEHICLE"
+              ? `Fleet unit ${vehicleRegistration ?? externalRef ?? "vehicle"}${capacityKg ? ` (${capacityKg} kg)` : ""}`
+              : entityType === "DRIVER"
+                ? `Driver ${driverName ?? driverLicence ?? "operator"}`
+                : entityType === "TELEMETRY"
+                  ? `GPS update for ${vehicleRegistration ?? shipmentRef ?? "vehicle"} (${latitude?.toFixed(4)}, ${longitude?.toFixed(4)})`
+                  : entityType === "INVENTORY_SYNC"
+                    ? `Inventory sync ${warehouseCode ?? "WH"} · ${sku ?? "SKU"} (on hand: ${onHand ?? "—"})`
+                    : entityType === "EXCEPTION"
+                      ? `External exception alert${shipmentRef ? ` on ${shipmentRef}` : ""}: ${notes ?? statusUpdate ?? "disruption"}`
+                      : `${entityType.replace(/_/g, " ").toLowerCase()} for ${shipmentRef ?? externalRef ?? "record"}`,
   ];
 
   return {
@@ -933,30 +1199,18 @@ export function normalizeRecordDeterministically(
       entityType,
       intent,
       mappedBy: mappedFieldHits >= 2 ? "FIELD_MAPPING" : "HEURISTIC",
-      confidence: needsAiInference ? 0.45 : mappedFieldHits >= 2 ? 0.95 : 0.88,
+      confidence: needsAiInference ? 0.45 : mappedFieldHits >= 2 ? 0.95 : 0.9,
       externalRef,
       shipmentRef,
-      originCity,
-      originAddress,
-      originCountry: originCountry ? originCountry.toUpperCase() : null,
+      originCity: resolvedOriginCity,
       destinationCity,
-      destinationAddress,
-      destinationCountry: destinationCountry ? destinationCountry.toUpperCase() : null,
       cargoDescription,
       weightKg,
       quantity: quantity !== null ? Math.round(quantity) : null,
       deadlineIso,
       preferredMode: preferredMode ? preferredMode.toUpperCase() : null,
-      customerName,
+      customerName: resolvedCustomerName,
       customerEmail,
-      shipperName,
-      shipperPhone,
-      shipperEmail,
-      receiverName,
-      receiverPhone,
-      receiverEmail,
-      hsCode,
-      incoterm,
       hazmat,
       reefer,
       currency,
@@ -965,10 +1219,29 @@ export function normalizeRecordDeterministically(
       longitude,
       speedKph,
       temperatureC,
-      warehouseCode,
+      warehouseCode: resolvedWarehouseCode,
       sku,
       onHand: onHand !== null ? Math.round(onHand) : null,
       reserved: reserved !== null ? Math.round(reserved) : null,
+      customerCode,
+      customerPhone,
+      slaHours: slaHours !== null ? Math.round(slaHours) : null,
+      paymentTerms,
+      warehouseName,
+      warehouseCountry,
+      warehouseLeadHours: warehouseLeadHours !== null ? Math.round(warehouseLeadHours) : null,
+      carrierCode,
+      carrierName,
+      carrierModes,
+      carrierOnTimeRate,
+      vehicleKind: vehicleKind ? vehicleKind.toUpperCase() : null,
+      vehicleMode: vehicleMode ? vehicleMode.toUpperCase() : null,
+      capacityKg,
+      capacityCbm,
+      driverName,
+      driverPhone,
+      driverLicence,
+      driverLicenceExpiry,
       severity,
       statusUpdate,
       notes,
@@ -1034,6 +1307,11 @@ const AI_MAPPER_SCHEMA: Schema = {
 };
 
 const VALID_ENTITIES = new Set<CanonicalEntityType>([
+  "CUSTOMER",
+  "WAREHOUSE",
+  "CARRIER",
+  "FLEET_VEHICLE",
+  "DRIVER",
   "ORDER",
   "SHIPMENT_UPDATE",
   "TELEMETRY",

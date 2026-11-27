@@ -10,7 +10,7 @@ import {
   useMap,
   useMapsLibrary,
 } from "@vis.gl/react-google-maps";
-import { ArrowRight, Layers, MapPin, Navigation, Route as RouteIcon } from "lucide-react";
+import { ArrowRight, Layers, Map as MapIcon, MapPin, Navigation, Route as RouteIcon, Satellite, Truck } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapsGroundingPanel, type MapsGroundingContext } from "@/components/maps-grounding-panel";
@@ -18,7 +18,9 @@ import { MapLayersPanel } from "@/components/map-layers-panel";
 import { dispatchQuotaExceeded } from "@/components/maps-quota-banner";
 import { NetworkMap, type MapLane, type MapSitePoint } from "@/components/network-map";
 import { ClientRelative } from "@/components/client-time";
+import { haversineDistanceKm } from "@/lib/driver-dispatch";
 import { city, toneFor } from "@/lib/format";
+import type { MapDriverPin } from "@/lib/map-data";
 import {
   DEFAULT_MAP_LAYERS,
   filterPointsByLayers,
@@ -117,6 +119,99 @@ function SitePinMarker({
             <div className="gmap-infowindow-lanes">
               {laneCount} active lane{laneCount === 1 ? "" : "s"} connected
             </div>
+          </div>
+        </InfoWindow>
+      ) : null}
+    </>
+  );
+}
+
+function DriverPinMarker({
+  driver,
+  isSelected,
+  onSelect,
+  onClear,
+}: {
+  driver: MapDriverPin;
+  isSelected: boolean;
+  onSelect: () => void;
+  onClear: () => void;
+}) {
+  const [markerRef, marker] = useAdvancedMarkerRef();
+  const isAvailable = driver.dutyStatus === "AVAILABLE" && !driver.assignedTo && !driver.licenceExpired;
+  const isOnRoute = driver.dutyStatus === "ON_ROUTE" || Boolean(driver.assignedTo);
+
+  const background = isSelected
+    ? "#111827"
+    : driver.licenceExpired
+      ? "#dc2626"
+      : isAvailable
+        ? "#059669"
+        : isOnRoute
+          ? "#d97706"
+          : "#64748b";
+  const borderColor = isSelected
+    ? "#059669"
+    : driver.licenceExpired
+      ? "#991b1b"
+      : isAvailable
+        ? "#065f46"
+        : isOnRoute
+          ? "#92400e"
+          : "#334155";
+
+  const initials = driver.name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((p) => p[0]?.toUpperCase() ?? "")
+    .join("") || "DR";
+
+  return (
+    <>
+      <AdvancedMarker
+        ref={markerRef}
+        position={{ lat: driver.lat, lng: driver.lon }}
+        zIndex={isSelected ? 45 : 25}
+        title={`Driver ${driver.name} (${driver.dutyStatus.replace(/_/g, " ")})`}
+        onClick={() => (isSelected ? onClear() : onSelect())}
+      >
+        <Pin
+          background={background}
+          borderColor={borderColor}
+          glyphColor="#ffffff"
+          glyph={initials}
+          scale={isSelected ? 1.18 : 0.92}
+        />
+      </AdvancedMarker>
+      {isSelected && marker ? (
+        <InfoWindow anchor={marker} onCloseClick={onClear} maxWidth={270}>
+          <div className="gmap-infowindow">
+            <strong>{driver.name}</strong>
+            <div className="gmap-infowindow-meta">
+              {driver.dutyStatus.replace(/_/g, " ")} ·{" "}
+              {driver.city ?? `${driver.lat.toFixed(3)}, ${driver.lon.toFixed(3)}`}
+            </div>
+            <div className="gmap-infowindow-lanes">
+              HOS {driver.hosDriveRemainingHours.toFixed(1)}h drive ·{" "}
+              {driver.vehicleRegistration ?? driver.equipmentType}
+              {driver.hazmatCertified ? " · HAZMAT" : ""}
+              {driver.reeferCapable ? " · REEFER" : ""}
+            </div>
+            {driver.assignedTo ? (
+              <div className="gmap-infowindow-meta" style={{ marginTop: "0.25rem" }}>
+                Assigned:{" "}
+                <Link href={`/shipments/${driver.assignedTo}`} style={{ color: "#0f766e", textDecoration: "underline" }}>
+                  {driver.assignedTo}
+                </Link>
+              </div>
+            ) : (
+              <div className="gmap-infowindow-meta" style={{ marginTop: "0.25rem" }}>
+                <Link href="/fleet" style={{ color: "#0f766e", textDecoration: "underline" }}>
+                  Open Fleet Dispatch →
+                </Link>
+              </div>
+            )}
           </div>
         </InfoWindow>
       ) : null}
@@ -271,6 +366,33 @@ function MapFocusController({
     if (!map || !target) return;
     map.panTo(target);
   }, [map, target]);
+
+  return null;
+}
+
+function MapPointsBoundsController({
+  points,
+}: {
+  points: GoogleMapPoint[];
+}) {
+  const map = useMap();
+  const prevCountRef = useRef(points.length);
+
+  useEffect(() => {
+    const prevCount = prevCountRef.current;
+    prevCountRef.current = points.length;
+    if (!map || points.length === 0 || prevCount === points.length) return;
+    if (points.length === 1) {
+      map.panTo({ lat: points[0].lat, lng: points[0].lon });
+      map.setZoom(7);
+      return;
+    }
+    const bounds = new google.maps.LatLngBounds();
+    for (const p of points) {
+      bounds.extend({ lat: p.lat, lng: p.lon });
+    }
+    map.fitBounds(bounds, 56);
+  }, [map, points]);
 
   return null;
 }
@@ -466,17 +588,21 @@ export function GoogleNetworkMap({
   apiKey,
   points,
   lanes,
+  drivers = [],
 }: {
   apiKey: string;
   points: GoogleMapPoint[];
   lanes: GoogleMapLane[];
+  drivers?: MapDriverPin[];
 }) {
   const [viewMode, setViewMode] = useState<"google" | "schematic">(
     apiKey ? "google" : "schematic",
   );
+  const [mapType, setMapType] = useState<"roadmap" | "hybrid">("roadmap");
   const [layers, setLayers] = useState<MapLayerVisibility>(DEFAULT_MAP_LAYERS);
   const [filter, setFilter] = useState<LaneFilter>("ALL");
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
   const [selectedWeatherSiteId, setSelectedWeatherSiteId] = useState<string | null>(null);
   const [weatherStations, setWeatherStations] = useState<WeatherStationReading[]>([]);
   const [weatherLoading, setWeatherLoading] = useState(false);
@@ -495,8 +621,9 @@ export function GoogleNetworkMap({
       warehouses: points.filter((p) => isSiteTypeWarehouse(p.type)).length,
       gateways: points.filter((p) => !isSiteTypeWarehouse(p.type)).length,
       routes: lanes.length,
+      drivers: drivers.length,
     }),
-    [points, lanes],
+    [points, lanes, drivers],
   );
 
   const visiblePoints = useMemo(
@@ -606,11 +733,34 @@ export function GoogleNetworkMap({
   }, [selectedSite, visibleLanes]);
 
   const mapCenter = useMemo(() => {
-    if (points.length === 0) return { lat: 6.5244, lng: 3.3792 };
+    if (points.length === 0) {
+      if (drivers.length > 0) {
+        return { lat: drivers[0].lat, lng: drivers[0].lon };
+      }
+      return { lat: 20, lng: 0 };
+    }
     const avgLat = points.reduce((acc, p) => acc + p.lat, 0) / points.length;
     const avgLng = points.reduce((acc, p) => acc + p.lon, 0) / points.length;
     return { lat: avgLat, lng: avgLng };
-  }, [points]);
+  }, [points, drivers]);
+
+  const nearestDriversToFocus = useMemo(() => {
+    const focus = selectedSite
+      ? { lat: selectedSite.lat, lon: selectedSite.lon }
+      : selectedLane
+        ? { lat: selectedLane.from.lat, lon: selectedLane.from.lon }
+        : null;
+    if (!focus || drivers.length === 0) return [];
+    return drivers
+      .map((d) => {
+        const km = haversineDistanceKm(focus.lat, focus.lon, d.lat, d.lon);
+        const roadKm = Math.round(km * 1.22 * 10) / 10;
+        const etaMin = Math.max(5, Math.round((roadKm / 58) * 60));
+        return { driver: d, roadKm, etaMin };
+      })
+      .sort((a, b) => a.roadKm - b.roadKm)
+      .slice(0, 3);
+  }, [selectedSite, selectedLane, drivers]);
 
   const weatherFocusTarget = useMemo(() => {
     if (!layers.weather || !selectedWeatherSiteId) return null;
@@ -644,10 +794,9 @@ export function GoogleNetworkMap({
       };
     }
     return {
-      label: points[0]?.name ?? "West Africa Freight Network",
-      lat: mapCenter.lat,
-      lng: mapCenter.lng,
-      hubName: points[0]?.city ?? "Lagos",
+      label: points[0]?.name ?? "Configured Freight Network",
+      ...(points.length > 0 ? { lat: mapCenter.lat, lng: mapCenter.lng } : {}),
+      hubName: points[0]?.city ?? undefined,
     };
   }, [selectedSite, selectedLane, points, mapCenter]);
 
@@ -758,6 +907,31 @@ export function GoogleNetworkMap({
       >
         <div className="map-canvas-col">
           <div className="gmap-shell" data-testid="google-map-shell">
+            <div
+              className="gmap-type-toggle"
+              role="group"
+              aria-label="Map view mode"
+              data-testid="network-map-type-toggle"
+            >
+              <button
+                type="button"
+                className={`gmap-type-btn${mapType === "roadmap" ? " is-active" : ""}`}
+                aria-pressed={mapType === "roadmap"}
+                onClick={() => setMapType("roadmap")}
+              >
+                <MapIcon size={13} strokeWidth={2} aria-hidden="true" />
+                <span>Street</span>
+              </button>
+              <button
+                type="button"
+                className={`gmap-type-btn${mapType === "hybrid" ? " is-active" : ""}`}
+                aria-pressed={mapType === "hybrid"}
+                onClick={() => setMapType("hybrid")}
+              >
+                <Satellite size={13} strokeWidth={2} aria-hidden="true" />
+                <span>Satellite</span>
+              </button>
+            </div>
             <APIProvider
               apiKey={apiKey}
               language="en"
@@ -768,7 +942,9 @@ export function GoogleNetworkMap({
                 mapId="DEMO_MAP_ID"
                 internalUsageAttributionIds={["gmp_mcp_codeassist_v1_aistudio"]}
                 defaultCenter={mapCenter}
-                defaultZoom={6}
+                defaultZoom={points.length === 0 ? 2 : 6}
+                mapTypeId={mapType}
+                mapTypeControl={false}
                 gestureHandling="greedy"
                 style={{ width: "100%", height: "100%" }}
               >
@@ -791,6 +967,21 @@ export function GoogleNetworkMap({
                     />
                   );
                 })}
+                {layers.drivers
+                  ? drivers.map((d) => (
+                      <DriverPinMarker
+                        key={`drv-${d.id}`}
+                        driver={d}
+                        isSelected={selectedDriverId === d.id}
+                        onSelect={() => {
+                          setSelectedSiteId(null);
+                          setSelectedWeatherSiteId(null);
+                          setSelectedDriverId(d.id);
+                        }}
+                        onClear={() => setSelectedDriverId(null)}
+                      />
+                    ))
+                  : null}
                 {layers.weather ? (
                   <>
                     <WeatherAlertPolygons stations={weatherStations} />
@@ -804,6 +995,7 @@ export function GoogleNetworkMap({
                           isSelected={selectedWeatherSiteId === st.siteId}
                           onSelect={() => {
                             setSelectedSiteId(null);
+                            setSelectedDriverId(null);
                             setSelectedWeatherSiteId(st.siteId);
                           }}
                           onClear={() => setSelectedWeatherSiteId(null)}
@@ -813,6 +1005,7 @@ export function GoogleNetworkMap({
                   </>
                 ) : null}
                 <MapFocusController target={weatherFocusTarget} />
+                <MapPointsBoundsController points={points} />
                 <NetworkRoutesLayer
                   showRoutes={layers.routes}
                   visibleLanes={visibleLanes}
@@ -833,6 +1026,9 @@ export function GoogleNetworkMap({
                 <i className="dot m-gateway-blue" /> port / airport
               </span>
               <span>
+                <i className="dot m-driver" /> live driver
+              </span>
+              <span>
                 <i className="line" /> active corridor
               </span>
               <span>
@@ -840,7 +1036,9 @@ export function GoogleNetworkMap({
               </span>
             </div>
             <span className="text-xs text-faint">
-              Click any pin or corridor lane to inspect live route
+              {points.length === 0
+                ? "Live map ready · add hubs in Warehouses or Integrations to plot pins and routes"
+                : "Click any pin or corridor lane to inspect live route"}
             </span>
           </div>
         </div>
@@ -985,6 +1183,77 @@ export function GoogleNetworkMap({
                   ))}
                 </div>
               ) : null}
+            </div>
+          ) : points.length === 0 ? (
+            <div className="map-inspector" aria-live="polite">
+              <div className="map-inspector-head">
+                <div className="row-center">
+                  <MapPin size={15} strokeWidth={2} aria-hidden="true" />
+                  <strong>Live network map ready</strong>
+                </div>
+              </div>
+              <p className="text-sm text-muted" style={{ margin: 0 }}>
+                No warehouses, ports, or active shipment lanes are configured in this workspace yet.
+                Add your first hub or connect an ERP/database to plot live pins and corridors on the map.
+              </p>
+              <div className="map-inspector-lanes">
+                <Link href="/warehouses" className="empty-action" style={{ marginTop: 0 }}>
+                  <span>Add warehouse or hub</span>
+                  <ArrowRight size={13} strokeWidth={2} aria-hidden="true" />
+                </Link>
+                <Link href="/integrations" className="btn-ghost-sm">
+                  <span>Connect ERP / database</span>
+                </Link>
+              </div>
+            </div>
+          ) : null}
+
+          {nearestDriversToFocus.length > 0 ? (
+            <div className="map-inspector" aria-live="polite">
+              <div className="map-inspector-head">
+                <div className="row-center">
+                  <Truck size={15} strokeWidth={2} aria-hidden="true" />
+                  <strong>
+                    Nearest drivers to{" "}
+                    {selectedSite
+                      ? selectedSite.city ?? selectedSite.name
+                      : selectedLane
+                        ? city(selectedLane.shipment.origin)
+                        : "focus"}
+                  </strong>
+                </div>
+                <Link href="/fleet" className="btn-ghost-sm">
+                  <span>Dispatch console</span>
+                  <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
+                </Link>
+              </div>
+              <div className="map-inspector-lanes">
+                {nearestDriversToFocus.map(({ driver, roadKm, etaMin }) => (
+                  <button
+                    key={driver.id}
+                    type="button"
+                    className={`map-lane-chip${selectedDriverId === driver.id ? " is-selected" : ""}`}
+                    onClick={() => {
+                      setSelectedDriverId(driver.id);
+                    }}
+                  >
+                    <span className="font-semibold">{driver.name}</span>
+                    <span className="font-mono text-xs text-muted">
+                      {roadKm} km · ~{etaMin}m · HOS {driver.hosDriveRemainingHours.toFixed(1)}h
+                    </span>
+                    <span
+                      className="status-tag"
+                      data-tone={
+                        driver.dutyStatus === "AVAILABLE" && !driver.assignedTo
+                          ? "ok"
+                          : "warn"
+                      }
+                    >
+                      {driver.dutyStatus.replace(/_/g, " ").toLowerCase()}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
 

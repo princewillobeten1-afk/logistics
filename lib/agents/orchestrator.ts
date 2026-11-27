@@ -776,29 +776,59 @@ export async function runFleetOptimizationWithGemini(): Promise<{
   updatedReferences: string[];
 }> {
   const startedAt = Date.now();
-  const { listShipments, listConveyances, listDrivers } = await import("@/lib/queries");
-  const [allShipments, conveyances, drivers] = await Promise.all([
+  const { listShipments, listConveyances, listDrivers, listLocations } = await import("@/lib/queries");
+  const { findNearbyDrivers, resolveCityCoordinates } = await import("@/lib/driver-dispatch");
+  const [allShipments, conveyances, drivers, locations] = await Promise.all([
     listShipments(),
     listConveyances(),
     listDrivers(),
+    listLocations(),
   ]);
   const eligible = allShipments.filter((s) =>
     ["ALLOCATED", "PLANNED", "SOURCING"].includes(s.state),
   );
 
   const compactFleetData = {
-    eligibleShipments: eligible.map((s) => ({
-      reference: s.reference,
-      state: s.state,
-      origin: s.origin?.city ?? null,
-      destination: s.destination?.city ?? null,
-      deadline:
-        s.deadline && !Number.isNaN(new Date(s.deadline).getTime())
-          ? new Date(s.deadline).toISOString()
-          : null,
-      cargo: s.cargo,
-      currentPlan: s.plan,
-    })),
+    eligibleShipments: eligible.map((s) => {
+      const originCity = typeof s.origin?.city === "string" ? s.origin.city : null;
+      const target = resolveCityCoordinates(originCity, locations);
+      const nearestDrivers = target
+        ? findNearbyDrivers(
+            drivers,
+            target,
+            {
+              maxRadiusKm: 450,
+              requireHazmat: Boolean(s.cargo?.hazmat),
+              requireReefer: Boolean(s.cargo?.reefer || s.cargo?.temperature_c),
+              minPayloadKg:
+                typeof s.cargo?.weight_kg === "number" ? s.cargo.weight_kg : undefined,
+            },
+            locations,
+          )
+            .slice(0, 3)
+            .map((m) => ({
+              name: m.driver.name,
+              distanceKm: m.distanceKm,
+              etaMinutes: m.etaMinutes,
+              hosDriveRemainingHours: m.hosDriveRemainingHours,
+              eligible: m.eligible,
+              blockingReasons: m.blockingReasons,
+            }))
+        : [];
+      return {
+        reference: s.reference,
+        state: s.state,
+        origin: originCity,
+        destination: s.destination?.city ?? null,
+        deadline:
+          s.deadline && !Number.isNaN(new Date(s.deadline).getTime())
+            ? new Date(s.deadline).toISOString()
+            : null,
+        cargo: s.cargo,
+        currentPlan: s.plan,
+        nearestDrivers,
+      };
+    }),
     conveyances: conveyances.map((c) => ({
       registration: c.registration,
       mode: c.mode,
@@ -810,6 +840,11 @@ export async function runFleetOptimizationWithGemini(): Promise<{
     })),
     driversSummary: drivers.map((d) => ({
       name: d.name,
+      current_city: d.current_city ?? null,
+      duty_status: d.duty_status ?? (d.assigned_to ? "ON_ROUTE" : "AVAILABLE"),
+      hos_drive_remaining_hours: d.hos_drive_remaining_hours ?? 9.5,
+      equipment_type: d.equipment_type ?? "DRY_VAN",
+      reefer_capable: Boolean(d.reefer_capable),
       hazmat_certified: d.hazmat_certified,
       days_to_expiry: d.days_to_expiry,
       assigned_to: d.assigned_to,
@@ -823,12 +858,12 @@ export async function runFleetOptimizationWithGemini(): Promise<{
     thinkingDepth: "LOW",
     systemInstruction: [
       buildSpecialistSystemInstruction(routeDef),
-      `Collaborate with "${fleetDef.name}" (agent id: "${fleetDef.id}") covering vehicle capacity, reefer/hazmat matching, and driver licence compliance.`,
+      `Collaborate with "${fleetDef.name}" (agent id: "${fleetDef.id}") covering nearby driver proximity, HOS driving/on-duty compliance, vehicle capacity, reefer/hazmat matching, and driver licence compliance.`,
       "Return two entries in delegations: one for route-optimization and one for fleet-management.",
       "In shipmentUpdates, only reference exact shipment references from eligibleShipments and only assign exact vehicle registration strings from conveyances.",
     ].join("\n"),
     prompt: JSON.stringify({
-      task: "Optimize active fleet routes across ALLOCATED, PLANNED, and SOURCING shipments balancing delivery deadlines, vehicle capacities, and compliance.",
+      task: "Optimize active fleet routes across ALLOCATED, PLANNED, and SOURCING shipments balancing delivery deadlines, nearby compliant driver availability, HOS clocks, and vehicle capacities.",
       operationalData: compactFleetData,
     }),
     responseSchema: FLEET_OPTIMIZATION_SCHEMA,

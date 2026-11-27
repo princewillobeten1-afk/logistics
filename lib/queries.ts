@@ -1,4 +1,10 @@
 import { query } from "@/lib/db";
+import {
+  buildSevenDayPerformanceTrend,
+  type DailyPerformancePoint,
+} from "@/lib/performance-trends";
+
+export type { DailyPerformancePoint };
 
 export type ShipmentRow = {
   id: string;
@@ -133,7 +139,7 @@ export async function getShipment(reference: string) {
   const [row] = await query<ShipmentRow>(
     `SELECT id, reference, state, version, customer_ref, origin, destination,
             cargo, deadline, allocation, plan, booking, created_at, updated_at
-       FROM shipments WHERE upper(reference) = upper($1)`,
+       FROM shipments WHERE reference = $1`,
     [reference],
   );
   return row ?? null;
@@ -399,145 +405,32 @@ export async function listWarehouses() {
 
 export async function listInventory() {
   return query<{
-    warehouse_id: string;
     warehouse: string;
     sku: string;
     on_hand: number;
     reserved: number;
     available: number;
-    safety_stock: number;
-    reorder_point: number;
-    reorder_quantity: number;
-    unit_cost_minor: string;
-    currency: string;
-    annual_holding_rate: string;
   }>(
-    `SELECT i.warehouse_id, w.code AS warehouse, i.sku, i.on_hand, i.reserved,
-            (i.on_hand - i.reserved) AS available,
-            i.safety_stock, i.reorder_point, i.reorder_quantity,
-            i.unit_cost_minor::text AS unit_cost_minor,
-            i.currency,
-            i.annual_holding_rate::text AS annual_holding_rate
+    `SELECT w.code AS warehouse, i.sku, i.on_hand, i.reserved,
+            (i.on_hand - i.reserved) AS available
        FROM inventory i JOIN warehouses w ON w.id = i.warehouse_id
       ORDER BY w.code, i.sku`,
   );
 }
 
-export async function listReplenishmentOrders() {
-  return query<{
-    id: string;
-    reference: string;
-    warehouse_id: string;
-    warehouse_code: string;
-    sku: string;
-    quantity: number;
-    estimated_cost_minor: string | null;
-    currency: string;
-    reason: string | null;
-    status: string;
-    supplier_name: string | null;
-    expected_at: Date | null;
-    received_at: Date | null;
-    created_at: Date;
-  }>(
-    `SELECT r.id, r.reference, r.warehouse_id, w.code AS warehouse_code,
-            r.sku, r.quantity, r.estimated_cost_minor::text AS estimated_cost_minor,
-            r.currency, r.reason, r.status, r.supplier_name,
-            r.expected_at, r.received_at, r.created_at
-       FROM replenishment_orders r
-       JOIN warehouses w ON w.id = r.warehouse_id
-      ORDER BY CASE r.status
-                 WHEN 'PROPOSED' THEN 0
-                 WHEN 'APPROVED' THEN 1
-                 WHEN 'ORDERED' THEN 2
-                 ELSE 3
-               END,
-               r.created_at DESC
-      LIMIT 100`,
-  );
-}
-
-export async function listConsolidationGroups() {
-  return query<{
-    id: string;
-    reference: string;
-    origin_city: string;
-    destination_city: string;
-    mode: string;
-    load_type: string;
-    status: string;
-    vehicle_capacity_kg: string;
-    total_weight_kg: string;
-    total_volume_cbm: string;
-    utilization_pct: string;
-    estimated_savings_minor: string;
-    currency: string;
-    shipment_refs: string[];
-    shipment_count: string;
-    created_at: Date;
-  }>(
-    `SELECT g.id, g.reference, g.origin_city, g.destination_city, g.mode, g.load_type,
-            g.status, g.vehicle_capacity_kg::text, g.total_weight_kg::text,
-            g.total_volume_cbm::text, g.utilization_pct::text,
-            g.estimated_savings_minor::text, g.currency,
-            coalesce(array_agg(s.reference ORDER BY s.reference) FILTER (WHERE s.reference IS NOT NULL), '{}') AS shipment_refs,
-            count(ci.id)::text AS shipment_count,
-            g.created_at
-       FROM consolidation_groups g
-       LEFT JOIN consolidation_items ci ON ci.group_id = g.id
-       LEFT JOIN shipments s ON s.id = ci.shipment_id
-      GROUP BY g.id
-      ORDER BY g.created_at DESC
-      LIMIT 50`,
-  );
-}
-
-export async function listReturnAuthorizations() {
-  return query<{
-    id: string;
-    rma_number: string;
-    shipment_id: string | null;
-    shipment_reference: string | null;
-    warehouse_id: string | null;
-    warehouse_code: string | null;
-    sku: string;
-    quantity: number;
-    reason: string;
-    condition_notes: string | null;
-    state: string;
-    disposition: string | null;
-    refund_minor: string;
-    currency: string;
-    lot_number: string | null;
-    serial_number: string | null;
-    inspected_by: string | null;
-    inspected_at: Date | null;
-    created_at: Date;
-  }>(
-    `SELECT r.id, r.rma_number, r.shipment_id, s.reference AS shipment_reference,
-            r.warehouse_id, w.code AS warehouse_code, r.sku, r.quantity,
-            r.reason, r.condition_notes, r.state, r.disposition,
-            r.refund_minor::text, r.currency, r.lot_number, r.serial_number,
-            r.inspected_by, r.inspected_at, r.created_at
-       FROM return_authorizations r
-       LEFT JOIN shipments s ON s.id = r.shipment_id
-       LEFT JOIN warehouses w ON w.id = r.warehouse_id
-      ORDER BY r.created_at DESC
-      LIMIT 100`,
-  );
-}
+export type LocationRow = {
+  id: string;
+  type: string;
+  name: string;
+  code: string | null;
+  city: string | null;
+  country: string | null;
+  latitude: string | null;
+  longitude: string | null;
+};
 
 export async function listLocations() {
-  return query<{
-    id: string;
-    type: string;
-    name: string;
-    code: string | null;
-    city: string | null;
-    country: string | null;
-    latitude: string | null;
-    longitude: string | null;
-  }>(
+  return query<LocationRow>(
     `SELECT id, type, name, code, city, country, latitude, longitude
        FROM locations
       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
@@ -592,18 +485,20 @@ export async function listCommunications() {
   );
 }
 
+export type DocumentRow = {
+  id: string;
+  kind: string;
+  direction: string;
+  filename: string | null;
+  extraction_model: string | null;
+  extraction_confidence: string | null;
+  verified_at: Date | null;
+  created_at: Date;
+  reference: string | null;
+};
+
 export async function listDocuments() {
-  return query<{
-    id: string;
-    kind: string;
-    direction: string;
-    filename: string | null;
-    extraction_model: string | null;
-    extraction_confidence: string | null;
-    verified_at: Date | null;
-    created_at: Date;
-    reference: string | null;
-  }>(
+  return query<DocumentRow>(
     `SELECT d.id, d.kind, d.direction, d.filename, d.extraction_model,
             d.extraction_confidence, d.verified_at, d.created_at, s.reference
        FROM documents d
@@ -822,30 +717,102 @@ export type DriverRow = {
   carrier_name: string | null;
   assigned_to: string | null;
   days_to_expiry: string | null;
+  duty_status?: "AVAILABLE" | "ON_ROUTE" | "RESTING" | "OFF_DUTY";
+  current_lat?: string | null;
+  current_lon?: string | null;
+  current_city?: string | null;
+  last_ping_at?: Date | null;
+  hos_drive_remaining_hours?: number | null;
+  hos_duty_remaining_hours?: number | null;
+  vehicle_registration?: string | null;
+  equipment_type?: string | null;
+  reefer_capable?: boolean;
+  max_payload_kg?: number | null;
 };
 
-export async function listDrivers() {
-  return query<DriverRow>(
-    `SELECT d.id, d.name, d.phone, d.licence_number, d.licence_expiry,
-            d.hazmat_certified, d.active,
-            c.code AS carrier_code, c.name AS carrier_name,
-            active_leg.reference AS assigned_to,
-            -- Licence expiry is a dispatch constraint, not paperwork: an
-            -- expired driver cannot legally take the load.
-            (d.licence_expiry - current_date)::text AS days_to_expiry
-       FROM drivers d
-       LEFT JOIN carriers c ON c.id = d.carrier_id
-       LEFT JOIN LATERAL (
-         SELECT s.reference
-           FROM shipment_legs l
-           JOIN shipments s ON s.id = l.shipment_id
-          WHERE l.driver_id = d.id
-            AND l.state NOT IN ('COMPLETED','CANCELLED')
-          ORDER BY l.sequence
-          LIMIT 1
-       ) active_leg ON true
-      ORDER BY d.active DESC, c.code NULLS LAST, d.name`,
-  );
+export async function listDrivers(): Promise<DriverRow[]> {
+  try {
+    const rows = await query<
+      DriverRow & {
+        hos_drive_remaining_hours?: string | number | null;
+        hos_duty_remaining_hours?: string | number | null;
+        max_payload_kg?: string | number | null;
+      }
+    >(
+      `SELECT d.id, d.name, d.phone, d.licence_number, d.licence_expiry,
+              d.hazmat_certified, d.active,
+              d.duty_status,
+              d.current_lat::text AS current_lat,
+              d.current_lon::text AS current_lon,
+              d.current_city,
+              d.last_ping_at,
+              d.hos_drive_remaining_hours,
+              d.hos_duty_remaining_hours,
+              d.vehicle_registration,
+              d.equipment_type,
+              d.reefer_capable,
+              d.max_payload_kg,
+              c.code AS carrier_code, c.name AS carrier_name,
+              active_leg.reference AS assigned_to,
+              -- Licence expiry is a dispatch constraint, not paperwork: an
+              -- expired driver cannot legally take the load.
+              (d.licence_expiry - current_date)::text AS days_to_expiry
+         FROM drivers d
+         LEFT JOIN carriers c ON c.id = d.carrier_id
+         LEFT JOIN LATERAL (
+           SELECT s.reference
+             FROM shipment_legs l
+             JOIN shipments s ON s.id = l.shipment_id
+            WHERE l.driver_id = d.id
+              AND l.state NOT IN ('COMPLETED','CANCELLED')
+            ORDER BY l.sequence
+            LIMIT 1
+         ) active_leg ON true
+        ORDER BY d.active DESC, c.code NULLS LAST, d.name`,
+    );
+    return rows.map((r) => ({
+      ...r,
+      duty_status: r.duty_status ?? (r.assigned_to ? "ON_ROUTE" : "AVAILABLE"),
+      hos_drive_remaining_hours:
+        r.hos_drive_remaining_hours !== null &&
+        r.hos_drive_remaining_hours !== undefined
+          ? Number(r.hos_drive_remaining_hours)
+          : 9.5,
+      hos_duty_remaining_hours:
+        r.hos_duty_remaining_hours !== null &&
+        r.hos_duty_remaining_hours !== undefined
+          ? Number(r.hos_duty_remaining_hours)
+          : 12.0,
+      max_payload_kg:
+        r.max_payload_kg !== null && r.max_payload_kg !== undefined
+          ? Number(r.max_payload_kg)
+          : null,
+      reefer_capable: Boolean(r.reefer_capable),
+    }));
+  } catch (err) {
+    // Graceful fallback if Postgres database has not yet applied migration 022_driver_telemetry_hos
+    const code = (err as { code?: string })?.code;
+    if (code !== "42703") throw err;
+    return query<DriverRow>(
+      `SELECT d.id, d.name, d.phone, d.licence_number, d.licence_expiry,
+              d.hazmat_certified, d.active,
+              c.code AS carrier_code, c.name AS carrier_name,
+              active_leg.reference AS assigned_to,
+              (d.licence_expiry - current_date)::text AS days_to_expiry
+         FROM drivers d
+         LEFT JOIN carriers c ON c.id = d.carrier_id
+         LEFT JOIN LATERAL (
+           SELECT s.reference
+             FROM shipment_legs l
+             JOIN shipments s ON s.id = l.shipment_id
+            WHERE l.driver_id = d.id
+              AND l.state NOT IN ('COMPLETED','CANCELLED')
+            ORDER BY l.sequence
+            LIMIT 1
+         ) active_leg ON true
+        ORDER BY d.active DESC, c.code NULLS LAST, d.name`,
+    );
+  }
 }
 
 export async function laneStats() {
@@ -931,31 +898,6 @@ export async function migrations() {
   );
 }
 
-export type InsightRow = {
-  id: string;
-  topic: string;
-  headline: string;
-  narrative: string;
-  recommendation: string | null;
-  severity: string;
-  period_start: Date;
-  period_end: Date;
-  created_at: Date;
-};
-
-export async function recentInsights(limit = 12) {
-  return query<InsightRow>(
-    `SELECT id, topic, headline, narrative, recommendation, severity,
-            period_start, period_end, created_at
-       FROM insights
-      WHERE acknowledged_at IS NULL
-      ORDER BY array_position(ARRAY['ACTION_NEEDED','NOTABLE','INFO'], severity),
-               created_at DESC
-      LIMIT $1`,
-    [limit],
-  );
-}
-
 export async function openExceptions() {
   return query<{
     id: string;
@@ -1019,6 +961,7 @@ export async function controlTowerSummary(): Promise<{
   modeVolumeTrend: ModeVolumePoint[];
   todayQuoteBookingTrend: QuoteBookingPoint[];
   todayModeVolumeTrend: ModeVolumePoint[];
+  performanceTrend7d: DailyPerformancePoint[];
   shipments: ControlTowerShipmentItem[];
   locations: Awaited<ReturnType<typeof listLocations>>;
 }> {
@@ -1037,8 +980,9 @@ export async function controlTowerSummary(): Promise<{
         distance_km: string | null;
         cost_minor: string | null;
         currency: string | null;
+        co2e_kg: string | null;
       }>(
-        `SELECT shipment_id, sequence, mode, state, distance_km, cost_minor, currency
+        `SELECT shipment_id, sequence, mode, state, distance_km, cost_minor, currency, co2e_kg
            FROM shipment_legs
           ORDER BY sequence`,
       ),
@@ -1244,6 +1188,14 @@ export async function controlTowerSummary(): Promise<{
     });
   }
 
+  const performanceTrend7d = buildSevenDayPerformanceTrend({
+    shipments: enrichedShipments,
+    legs: legRows,
+    quotes: quoteRows,
+    now,
+    days: 7,
+  });
+
   return {
     kpis: {
       activeShipments: stats.active,
@@ -1260,7 +1212,9 @@ export async function controlTowerSummary(): Promise<{
     modeVolumeTrend,
     todayQuoteBookingTrend,
     todayModeVolumeTrend,
+    performanceTrend7d,
     shipments: enrichedShipments,
     locations,
   };
 }
+

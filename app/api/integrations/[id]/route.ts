@@ -37,6 +37,11 @@ export async function PATCH(
     name?: string;
     status?: "ACTIVE" | "PAUSED";
     autonomyMode?: AutonomyMode;
+    autoTakeover?: boolean;
+    sourceUrl?: string | null;
+    sourceAuthHeader?: string | null;
+    databaseUrl?: string | null;
+    dbTables?: string[];
     outboundWebhookUrl?: string | null;
     outboundEvents?: string[];
     fieldMapping?: Record<string, string>;
@@ -73,6 +78,29 @@ export async function PATCH(
         body.autonomyMode && VALID_AUTONOMY.has(body.autonomyMode)
           ? body.autonomyMode
           : undefined,
+      autoTakeover:
+        typeof body.autoTakeover === "boolean" ? body.autoTakeover : undefined,
+      sourceUrl:
+        body.sourceUrl !== undefined
+          ? typeof body.sourceUrl === "string"
+            ? body.sourceUrl.trim() || null
+            : null
+          : undefined,
+      sourceAuthHeader:
+        body.sourceAuthHeader !== undefined
+          ? typeof body.sourceAuthHeader === "string"
+            ? body.sourceAuthHeader.trim() || null
+            : null
+          : undefined,
+      databaseUrl:
+        body.databaseUrl !== undefined
+          ? typeof body.databaseUrl === "string"
+            ? body.databaseUrl.trim() || null
+            : null
+          : undefined,
+      dbTables: Array.isArray(body.dbTables)
+        ? body.dbTables.filter((x): x is string => typeof x === "string").slice(0, 60)
+        : undefined,
       outboundWebhookUrl:
         body.outboundWebhookUrl !== undefined
           ? typeof body.outboundWebhookUrl === "string"
@@ -99,6 +127,7 @@ export async function PATCH(
         connectorId: updated.id,
         status: updated.status,
         autonomyMode: updated.autonomyMode,
+        autoTakeover: updated.autoTakeover,
       },
     });
 

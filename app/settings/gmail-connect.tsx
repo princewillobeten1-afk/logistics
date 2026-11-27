@@ -373,7 +373,7 @@ export function GmailConnect({ compact = false }: { compact?: boolean }) {
             type="email"
             value={composeTo}
             onChange={(e) => setComposeTo(e.target.value)}
-            placeholder="customer@example.com"
+            placeholder="Enter recipient email"
             required
           />
         </label>

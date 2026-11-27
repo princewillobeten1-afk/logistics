@@ -1,30 +1,79 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useFormStatus } from "react-dom";
+import { useState, type FormEvent } from "react";
 import { GoogleSignInButton } from "@/components/google-sign-in-button";
 
-import { loginAction, type LoginState } from "./actions";
-
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <button
-      type="submit"
-      className="auth-submit"
-      data-pending={pending}
-      disabled={pending}
-    >
-      {pending ? "Signing in…" : "Sign in"}
-    </button>
-  );
-}
-
 export function LoginForm({ next }: { next: string }) {
-  const [state, action] = useActionState<LoginState, FormData>(loginAction, {
-    error: null,
-  });
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newTabUrl, setNewTabUrl] = useState<string | null>(null);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+
+    setError(null);
+    setNewTabUrl(null);
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      setError("Enter your email and password.");
+      return;
+    }
+
+    setPending(true);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          email: trimmedEmail,
+          password,
+          next,
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        redirectTo?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setError(data.error ?? "Could not sign in. Please try again.");
+        setPending(false);
+        return;
+      }
+
+      const checkRes = await fetch("/api/auth/session", {
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      const checkData = (await checkRes.json().catch(() => ({}))) as {
+        authenticated?: boolean;
+      };
+      if (!checkData.authenticated) {
+        setNewTabUrl(window.location.href);
+        setError(
+          "Your browser blocked session cookies inside this embedded preview.",
+        );
+        setPending(false);
+        return;
+      }
+
+      window.location.assign(data.redirectTo ?? "/");
+    } catch {
+      setError("Unable to reach the sign-in service. Please try again.");
+      setPending(false);
+    }
+  }
 
   return (
     <div className="auth-stack">
@@ -34,9 +83,7 @@ export function LoginForm({ next }: { next: string }) {
         <span>or continue with email</span>
       </div>
 
-      <form action={action} className="auth-form">
-        <input type="hidden" name="next" value={next} />
-
+      <form onSubmit={handleSubmit} noValidate className="auth-form">
         <div className="auth-field">
           <label htmlFor="login-email">Email</label>
           <input
@@ -49,7 +96,9 @@ export function LoginForm({ next }: { next: string }) {
             spellCheck={false}
             autoFocus
             required
-            aria-describedby={state.error ? "login-error" : undefined}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            aria-describedby={error ? "login-error" : undefined}
           />
         </div>
 
@@ -62,7 +111,9 @@ export function LoginForm({ next }: { next: string }) {
               type={showPassword ? "text" : "password"}
               autoComplete="current-password"
               required
-              aria-describedby={state.error ? "login-error" : undefined}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              aria-describedby={error ? "login-error" : undefined}
             />
             <button
               type="button"
@@ -76,13 +127,32 @@ export function LoginForm({ next }: { next: string }) {
           </div>
         </div>
 
-        {state.error ? (
-          <p id="login-error" className="auth-error" role="alert">
-            {state.error}
-          </p>
+        {error ? (
+          <div id="login-error" className="auth-error" role="alert">
+            <span>{error}</span>
+            {newTabUrl ? (
+              <div style={{ marginTop: "0.35rem" }}>
+                <a
+                  href={newTabUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="auth-link"
+                >
+                  Open in a new tab to sign in →
+                </a>
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
-        <SubmitButton />
+        <button
+          type="submit"
+          className="auth-submit"
+          data-pending={pending}
+          disabled={pending}
+        >
+          {pending ? "Signing in…" : "Sign in"}
+        </button>
       </form>
     </div>
   );

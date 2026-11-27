@@ -12,6 +12,7 @@ export const dynamic = "force-dynamic";
 const VALID_SCOPES = new Set<OperationsSweepScope>([
   "full",
   "exceptions",
+  "fleet",
   "supply",
   "finance",
   "customer",

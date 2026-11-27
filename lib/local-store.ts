@@ -185,6 +185,17 @@ export interface DriverRecord {
   carrier_name: string;
   assigned_to: string | null;
   days_to_expiry: string;
+  duty_status?: "AVAILABLE" | "ON_ROUTE" | "RESTING" | "OFF_DUTY";
+  current_lat?: string | null;
+  current_lon?: string | null;
+  current_city?: string | null;
+  last_ping_at?: Date | null;
+  hos_drive_remaining_hours?: number;
+  hos_duty_remaining_hours?: number;
+  vehicle_registration?: string | null;
+  equipment_type?: string | null;
+  reefer_capable?: boolean;
+  max_payload_kg?: number | null;
 }
 
 export interface OrderRecord {
@@ -359,19 +370,32 @@ export interface MigrationRecord {
   applied_at: Date;
 }
 
+export type IntegrationConnectionMode =
+  | "PUSH_WEBHOOK"
+  | "PULL_API"
+  | "POSTGRES_DB"
+  | "WEBSITE_EMBED"
+  | "FILE_IMPORT";
+
 export interface IntegrationConnectorRecord {
   id: string;
   org_id: string;
   name: string;
   system_type: string;
   category: string;
+  connection_mode?: IntegrationConnectionMode;
   status: "ACTIVE" | "PAUSED";
   autonomy_mode: "FULL_AUTONOMOUS" | "ASSISTED_APPROVAL" | "SYNC_ONLY";
+  auto_takeover?: boolean;
   api_key_prefix: string;
   api_key_hash: string;
   webhook_secret_hash: string;
   outbound_webhook_url: string | null;
   outbound_events: string[];
+  source_url?: string | null;
+  source_auth_sealed?: string | null;
+  db_config_sealed?: string | null;
+  db_tables?: string[];
   field_mapping: Record<string, string>;
   created_by: string;
   created_at: Date;
@@ -566,7 +590,11 @@ export function reviveOperationalStateDates(
         }))
       : [],
     drivers: Array.isArray(raw.drivers)
-      ? raw.drivers.map((d) => ({ ...d, licence_expiry: new Date(d.licence_expiry) }))
+      ? raw.drivers.map((d) => ({
+          ...d,
+          licence_expiry: new Date(d.licence_expiry),
+          last_ping_at: d.last_ping_at ? new Date(d.last_ping_at) : null,
+        }))
       : [],
     orders: Array.isArray(raw.orders)
       ? raw.orders.map((o) => ({
@@ -643,6 +671,12 @@ export function reviveOperationalStateDates(
     integrationConnectors: Array.isArray(raw.integrationConnectors)
       ? raw.integrationConnectors.map((c) => ({
           ...c,
+          connection_mode: c.connection_mode ?? "PUSH_WEBHOOK",
+          auto_takeover: c.auto_takeover ?? true,
+          source_url: c.source_url ?? null,
+          source_auth_sealed: c.source_auth_sealed ?? null,
+          db_config_sealed: c.db_config_sealed ?? null,
+          db_tables: Array.isArray(c.db_tables) ? c.db_tables : [],
           created_at: new Date(c.created_at),
           updated_at: new Date(c.updated_at),
           last_sync_at: c.last_sync_at ? new Date(c.last_sync_at) : null,

@@ -264,3 +264,96 @@ export async function validateOutboundWebhookUrlForDispatch(rawUrl: string): Pro
 
   return syntax;
 }
+
+export function validateDatabaseUrlSyntax(rawUrl: string): {
+  ok: boolean;
+  host?: string;
+  port?: number;
+  database?: string;
+  error?: string;
+} {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return { ok: false, error: "PostgreSQL connection URL is required." };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return {
+      ok: false,
+      error: "Database URL must be a valid postgres:// or postgresql:// URI.",
+    };
+  }
+
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    return {
+      ok: false,
+      error: "Only postgres:// and postgresql:// connection URIs are supported for live database sync.",
+    };
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) {
+    return { ok: false, error: "Database URL is missing a hostname." };
+  }
+
+  if (
+    BLOCKED_HOSTNAMES.has(host) ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return {
+      ok: false,
+      error: "Database URL cannot target localhost or internal network hostnames.",
+    };
+  }
+
+  if (isIP(host) !== 0 && isBlockedIpAddress(host)) {
+    return {
+      ok: false,
+      error: "Database URL cannot target private, loopback, or metadata IP addresses.",
+    };
+  }
+
+  const port = parsed.port ? Number(parsed.port) : 5432;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, error: "Database URL has an invalid port number." };
+  }
+
+  const database = parsed.pathname.replace(/^\//, "").trim() || undefined;
+  return { ok: true, host, port, database };
+}
+
+export async function validateDatabaseUrlForConnect(rawUrl: string): Promise<{
+  ok: boolean;
+  host?: string;
+  port?: number;
+  database?: string;
+  error?: string;
+}> {
+  const syntax = validateDatabaseUrlSyntax(rawUrl);
+  if (!syntax.ok || !syntax.host) return syntax;
+
+  if (isIP(syntax.host) === 0) {
+    try {
+      const addresses = await lookup(syntax.host, { all: true });
+      if (!addresses.length) {
+        return { ok: false, error: "Database hostname could not be resolved." };
+      }
+      for (const addr of addresses) {
+        if (isBlockedIpAddress(addr.address)) {
+          return {
+            ok: false,
+            error: "Database hostname resolves to a restricted network address.",
+          };
+        }
+      }
+    } catch {
+      return { ok: false, error: "Database hostname DNS lookup failed." };
+    }
+  }
+
+  return syntax;
+}
+

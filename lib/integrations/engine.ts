@@ -19,6 +19,7 @@ import {
   recordIntegrationEvent,
   type PublicIntegrationEvent,
 } from "./store";
+import { runAutonomousTakeoverForShipment } from "./takeover";
 
 export interface IngestRecordOutcome {
   index: number;
@@ -46,8 +47,22 @@ export interface UniversalIngestResult {
   processed: number;
   duplicates: number;
   failed: number;
+  entityCounts: Record<string, number>;
+  takeoverSummary: {
+    booked: number;
+    awaitingApproval: number;
+  };
   outcomes: IngestRecordOutcome[];
   events: PublicIntegrationEvent[];
+}
+
+function makeCode(prefix: string, raw: string): string {
+  const cleaned = raw
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 16);
+  return cleaned || `${prefix}-${Math.floor(100 + Math.random() * 899)}`;
 }
 
 async function dispatchOutboundCallback(
@@ -103,7 +118,7 @@ export async function processUniversalIngestion({
   idempotencyKey,
   actorEmail,
   syncOrchestrate = true,
-  maxRecords = 50,
+  maxRecords = 250,
 }: {
   connector: IntegrationConnectorRecord;
   rawPayload: string | Record<string, unknown> | Record<string, unknown>[];
@@ -118,9 +133,12 @@ export async function processUniversalIngestion({
 
   const outcomes: IngestRecordOutcome[] = [];
   const events: PublicIntegrationEvent[] = [];
+  const entityCounts: Record<string, number> = {};
   let processed = 0;
   let duplicates = 0;
   let failed = 0;
+  let takeoverBooked = 0;
+  let takeoverApprovals = 0;
 
   for (let idx = 0; idx < records.length; idx += 1) {
     const startedAt = Date.now();
@@ -172,13 +190,157 @@ export async function processUniversalIngestion({
       let outboundEventName = "integration.synced";
 
       const isSyncOnly = connector.autonomy_mode === "SYNC_ONLY";
-      const runMode =
-        syncOrchestrate && records.length <= 3
-          ? "sync_orchestrate"
-          : "background_orchestrate";
+      const runAiSync = syncOrchestrate && records.length <= 2;
+      const runMode = runAiSync ? "sync_orchestrate" : "background_orchestrate";
+      const autoTakeoverEnabled = connector.auto_takeover !== false && !isSyncOnly;
 
       await runWithOrgScope(connector.org_id, async () => {
-        if (normalized.entityType === "TELEMETRY") {
+        if (normalized.entityType === "WAREHOUSE") {
+          outboundEventName = "warehouse.synced";
+          const code = makeCode(
+            "WH",
+            normalized.warehouseCode ?? normalized.warehouseName ?? normalized.originCity ?? "HUB",
+          );
+          const name = normalized.warehouseName ?? normalized.originCity ?? code;
+          const city = normalized.originCity ?? name;
+          const country = (normalized.warehouseCountry ?? "US").slice(0, 3).toUpperCase();
+
+          await query(
+            `INSERT INTO locations (type, name, code, city, country, latitude, longitude)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id`,
+            [
+              "WAREHOUSE",
+              name,
+              code,
+              city,
+              country,
+              normalized.latitude ?? null,
+              normalized.longitude ?? null,
+            ],
+          );
+          await query(
+            `INSERT INTO warehouses (code, name, dispatch_lead_hours, handles_hazmat, handles_reefer, city, country, latitude, longitude)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             RETURNING id`,
+            [
+              code,
+              name,
+              normalized.warehouseLeadHours ?? 4,
+              Boolean(normalized.hazmat),
+              Boolean(normalized.reefer),
+              city,
+              country,
+              normalized.latitude ?? null,
+              normalized.longitude ?? null,
+            ],
+          );
+          orchestrationSummary = `Synced warehouse ${code} (${name}, ${city}) to Warehouses & Network Map.`;
+        } else if (normalized.entityType === "CARRIER") {
+          outboundEventName = "carrier.synced";
+          const name = normalized.carrierName ?? normalized.externalRef ?? "Carrier Partner";
+          const code = makeCode("CAR", normalized.carrierCode ?? name);
+          const modes =
+            normalized.carrierModes && normalized.carrierModes.length > 0
+              ? normalized.carrierModes
+              : [normalized.preferredMode ?? "ROAD"];
+          const otp =
+            normalized.carrierOnTimeRate != null
+              ? normalized.carrierOnTimeRate > 1
+                ? normalized.carrierOnTimeRate / 100
+                : normalized.carrierOnTimeRate
+              : 0.94;
+          await query(
+            `INSERT INTO carriers (code, name, modes, integration, approved, on_time_rate, service_score)
+             VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
+             RETURNING id`,
+            [
+              code,
+              name,
+              JSON.stringify(modes),
+              "API",
+              true,
+              otp.toFixed(3),
+              Math.min(0.99, otp + 0.01).toFixed(3),
+            ],
+          );
+          orchestrationSummary = `Onboarded approved carrier ${name} (${modes.join(", ")}) for autonomous quote scoring.`;
+        } else if (normalized.entityType === "CUSTOMER") {
+          outboundEventName = "customer.synced";
+          const name = normalized.customerName ?? normalized.externalRef ?? "Customer Account";
+          const code = makeCode("CUST", normalized.customerCode ?? name);
+          const contacts =
+            normalized.customerEmail || normalized.customerPhone
+              ? [
+                  {
+                    name,
+                    email: normalized.customerEmail ?? undefined,
+                    phone: normalized.customerPhone ?? undefined,
+                  },
+                ]
+              : [];
+          await query(
+            `INSERT INTO customers (code, name, sla_hours, payment_terms, default_currency, contacts)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+             RETURNING id`,
+            [
+              code,
+              name,
+              normalized.slaHours ?? 48,
+              normalized.paymentTerms ?? "NET30",
+              normalized.currency || "USD",
+              JSON.stringify(contacts),
+            ],
+          );
+          orchestrationSummary = `Synced customer ${name} (${code}) with ${normalized.slaHours ?? 48}h SLA.`;
+        } else if (normalized.entityType === "FLEET_VEHICLE") {
+          outboundEventName = "fleet.synced";
+          const reg = (
+            normalized.vehicleRegistration ??
+            normalized.externalRef ??
+            makeCode("TRK", `UNIT-${idx + 1}`)
+          ).toUpperCase();
+          await query(
+            `INSERT INTO conveyances
+               (mode, kind, registration, carrier_code, carrier_name, capacity_kg, capacity_cbm, reefer, hazmat_certified, last_lat, last_lon)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             RETURNING id`,
+            [
+              normalized.vehicleMode ?? normalized.preferredMode ?? "ROAD",
+              normalized.vehicleKind ?? "BOX_TRUCK",
+              reg,
+              normalized.carrierCode ?? "OWN",
+              normalized.carrierName ?? connector.name,
+              normalized.capacityKg ?? 10000,
+              normalized.capacityCbm ?? 45,
+              Boolean(normalized.reefer),
+              Boolean(normalized.hazmat),
+              normalized.latitude != null ? String(normalized.latitude) : null,
+              normalized.longitude != null ? String(normalized.longitude) : null,
+            ],
+          );
+          orchestrationSummary = `Registered fleet vehicle ${reg} (${normalized.capacityKg ?? 10000} kg) ready for autonomous dispatch.`;
+        } else if (normalized.entityType === "DRIVER") {
+          outboundEventName = "driver.synced";
+          const name = normalized.driverName ?? normalized.externalRef ?? "Fleet Driver";
+          const licence =
+            normalized.driverLicence ?? makeCode("DRV", name);
+          await query(
+            `INSERT INTO drivers (name, phone, licence_number, licence_expiry, hazmat_certified, carrier_code, carrier_name)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id`,
+            [
+              name,
+              normalized.driverPhone ?? "",
+              licence,
+              normalized.driverLicenceExpiry ?? null,
+              Boolean(normalized.hazmat),
+              normalized.carrierCode ?? "OWN",
+              normalized.carrierName ?? connector.name,
+            ],
+          );
+          orchestrationSummary = `Synced active driver ${name} (${licence}) into Fleet roster.`;
+        } else if (normalized.entityType === "TELEMETRY") {
           outboundEventName = "telemetry.updated";
           const unitReg =
             normalized.vehicleRegistration ?? normalized.externalRef ?? "EXT-UNIT";
@@ -283,7 +445,9 @@ export async function processUniversalIngestion({
               skipEntityCreation: true,
             });
             delegatedAgents = dispatch.delegatedAgents;
-            orchestrationSummary = dispatch.orchestrationSummary;
+            orchestrationSummary =
+              dispatch.orchestrationSummary ??
+              `Updated live GPS coordinates for ${normalized.vehicleRegistration ?? normalized.shipmentRef ?? "vehicle"}.`;
           }
         } else if (normalized.entityType === "INVENTORY_SYNC") {
           outboundEventName = "inventory.synced";
@@ -341,11 +505,13 @@ export async function processUniversalIngestion({
               displayName: connector.name,
               orgId: connector.org_id,
               actorEmail: actorEmail ?? `connector@${connector.system_type}`,
-              mode: runMode,
+              mode: "background_orchestrate",
               skipEntityCreation: true,
             });
             delegatedAgents = dispatch.delegatedAgents;
-            orchestrationSummary = dispatch.orchestrationSummary;
+            orchestrationSummary =
+              dispatch.orchestrationSummary ??
+              `Updated inventory ${normalized.warehouseCode ?? "MAIN-HUB"} / ${normalized.sku ?? "SKU"} (on hand: ${normalized.onHand ?? 0}).`;
           }
         } else {
           // ORDER, SHIPMENT_UPDATE, EXCEPTION, CARRIER_QUOTE, CUSTOMS_DOC
@@ -353,14 +519,14 @@ export async function processUniversalIngestion({
             normalized.entityType === "EXCEPTION"
               ? "exception.detected"
               : normalized.entityType === "ORDER"
-                ? "shipment.created"
+                ? "shipment.booked"
                 : "shipment.updated";
 
           const autonomyNote =
             connector.autonomy_mode === "ASSISTED_APPROVAL"
-              ? "[Connector Policy: Assisted Approval — queue spend/bookings for operator approval]"
+              ? "[Connector Policy: Assisted Approval — queue bookings for operator approval]"
               : connector.autonomy_mode === "FULL_AUTONOMOUS"
-                ? "[Connector Policy: Full Autonomous — execute full planning, allocation, carrier selection, and exception handling]"
+                ? "[Connector Policy: Full Autonomous — execute full planning, carrier scoring, fleet assignment, and booking]"
                 : "[Connector Policy: Sync Only]";
 
           const dispatch = await dispatchToAutonomousAgent({
@@ -416,6 +582,40 @@ export async function processUniversalIngestion({
           shipmentReference = dispatch.shipmentReference ?? normalized.shipmentRef;
           delegatedAgents = isSyncOnly ? [] : dispatch.delegatedAgents;
           orchestrationSummary = dispatch.orchestrationSummary;
+
+          // True end-to-end Autonomous Takeover for every newly ingested order
+          if (
+            autoTakeoverEnabled &&
+            dispatch.shipmentId &&
+            normalized.entityType === "ORDER"
+          ) {
+            const takeover = await runAutonomousTakeoverForShipment({
+              shipmentId: dispatch.shipmentId,
+              shipmentReference: dispatch.shipmentReference,
+              orgId: connector.org_id,
+              autonomyMode: connector.autonomy_mode,
+              customerName: normalized.customerName,
+              customerEmail: normalized.customerEmail,
+              originCity: normalized.originCity,
+              destinationCity: normalized.destinationCity,
+              weightKg: normalized.weightKg,
+              quantity: normalized.quantity,
+              preferredMode: normalized.preferredMode,
+              currency: normalized.currency,
+              hazmat: normalized.hazmat,
+              reefer: normalized.reefer,
+              deadlineIso: normalized.deadlineIso,
+              sourceName: connector.name,
+              actorEmail: actorEmail ?? `connector@${connector.system_type}`,
+            });
+
+            if (takeover.finalState === "BOOKED") takeoverBooked += 1;
+            else if (takeover.finalState === "AWAITING_APPROVAL") takeoverApprovals += 1;
+
+            orchestrationSummary = orchestrationSummary
+              ? `${takeover.summary} · ${orchestrationSummary}`
+              : takeover.summary;
+          }
         }
 
         await recordAudit({
@@ -474,6 +674,8 @@ export async function processUniversalIngestion({
         error: null,
       });
 
+      entityCounts[normalized.entityType] =
+        (entityCounts[normalized.entityType] ?? 0) + 1;
       events.push(ev);
       processed += 1;
       outcomes.push({
@@ -579,6 +781,11 @@ export async function processUniversalIngestion({
     processed,
     duplicates,
     failed,
+    entityCounts,
+    takeoverSummary: {
+      booked: takeoverBooked,
+      awaitingApproval: takeoverApprovals,
+    },
     outcomes,
     events,
   };

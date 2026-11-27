@@ -1,4 +1,8 @@
+import type { IntegrationConnectionMode } from "@/lib/local-store";
+
 export type SystemCategory =
+  | "WEBSITE"
+  | "DATABASE"
   | "ERP"
   | "TMS"
   | "WMS"
@@ -14,6 +18,11 @@ export type AutonomyMode =
   | "SYNC_ONLY";
 
 export type CanonicalEntityType =
+  | "CUSTOMER"
+  | "WAREHOUSE"
+  | "CARRIER"
+  | "FLEET_VEHICLE"
+  | "DRIVER"
   | "ORDER"
   | "SHIPMENT_UPDATE"
   | "TELEMETRY"
@@ -27,12 +36,13 @@ export interface SystemConnectorTemplate {
   name: string;
   vendor: string;
   category: SystemCategory;
+  defaultConnectionMode?: IntegrationConnectionMode;
   summary: string;
-  formats: ("JSON" | "CSV" | "EDI_X12")[];
+  formats: ("JSON" | "CSV" | "EDI_X12" | "SQL_DUMP" | "NDJSON")[];
   defaultAutonomy: AutonomyMode;
   supportedEvents: CanonicalEntityType[];
   defaultFieldMapping: Record<string, string>;
-  sampleFormat: "JSON" | "CSV" | "EDI_X12";
+  sampleFormat: "JSON" | "CSV" | "EDI_X12" | "SQL_DUMP";
   samplePayload: string;
 }
 
@@ -43,21 +53,165 @@ export const AUTONOMY_MODE_META: Record<
   FULL_AUTONOMOUS: {
     label: "Full Autonomous",
     description:
-      "AI normalizes payloads, creates/updates orders and shipments, plans routes, assigns fleet/carriers, handles exceptions, and pushes status back automatically.",
+      "Normalizes your whole site or database, upserts master data, plans routes, scores carriers, assigns fleet, books shipments, handles exceptions, and pushes updates back automatically.",
   },
   ASSISTED_APPROVAL: {
     label: "Assisted Approval",
     description:
-      "AI ingests, plans, and runs specialist analysis automatically, holding high-value bookings and escalations for human sign-off.",
+      "Ingests, plans routes, scores carriers, and allocates fleet automatically, then queues final booking sign-off in Approvals.",
   },
   SYNC_ONLY: {
     label: "Sync Only",
     description:
-      "Normalizes and mirrors external records into Control Tower without triggering autonomous agent dispatches.",
+      "Normalizes and mirrors external records into Control Tower without triggering autonomous planning or bookings.",
   },
 };
 
 export const SYSTEM_CONNECTOR_TEMPLATES: SystemConnectorTemplate[] = [
+  {
+    id: "website_storefront",
+    name: "Whole Website & Storefront",
+    vendor: "Any Company Website / CMS / Portal",
+    category: "WEBSITE",
+    defaultConnectionMode: "WEBSITE_EMBED",
+    summary:
+      "Connect your company website, booking portal, or online store via webhook, live Pull API, or a 1-line embed widget so Control Tower takes over every order automatically.",
+    formats: ["JSON", "CSV", "NDJSON"],
+    defaultAutonomy: "FULL_AUTONOMOUS",
+    supportedEvents: [
+      "CUSTOMER",
+      "WAREHOUSE",
+      "CARRIER",
+      "FLEET_VEHICLE",
+      "DRIVER",
+      "ORDER",
+      "SHIPMENT_UPDATE",
+      "INVENTORY_SYNC",
+      "EXCEPTION",
+    ],
+    defaultFieldMapping: {},
+    sampleFormat: "JSON",
+    samplePayload: JSON.stringify(
+      {
+        customers: [
+          {
+            code: "CUST-101",
+            name: "Horizon Industrial Supply",
+            email: "dispatch@horizon-supply.example",
+            sla_hours: 48,
+            payment_terms: "NET30",
+          },
+        ],
+        orders: [
+          {
+            external_ref: "WEB-2026-1042",
+            customer_name: "Horizon Industrial Supply",
+            customer_email: "dispatch@horizon-supply.example",
+            origin_city: "Chicago",
+            destination_city: "Atlanta",
+            cargo_description: "Palletized industrial switchgear",
+            weight_kg: 1850,
+            quantity: 6,
+            mode: "ROAD",
+            currency: "USD",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  },
+  {
+    id: "postgres_database",
+    name: "Live PostgreSQL Database",
+    vendor: "PostgreSQL / Neon / RDS / Supabase",
+    category: "DATABASE",
+    defaultConnectionMode: "POSTGRES_DB",
+    summary:
+      "Connect a read-only PostgreSQL URI to auto-discover tables and sync your entire operational database—warehouses, fleet, drivers, carriers, customers, inventory, and orders.",
+    formats: ["JSON", "SQL_DUMP"],
+    defaultAutonomy: "FULL_AUTONOMOUS",
+    supportedEvents: [
+      "CUSTOMER",
+      "WAREHOUSE",
+      "CARRIER",
+      "FLEET_VEHICLE",
+      "DRIVER",
+      "INVENTORY_SYNC",
+      "ORDER",
+      "SHIPMENT_UPDATE",
+      "EXCEPTION",
+    ],
+    defaultFieldMapping: {},
+    sampleFormat: "SQL_DUMP",
+    samplePayload: [
+      "INSERT INTO warehouses (code, name, city, country, lead_time_hours) VALUES ('WH-DAL-1', 'Dallas Central Hub', 'Dallas', 'US', 4);",
+      "INSERT INTO carriers (code, name, modes, on_time_rate) VALUES ('CAR-SWIFT', 'TransContinental Freight', 'ROAD,AIR', 0.96);",
+      "INSERT INTO vehicles (registration, kind, mode, capacity_kg, reefer) VALUES ('TX-882-TRK', 'TRACTOR_TRAILER', 'ROAD', 18000, false);",
+      "INSERT INTO customers (code, name, email, sla_hours) VALUES ('CUST-500', 'Apex Retail Group', 'logistics@apexretail.example', 48);",
+      "INSERT INTO orders (external_ref, customer_name, origin_city, destination_city, cargo_description, weight_kg, quantity, mode, currency) VALUES ('DB-ORD-901', 'Apex Retail Group', 'Dallas', 'Houston', 'Retail electronics pallets', 3200, 12, 'ROAD', 'USD');",
+    ].join("\n"),
+  },
+  {
+    id: "full_database_import",
+    name: "Whole-Database Export (JSON / SQL / CSV)",
+    vendor: "Any SQL, NoSQL, or ERP Backup",
+    category: "DATABASE",
+    defaultConnectionMode: "FILE_IMPORT",
+    summary:
+      "Upload or paste a full multi-table JSON export, SQL INSERT dump, NDJSON stream, or CSV manifest. Auto-detects every table and triggers autonomous dispatch immediately.",
+    formats: ["JSON", "SQL_DUMP", "CSV", "NDJSON"],
+    defaultAutonomy: "FULL_AUTONOMOUS",
+    supportedEvents: [
+      "CUSTOMER",
+      "WAREHOUSE",
+      "CARRIER",
+      "FLEET_VEHICLE",
+      "DRIVER",
+      "INVENTORY_SYNC",
+      "ORDER",
+      "SHIPMENT_UPDATE",
+      "TELEMETRY",
+      "EXCEPTION",
+    ],
+    defaultFieldMapping: {},
+    sampleFormat: "JSON",
+    samplePayload: JSON.stringify(
+      {
+        warehouses: [
+          { code: "WH-ROT-01", name: "Rotterdam Port Terminal", city: "Rotterdam", country: "NL", lead_time_hours: 4 },
+        ],
+        carriers: [
+          { code: "EURO-LINE", name: "EuroLine Express", modes: ["ROAD", "RAIL"], on_time_rate: 0.97 },
+        ],
+        fleet: [
+          { registration: "NL-442-HGV", kind: "BOX_TRUCK", mode: "ROAD", capacity_kg: 12000, reefer: true },
+        ],
+        drivers: [
+          { name: "Henrik van Dijk", phone: "+31-600000112", licence_number: "NL-CDL-88210" },
+        ],
+        customers: [
+          { code: "CUST-DE-01", name: "Bavaria Precision GmbH", email: "ops@bavaria-precision.example", sla_hours: 36 },
+        ],
+        orders: [
+          {
+            external_ref: "EXP-2026-771",
+            customer_name: "Bavaria Precision GmbH",
+            origin_city: "Rotterdam",
+            destination_city: "Munich",
+            cargo_description: "Precision optical sensors (temperature-controlled)",
+            weight_kg: 1450,
+            quantity: 8,
+            mode: "ROAD",
+            reefer: true,
+            currency: "EUR",
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+  },
   {
     id: "sap_s4hana_tm",
     name: "SAP S/4HANA TM",

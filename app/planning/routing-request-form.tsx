@@ -54,7 +54,7 @@ export function RoutingRequestForm() {
             id="plan-ref"
             value={reference}
             onChange={(e) => setReference(e.target.value)}
-            placeholder="e.g. LG-00001"
+            placeholder="Shipment reference"
           />
         </label>
 
@@ -64,7 +64,7 @@ export function RoutingRequestForm() {
             id="plan-origin"
             value={originCity}
             onChange={(e) => setOriginCity(e.target.value)}
-            placeholder="e.g. Lagos"
+            placeholder="Origin city"
           />
         </label>
 
@@ -74,7 +74,7 @@ export function RoutingRequestForm() {
             id="plan-destination"
             value={destinationCity}
             onChange={(e) => setDestinationCity(e.target.value)}
-            placeholder="e.g. Kano"
+            placeholder="Destination city"
           />
         </label>
 

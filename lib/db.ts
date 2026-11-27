@@ -1,15 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { Pool, type PoolClient, type QueryResult } from "pg";
 
 import {
@@ -27,15 +18,7 @@ const globalForPg = globalThis as unknown as {
   pgUnavailableUntil?: number;
 };
 
-const IS_TEST_RUNNER =
-  Boolean(process.env.NODE_TEST_CONTEXT) ||
-  process.argv.includes("--test") ||
-  process.execArgv.includes("--test");
-
-const CUSTOM_LOCAL_STORE_PATH = process.env.LOGISTICS_LOCAL_STORE_PATH?.trim();
-const LOCAL_STORE_PATH =
-  CUSTOM_LOCAL_STORE_PATH || path.join(tmpdir(), "logistics-local-store.json");
-const PERSIST_LOCAL_STORE = !IS_TEST_RUNNER || Boolean(CUSTOM_LOCAL_STORE_PATH);
+const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
 
 type LocalOrg = { id: string; name: string; slug: string; active: boolean };
 type LocalUser = {
@@ -101,22 +84,20 @@ function reviveLocalStore(raw: unknown): LocalStore {
 }
 
 function getLocalStore(): LocalStore {
-  if (PERSIST_LOCAL_STORE) {
-    try {
-      if (existsSync(LOCAL_STORE_PATH)) {
-        const mtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
-        if (
-          !globalForPg.logisticsLocalStore ||
-          globalForPg.logisticsLocalMtimeMs !== mtimeMs
-        ) {
-          const parsed = JSON.parse(readFileSync(LOCAL_STORE_PATH, "utf8"));
-          globalForPg.logisticsLocalStore = reviveLocalStore(parsed);
-          globalForPg.logisticsLocalMtimeMs = mtimeMs;
-        }
+  try {
+    if (existsSync(LOCAL_STORE_PATH)) {
+      const mtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
+      if (
+        !globalForPg.logisticsLocalStore ||
+        globalForPg.logisticsLocalMtimeMs !== mtimeMs
+      ) {
+        const parsed = JSON.parse(readFileSync(LOCAL_STORE_PATH, "utf8"));
+        globalForPg.logisticsLocalStore = reviveLocalStore(parsed);
+        globalForPg.logisticsLocalMtimeMs = mtimeMs;
       }
-    } catch {
-      // Fall back to in-memory store if temp file read fails
     }
+  } catch {
+    // Fall back to in-memory store if temp file read fails
   }
 
   if (!globalForPg.logisticsLocalStore) {
@@ -133,18 +114,10 @@ function getLocalStore(): LocalStore {
 
 function saveLocalStore(store: LocalStore): void {
   globalForPg.logisticsLocalStore = store;
-  if (!PERSIST_LOCAL_STORE) return;
-  const tmpFile = `${LOCAL_STORE_PATH}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmpFile, JSON.stringify(store), "utf8");
-    renameSync(tmpFile, LOCAL_STORE_PATH);
+    writeFileSync(LOCAL_STORE_PATH, JSON.stringify(store), "utf8");
     globalForPg.logisticsLocalMtimeMs = statSync(LOCAL_STORE_PATH).mtimeMs;
   } catch {
-    try {
-      unlinkSync(tmpFile);
-    } catch {
-      // Ignore cleanup errors
-    }
     // Ignore disk write issues in read-only environments
   }
 }
@@ -497,36 +470,11 @@ function localQuery(
     return ok([{ ...s, open_exceptions: String(openExc) }]);
   }
 
-  // 7. Assistant / Track / Approval / Autonomous shipment lookup
-  if (/SELECT id(?:,\s*reference)?[\s\S]*FROM shipments[\s\S]*WHERE upper\(reference\) = (?:upper\(\$1\)|\$1)/i.test(sql)) {
+  // 7. Assistant / Track / Approval shipment lookup
+  if (/SELECT id(?:,\s*reference)? FROM shipments WHERE upper\(reference\) = (?:upper\(\$1\)|\$1)/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
-    const s = seed.shipments.find(
-      (x) =>
-        x.reference.toUpperCase() === ref ||
-        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
-    );
+    const s = seed.shipments.find((x) => x.reference.toUpperCase() === ref);
     return s ? ok([{ id: s.id, reference: s.reference }], 1) : ok([]);
-  }
-
-  if (/SELECT reference,\s*state,\s*origin,\s*destination,\s*plan,\s*booking[\s\S]*FROM shipments/i.test(sql)) {
-    const ref = String(params[0] ?? "").trim().toUpperCase();
-    const s = seed.shipments.find(
-      (x) =>
-        x.reference.toUpperCase() === ref ||
-        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
-    );
-    return s
-      ? ok([
-          {
-            reference: s.reference,
-            state: s.state,
-            origin: s.origin,
-            destination: s.destination,
-            plan: s.plan,
-            booking: s.booking,
-          },
-        ])
-      : ok([]);
   }
 
   if (/SELECT reference FROM shipments WHERE id = \$1/i.test(sql)) {
@@ -618,12 +566,12 @@ function localQuery(
   }
 
   // 9. Get single shipment detail (by id or case-insensitive reference)
-  if (/FROM shipments WHERE id = \$1/i.test(sql)) {
+  if (/FROM shipments\s+WHERE id = \$1/i.test(sql)) {
     const s = shipById(String(params[0] ?? ""));
     return s ? ok([s as unknown as Record<string, unknown>]) : ok([]);
   }
 
-  if (/FROM shipments WHERE reference = \$1/i.test(sql)) {
+  if (/FROM shipments\s+WHERE reference = \$1/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
     const s = seed.shipments.find((x) => x.reference.toUpperCase() === ref);
     return s ? ok([s as unknown as Record<string, unknown>]) : ok([]);
@@ -1220,31 +1168,14 @@ function localQuery(
       ? rawSev
       : "HIGH") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
     const detectedBy = String(params[3] ?? "autonomous_intake");
-    const hasSummaryCol = /,\s*summary\s*,\s*detail\)/i.test(sql);
-    const rawDetail = hasSummaryCol ? params[5] : params[4];
     let detail: Record<string, unknown> = {};
     try {
       detail =
-        typeof rawDetail === "string"
-          ? JSON.parse(rawDetail)
-          : ((rawDetail as Record<string, unknown>) ?? {});
+        typeof params[4] === "string"
+          ? JSON.parse(params[4])
+          : ((params[4] as Record<string, unknown>) ?? {});
     } catch {
       detail = {};
-    }
-    if (hasSummaryCol && params[4] != null && !detail.summary) {
-      detail.summary = String(params[4]);
-    }
-    const existing = seed.exceptions.find(
-      (e) =>
-        e.shipment_id === shipmentId &&
-        e.kind === kind &&
-        String(e.state) !== "RESOLVED" &&
-        String(e.state) !== "ABANDONED",
-    );
-    if (existing) {
-      existing.detail = detail;
-      saveLocalStore(store);
-      return ok([{ id: existing.id }], 1);
     }
     seed.exceptions.unshift({
       id,
@@ -1424,8 +1355,11 @@ function localQuery(
   }
 
   // 18. Carriers, Warehouses, Inventory, Locations
-  if (/FROM carriers c/i.test(sql)) {
-    return ok(seed.carriers as unknown as Record<string, unknown>[]);
+  if (/SELECT[\s\S]*FROM carriers\b/i.test(sql)) {
+    const rows = /WHERE\s+active\s*=\s*true/i.test(sql)
+      ? seed.carriers.filter((c) => c.active !== false)
+      : seed.carriers;
+    return ok(rows as unknown as Record<string, unknown>[]);
   }
 
   if (/FROM warehouses w/i.test(sql)) {
@@ -1496,12 +1430,31 @@ function localQuery(
   }
 
   // 20. Fleet: Conveyances & Drivers
-  if (/FROM conveyances v/i.test(sql)) {
-    return ok(seed.conveyances as unknown as Record<string, unknown>[]);
+  if (/SELECT[\s\S]*FROM conveyances\b/i.test(sql)) {
+    const rows = /WHERE\s+active\s*=\s*true/i.test(sql)
+      ? seed.conveyances.filter((v) => v.active !== false)
+      : seed.conveyances;
+    return ok(rows as unknown as Record<string, unknown>[]);
   }
 
   if (/FROM drivers d/i.test(sql)) {
-    return ok(seed.drivers as unknown as Record<string, unknown>[]);
+    const nowMs = Date.now();
+    const rows = seed.drivers.map((d) => {
+      const expMs = d.licence_expiry ? new Date(d.licence_expiry).getTime() : NaN;
+      const computedDays = Number.isFinite(expMs)
+        ? String(Math.floor((expMs - nowMs) / 86_400_000))
+        : d.days_to_expiry;
+      return {
+        ...d,
+        days_to_expiry: computedDays,
+        duty_status: d.duty_status ?? (d.assigned_to ? "ON_ROUTE" : "AVAILABLE"),
+        hos_drive_remaining_hours: d.hos_drive_remaining_hours ?? 9.5,
+        hos_duty_remaining_hours: d.hos_duty_remaining_hours ?? 12.0,
+        equipment_type: d.equipment_type ?? "DRY_VAN",
+        reefer_capable: Boolean(d.reefer_capable),
+      };
+    });
+    return ok(rows as unknown as Record<string, unknown>[]);
   }
 
   // 21. Orders, Documents, Customs, Exceptions
@@ -1840,7 +1793,7 @@ function localQuery(
     ]);
   }
 
-  if (/FROM channel_contacts c/i.test(sql)) {
+  if (/FROM channel_contacts\b/i.test(sql)) {
     const rows = [...seed.contacts]
       .sort((a, b) => {
         if (a.escalated_at && !b.escalated_at) return -1;
@@ -2152,16 +2105,27 @@ function localQuery(
       name: String(params[2] ?? "Connector"),
       system_type: String(params[3] ?? "custom_rest_webhook"),
       category: String(params[4] ?? "CUSTOM"),
+      connection_mode: (String(params[14] ?? "PUSH_WEBHOOK") as
+        | "PUSH_WEBHOOK"
+        | "PULL_API"
+        | "POSTGRES_DB"
+        | "WEBSITE_EMBED"
+        | "FILE_IMPORT"),
       status: (String(params[5] ?? "ACTIVE") as "ACTIVE" | "PAUSED"),
       autonomy_mode: (String(params[6] ?? "FULL_AUTONOMOUS") as
         | "FULL_AUTONOMOUS"
         | "ASSISTED_APPROVAL"
         | "SYNC_ONLY"),
+      auto_takeover: params[15] !== undefined ? Boolean(params[15]) : true,
       api_key_prefix: String(params[7] ?? ""),
       api_key_hash: String(params[8] ?? ""),
       webhook_secret_hash: String(params[9] ?? ""),
       outbound_webhook_url: params[10] != null ? String(params[10]) : null,
       outbound_events: parseJsonArr(params[11]),
+      source_url: params[16] != null ? String(params[16]) : null,
+      source_auth_sealed: params[17] != null ? String(params[17]) : null,
+      db_config_sealed: params[18] != null ? String(params[18]) : null,
+      db_tables: parseJsonArr(params[19]),
       field_mapping: parseJsonObj(params[12]),
       created_by: String(params[13] ?? "operator"),
       created_at: now,
@@ -2203,8 +2167,9 @@ function localQuery(
   }
 
   if (/UPDATE\s+integration_connectors\s+SET\s+name\s*=\s*\$1/i.test(sql)) {
-    const id = String(params[6] ?? "");
-    const orgId = String(params[7] ?? "");
+    const hasExtended = params.length >= 13;
+    const id = String(params[hasExtended ? 11 : 6] ?? "");
+    const orgId = String(params[hasExtended ? 12 : 7] ?? "");
     const c = seed.integrationConnectors.find((x) => x.id === id && x.org_id === orgId);
     if (!c) return ok([], 0);
     c.name = String(params[0] ?? c.name);
@@ -2231,6 +2196,22 @@ function localQuery(
           : ((params[5] as Record<string, string>) ?? c.field_mapping);
     } catch {
       // keep existing
+    }
+    if (hasExtended) {
+      c.auto_takeover = Boolean(params[6]);
+      c.source_url = params[7] != null ? String(params[7]) : null;
+      c.source_auth_sealed = params[8] != null ? String(params[8]) : null;
+      c.db_config_sealed = params[9] != null ? String(params[9]) : null;
+      try {
+        c.db_tables =
+          typeof params[10] === "string"
+            ? JSON.parse(params[10])
+            : Array.isArray(params[10])
+              ? (params[10] as string[])
+              : (c.db_tables ?? []);
+      } catch {
+        // keep existing
+      }
     }
     c.updated_at = new Date();
     saveLocalStore(store);
@@ -2320,17 +2301,16 @@ function localQuery(
   }
 
   // Telemetry vehicle GPS update
-  if (/UPDATE conveyances[\s\S]*(?:last_lat|identifiers)/i.test(sql)) {
-    const isJsonbForm = /identifiers/i.test(sql) && params.length >= 5;
+  if (/UPDATE conveyances[\s\S]*last_lat/i.test(sql)) {
     const lat = String(params[0] ?? "");
     const lon = String(params[1] ?? "");
-    const speedRaw = params[2] != null && String(params[2]) !== "" ? String(params[2]) : null;
-    const reg = String(isJsonbForm ? (params[4] ?? "") : (params[3] ?? "")).trim().toUpperCase();
+    const speed = params[2] != null ? String(params[2]) : null;
+    const reg = String(params[3] ?? "").trim().toUpperCase();
     const conv = seed.conveyances.find((c) => c.registration.toUpperCase() === reg);
     if (conv) {
       conv.last_lat = lat;
       conv.last_lon = lon;
-      conv.last_speed = speedRaw;
+      conv.last_speed = speed;
       conv.last_seen_at = new Date();
       saveLocalStore(store);
       return ok([{ id: conv.id, registration: conv.registration }], 1);
@@ -2353,77 +2333,19 @@ function localQuery(
       last_seen_at: new Date(),
       last_lat: lat,
       last_lon: lon,
-      last_speed: speedRaw,
+      last_speed: speed,
     };
     seed.conveyances.unshift(newConv);
     saveLocalStore(store);
     return ok([{ id: newConv.id, registration: newConv.registration }], 1);
   }
 
-  if (/FROM shipment_legs l\s+JOIN conveyances v/i.test(sql)) {
-    const reg = String(params[0] ?? "").trim().toUpperCase();
-    const conv = seed.conveyances.find((c) => c.registration.toUpperCase() === reg);
-    if (!conv?.assigned_to) return ok([]);
-    const ship = seed.shipments.find((s) => s.reference === conv.assigned_to);
-    return ship ? ok([{ shipment_id: ship.id }]) : ok([]);
-  }
-
-  if (/INSERT INTO tracking_events/i.test(sql)) {
-    const shipmentId = String(params[0] ?? "");
-    const ship = shipById(shipmentId);
-    if (ship && params[1] != null && params[2] != null) {
-      const conv = seed.conveyances.find((c) => c.assigned_to === ship.reference);
-      if (conv) {
-        conv.last_lat = String(params[1]);
-        conv.last_lon = String(params[2]);
-        conv.last_speed = params[3] != null ? String(params[3]) : conv.last_speed;
-        conv.last_seen_at = new Date();
-        saveLocalStore(store);
-      }
-    }
-    return ok([], 1);
-  }
-
-  if (/SELECT id FROM warehouses WHERE upper\(code\)/i.test(sql)) {
-    const code = String(params[0] ?? "").trim().toUpperCase();
-    const wh = seed.warehouses.find((w) => w.code.toUpperCase() === code);
-    return wh ? ok([{ id: wh.id }]) : ok([]);
-  }
-
-  if (/INSERT INTO warehouses\s*\(/i.test(sql)) {
-    const code = String(params[0] ?? "MAIN-WH").trim().toUpperCase();
-    const name = String(params[1] ?? code);
-    const existing = seed.warehouses.find((w) => w.code.toUpperCase() === code);
-    if (existing) return ok([{ id: existing.id }], 1);
-    const newWh = {
-      id: `wh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      code,
-      name,
-      dispatch_lead_hours: "8",
-      handles_hazmat: false,
-      handles_reefer: false,
-      active: true,
-      city: "Lagos",
-      country: "NG",
-      latitude: "6.5244",
-      longitude: "3.3792",
-      skus: "0",
-      on_hand: "0",
-      reserved: "0",
-    };
-    seed.warehouses.unshift(newWh);
-    saveLocalStore(store);
-    return ok([{ id: newWh.id }], 1);
-  }
-
   // Warehouse inventory sync upsert
   if (/INSERT INTO inventory/i.test(sql)) {
-    const rawWh = String(params[0] ?? "MAIN-WH").trim();
-    const byId = seed.warehouses.find((w) => w.id === rawWh);
-    const wh = (byId ? byId.code : rawWh).toUpperCase();
+    const wh = String(params[0] ?? "MAIN-WH").trim().toUpperCase();
     const sku = String(params[1] ?? "SKU-UNKNOWN").trim().toUpperCase();
     const onHand = Math.max(0, Math.round(Number(params[2] ?? 0)));
-    const reserved = Math.min(onHand, Math.max(0, Math.round(Number(params[3] ?? 0))));
+    const reserved = Math.max(0, Math.round(Number(params[3] ?? 0)));
     const available = Math.max(0, onHand - reserved);
     const existing = seed.inventory.find(
       (i) => i.warehouse.toUpperCase() === wh && i.sku.toUpperCase() === sku,
@@ -2441,22 +2363,639 @@ function localQuery(
         available,
       });
     }
-    if (byId) {
-      const whItems = seed.inventory.filter((i) => i.warehouse.toUpperCase() === wh);
-      byId.skus = String(whItems.length);
-      byId.on_hand = String(whItems.reduce((sum, i) => sum + i.on_hand, 0));
-      byId.reserved = String(whItems.reduce((sum, i) => sum + i.reserved, 0));
-    }
     saveLocalStore(store);
     return ok([{ warehouse: wh, sku, on_hand: onHand, reserved, available }], 1);
   }
 
-  if (/FROM insights/i.test(sql)) {
-    return ok([]);
+  // 26. Full-Enterprise Entity Upserts (Customers, Warehouses, Locations, Carriers, Fleet, Drivers, Legs, Quotes, Approvals, Autonomous Booking)
+  if (/INSERT INTO customers/i.test(sql)) {
+    const code = String(params[0] ?? "").trim().toUpperCase() || `CUST-${Date.now().toString().slice(-4)}`;
+    const name = String(params[1] ?? code).trim();
+    const slaHours = params[2] != null && Number.isFinite(Number(params[2])) ? Number(params[2]) : null;
+    const paymentTerms = params[3] != null ? String(params[3]) : null;
+    const defaultCurrency = String(params[4] ?? "USD").toUpperCase();
+    let contacts: { name?: string; email?: string; phone?: string }[] = [];
+    if (typeof params[5] === "string") {
+      try {
+        const parsed = JSON.parse(params[5]);
+        if (Array.isArray(parsed)) contacts = parsed;
+      } catch {
+        // ignore
+      }
+    } else if (Array.isArray(params[5])) {
+      contacts = params[5] as { name?: string; email?: string; phone?: string }[];
+    }
+    const existing = seed.customers.find(
+      (c) => c.code.toUpperCase() === code || c.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) {
+      existing.name = name || existing.name;
+      if (slaHours != null) existing.sla_hours = slaHours;
+      if (paymentTerms) existing.payment_terms = paymentTerms;
+      if (defaultCurrency) existing.default_currency = defaultCurrency;
+      if (contacts.length > 0) existing.contacts = contacts;
+      saveLocalStore(store);
+      return ok([{ id: existing.id, code: existing.code, name: existing.name }], 1);
+    }
+    const rec = {
+      id: `cust-${randomUUID().slice(0, 8)}`,
+      code,
+      name,
+      sla_hours: slaHours,
+      payment_terms: paymentTerms,
+      default_currency: defaultCurrency,
+      contacts,
+      active: true,
+    };
+    seed.customers.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, code: rec.code, name: rec.name }], 1);
   }
 
-  if (/INSERT INTO (?:channel_connections|policies)/i.test(sql)) {
-    return ok([], 1);
+  if (/INSERT INTO locations/i.test(sql)) {
+    const type = (String(params[0] ?? "WAREHOUSE").toUpperCase() as
+      | "WAREHOUSE"
+      | "PORT"
+      | "AIRPORT"
+      | "RAIL_TERMINAL");
+    const name = String(params[1] ?? "Logistics Hub").trim();
+    const code = String(params[2] ?? "").trim().toUpperCase() || name.slice(0, 6).toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const cityName = String(params[3] ?? "").trim();
+    const country = String(params[4] ?? "").trim();
+    const lat = params[5] != null ? String(params[5]) : "";
+    const lon = params[6] != null ? String(params[6]) : "";
+    const existing = seed.locations.find(
+      (l) => l.code.toUpperCase() === code || (cityName && l.city.toLowerCase() === cityName.toLowerCase() && l.name.toLowerCase() === name.toLowerCase()),
+    );
+    if (existing) {
+      existing.name = name || existing.name;
+      if (cityName) existing.city = cityName;
+      if (country) existing.country = country;
+      if (lat) existing.latitude = lat;
+      if (lon) existing.longitude = lon;
+      saveLocalStore(store);
+      return ok([{ id: existing.id, code: existing.code }], 1);
+    }
+    const rec = {
+      id: `loc-${randomUUID().slice(0, 8)}`,
+      type: ["WAREHOUSE", "PORT", "AIRPORT", "RAIL_TERMINAL"].includes(type) ? type : "WAREHOUSE",
+      name,
+      code,
+      city: cityName,
+      country,
+      latitude: lat,
+      longitude: lon,
+    };
+    seed.locations.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, code: rec.code }], 1);
+  }
+
+  if (/INSERT INTO warehouses/i.test(sql)) {
+    const code = String(params[0] ?? "").trim().toUpperCase() || `WH-${Date.now().toString().slice(-4)}`;
+    const name = String(params[1] ?? code).trim();
+    const leadHours = String(params[2] ?? "4");
+    const hazmat = Boolean(params[3]);
+    const reefer = Boolean(params[4]);
+    const cityName = String(params[5] ?? "").trim();
+    const country = String(params[6] ?? "").trim();
+    const lat = params[7] != null ? String(params[7]) : "";
+    const lon = params[8] != null ? String(params[8]) : "";
+    const existing = seed.warehouses.find((w) => w.code.toUpperCase() === code);
+    if (existing) {
+      existing.name = name || existing.name;
+      existing.dispatch_lead_hours = leadHours;
+      existing.handles_hazmat = hazmat;
+      existing.handles_reefer = reefer;
+      if (cityName) existing.city = cityName;
+      if (country) existing.country = country;
+      if (lat) existing.latitude = lat;
+      if (lon) existing.longitude = lon;
+      saveLocalStore(store);
+      return ok([{ id: existing.id, code: existing.code }], 1);
+    }
+    const rec = {
+      id: `wh-${randomUUID().slice(0, 8)}`,
+      code,
+      name,
+      dispatch_lead_hours: leadHours,
+      handles_hazmat: hazmat,
+      handles_reefer: reefer,
+      active: true,
+      city: cityName,
+      country,
+      latitude: lat,
+      longitude: lon,
+      skus: "0",
+      on_hand: "0",
+      reserved: "0",
+    };
+    seed.warehouses.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, code: rec.code }], 1);
+  }
+
+  if (/INSERT INTO carriers/i.test(sql)) {
+    const code = String(params[0] ?? "").trim().toUpperCase() || `CAR-${Date.now().toString().slice(-4)}`;
+    const name = String(params[1] ?? code).trim();
+    let modes: string[] = ["ROAD"];
+    if (Array.isArray(params[2])) {
+      modes = params[2].map((m) => String(m).toUpperCase());
+    } else if (typeof params[2] === "string") {
+      try {
+        const parsed = JSON.parse(params[2]);
+        if (Array.isArray(parsed)) modes = parsed.map((m) => String(m).toUpperCase());
+      } catch {
+        modes = params[2].split(/[,;|\s]+/).filter(Boolean).map((m) => m.toUpperCase());
+      }
+    }
+    const integration = String(params[3] ?? "API").toUpperCase();
+    const approved = params[4] !== undefined ? Boolean(params[4]) : true;
+    const onTime = String(params[5] ?? "0.95");
+    const serviceScore = String(params[6] ?? "0.92");
+    const existing = seed.carriers.find(
+      (c) => c.code.toUpperCase() === code || c.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) {
+      existing.name = name || existing.name;
+      if (modes.length > 0) existing.modes = modes;
+      existing.integration = integration;
+      existing.approved = approved;
+      existing.on_time_rate = onTime;
+      existing.service_score = serviceScore;
+      saveLocalStore(store);
+      return ok([{ id: existing.id, code: existing.code, name: existing.name }], 1);
+    }
+    const rec = {
+      id: `car-${randomUUID().slice(0, 8)}`,
+      code,
+      name,
+      modes: modes.length > 0 ? modes : ["ROAD"],
+      integration,
+      approved,
+      active: true,
+      on_time_rate: onTime,
+      damage_rate: "0.005",
+      availability_rate: "0.96",
+      service_score: serviceScore,
+      shipments_count: 0,
+    };
+    seed.carriers.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, code: rec.code, name: rec.name }], 1);
+  }
+
+  if (/INSERT INTO conveyances/i.test(sql)) {
+    const mode = String(params[0] ?? "ROAD").toUpperCase();
+    const kind = String(params[1] ?? "TRUCK").toUpperCase();
+    const registration = String(params[2] ?? "").trim().toUpperCase() || `UNIT-${Date.now().toString().slice(-4)}`;
+    const carrierCode = String(params[3] ?? "OWN").trim().toUpperCase();
+    const carrierName = String(params[4] ?? "Connected Fleet").trim();
+    const capacityKg = String(params[5] ?? "15000");
+    const capacityCbm = String(params[6] ?? "45");
+    const reefer = Boolean(params[7]);
+    const hazmat = Boolean(params[8]);
+    const lat = params[9] != null ? String(params[9]) : null;
+    const lon = params[10] != null ? String(params[10]) : null;
+    const existing = seed.conveyances.find((c) => c.registration.toUpperCase() === registration);
+    if (existing) {
+      existing.mode = mode;
+      existing.kind = kind;
+      existing.carrier_code = carrierCode;
+      existing.carrier_name = carrierName;
+      existing.capacity_kg = capacityKg;
+      existing.capacity_cbm = capacityCbm;
+      existing.reefer = reefer;
+      existing.hazmat_certified = hazmat;
+      if (lat) existing.last_lat = lat;
+      if (lon) existing.last_lon = lon;
+      if (lat && lon) existing.last_seen_at = new Date();
+      saveLocalStore(store);
+      return ok([{ id: existing.id, registration: existing.registration }], 1);
+    }
+    const rec = {
+      id: `conv-${randomUUID().slice(0, 8)}`,
+      mode,
+      kind,
+      registration,
+      carrier_code: carrierCode,
+      carrier_name: carrierName,
+      capacity_kg: capacityKg,
+      capacity_cbm: capacityCbm,
+      reefer,
+      hazmat_certified: hazmat,
+      active: true,
+      assigned_to: null,
+      leg_state: null,
+      last_seen_at: lat && lon ? new Date() : null,
+      last_lat: lat,
+      last_lon: lon,
+      last_speed: null,
+    };
+    seed.conveyances.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, registration: rec.registration }], 1);
+  }
+
+  if (/UPDATE conveyances SET assigned_to/i.test(sql)) {
+    const ref = params[0] != null ? String(params[0]) : null;
+    const legState = params[1] != null ? String(params[1]) : null;
+    const id = String(params[2] ?? "");
+    const c = seed.conveyances.find((x) => x.id === id);
+    if (!c) return ok([], 0);
+    c.assigned_to = ref;
+    c.leg_state = legState;
+    saveLocalStore(store);
+    return ok([{ id: c.id, registration: c.registration }], 1);
+  }
+
+  if (/INSERT INTO drivers/i.test(sql)) {
+    const colMatch = sql.match(
+      /INSERT INTO drivers\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+?)\)(?:\s*ON CONFLICT|\s*RETURNING|$)/i,
+    );
+    const cols = colMatch
+      ? colMatch[1].split(",").map((c) => c.trim().toLowerCase())
+      : [];
+    const valsRaw = colMatch
+      ? colMatch[2].split(",").map((v) => v.trim())
+      : [];
+
+    const readDriverCol = (colName: string, fallbackPos: number): unknown => {
+      if (cols.length > 0) {
+        const idx = cols.indexOf(colName);
+        if (idx === -1) return undefined;
+        const expr = valsRaw[idx] ?? "";
+        const paramMatch = expr.match(/^\$(\d+)/);
+        if (paramMatch) return params[Number(paramMatch[1]) - 1];
+        const strMatch = expr.match(/^'([^']*)'/);
+        if (strMatch) return strMatch[1];
+        if (/^true$/i.test(expr)) return true;
+        if (/^false$/i.test(expr)) return false;
+        if (/^null$/i.test(expr)) return null;
+        return undefined;
+      }
+      return params[fallbackPos];
+    };
+
+    const name = String(readDriverCol("name", 0) ?? "Driver").trim();
+    const phone = String(readDriverCol("phone", 1) ?? "").trim();
+    const licence =
+      String(readDriverCol("licence_number", 2) ?? "").trim().toUpperCase() ||
+      `LIC-${Date.now().toString().slice(-5)}`;
+    const expiryRaw = readDriverCol("licence_expiry", 3);
+    const parsedExpiry = expiryRaw ? new Date(String(expiryRaw)) : null;
+    const expiry =
+      parsedExpiry && !Number.isNaN(parsedExpiry.getTime())
+        ? parsedExpiry
+        : new Date(Date.now() + 365 * 86_400_000);
+    const hazmat = Boolean(readDriverCol("hazmat_certified", 4));
+    const carrierCode = String(readDriverCol("carrier_code", 5) ?? "OWN")
+      .trim()
+      .toUpperCase();
+    const carrierName = String(
+      readDriverCol("carrier_name", 6) ?? "Connected Fleet",
+    ).trim();
+    const latRaw = readDriverCol("current_lat", 7);
+    const lonRaw = readDriverCol("current_lon", 8);
+    const cityRaw = readDriverCol("current_city", 9);
+    const currentLat =
+      latRaw != null && String(latRaw).trim() !== "" ? String(latRaw) : null;
+    const currentLon =
+      lonRaw != null && String(lonRaw).trim() !== "" ? String(lonRaw) : null;
+    const currentCity =
+      cityRaw != null && String(cityRaw).trim() !== ""
+        ? String(cityRaw).trim()
+        : null;
+    const dutyStatusRaw = String(
+      readDriverCol("duty_status", 10) ?? "AVAILABLE",
+    ).toUpperCase();
+    const dutyStatus = (
+      ["AVAILABLE", "ON_ROUTE", "RESTING", "OFF_DUTY"].includes(dutyStatusRaw)
+        ? dutyStatusRaw
+        : "AVAILABLE"
+    ) as "AVAILABLE" | "ON_ROUTE" | "RESTING" | "OFF_DUTY";
+    const hosDriveRaw = readDriverCol("hos_drive_remaining_hours", 11);
+    const hosDrive =
+      hosDriveRaw != null && Number.isFinite(Number(hosDriveRaw))
+        ? Math.max(0, Math.min(11, Number(hosDriveRaw)))
+        : 9.5;
+    const hosDutyRaw = readDriverCol("hos_duty_remaining_hours", 12);
+    const hosDuty =
+      hosDutyRaw != null && Number.isFinite(Number(hosDutyRaw))
+        ? Math.max(0, Math.min(14, Number(hosDutyRaw)))
+        : 12.0;
+    const vehicleRegRaw = readDriverCol("vehicle_registration", 13);
+    const vehicleReg =
+      vehicleRegRaw != null && String(vehicleRegRaw).trim() !== ""
+        ? String(vehicleRegRaw).trim().toUpperCase()
+        : null;
+    const equipmentRaw = readDriverCol("equipment_type", 14);
+    const equipmentType =
+      equipmentRaw != null && String(equipmentRaw).trim() !== ""
+        ? String(equipmentRaw).trim().toUpperCase()
+        : "DRY_VAN";
+    const reeferCapable = Boolean(
+      readDriverCol("reefer_capable", 15) || equipmentType === "REEFER",
+    );
+    const payloadRaw = readDriverCol("max_payload_kg", 16);
+    const maxPayloadKg =
+      payloadRaw != null &&
+      Number.isFinite(Number(payloadRaw)) &&
+      Number(payloadRaw) > 0
+        ? Number(payloadRaw)
+        : 18000;
+    const daysToExpiry = String(
+      Math.floor((expiry.getTime() - Date.now()) / 86_400_000),
+    );
+    const existing = seed.drivers.find(
+      (d) => d.licence_number.toUpperCase() === licence,
+    );
+    if (existing) {
+      existing.name = name;
+      if (phone) existing.phone = phone;
+      existing.licence_expiry = expiry;
+      existing.hazmat_certified = hazmat;
+      existing.carrier_code = carrierCode;
+      existing.carrier_name = carrierName;
+      existing.days_to_expiry = daysToExpiry;
+      if (currentLat !== null) existing.current_lat = currentLat;
+      if (currentLon !== null) existing.current_lon = currentLon;
+      if (currentCity !== null) existing.current_city = currentCity;
+      if (currentLat !== null && currentLon !== null)
+        existing.last_ping_at = new Date();
+      existing.duty_status = dutyStatus;
+      existing.hos_drive_remaining_hours = hosDrive;
+      existing.hos_duty_remaining_hours = hosDuty;
+      if (vehicleReg !== null) existing.vehicle_registration = vehicleReg;
+      existing.equipment_type = equipmentType;
+      existing.reefer_capable = reeferCapable;
+      existing.max_payload_kg = maxPayloadKg;
+      saveLocalStore(store);
+      return ok([{ id: existing.id, name: existing.name }], 1);
+    }
+    const rec = {
+      id: `drv-${randomUUID().slice(0, 8)}`,
+      name,
+      phone,
+      licence_number: licence,
+      licence_expiry: expiry,
+      hazmat_certified: hazmat,
+      active: true,
+      carrier_code: carrierCode,
+      carrier_name: carrierName,
+      assigned_to: null,
+      days_to_expiry: daysToExpiry,
+      duty_status: dutyStatus,
+      current_lat: currentLat,
+      current_lon: currentLon,
+      current_city: currentCity,
+      last_ping_at: currentLat && currentLon ? new Date() : null,
+      hos_drive_remaining_hours: hosDrive,
+      hos_duty_remaining_hours: hosDuty,
+      vehicle_registration: vehicleReg,
+      equipment_type: equipmentType,
+      reefer_capable: reeferCapable,
+      max_payload_kg: maxPayloadKg,
+    };
+    seed.drivers.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, name: rec.name }], 1);
+  }
+
+  if (/UPDATE drivers[\s\S]*current_lat/i.test(sql)) {
+    const driverId = String(params[0] ?? "");
+    const lat = params[1] != null ? String(params[1]) : null;
+    const lon = params[2] != null ? String(params[2]) : null;
+    const cityVal = params[3] != null ? String(params[3]).trim() : null;
+    const statusRaw = params[4] != null ? String(params[4]).toUpperCase() : null;
+    const hosDrive = params[5] != null && Number.isFinite(Number(params[5])) ? Number(params[5]) : null;
+    const hosDuty = params[6] != null && Number.isFinite(Number(params[6])) ? Number(params[6]) : null;
+    const drv = seed.drivers.find((d) => d.id === driverId);
+    if (!drv) return ok([], 0);
+    if (lat !== null) drv.current_lat = lat;
+    if (lon !== null) drv.current_lon = lon;
+    if (cityVal !== null) drv.current_city = cityVal;
+    if (lat !== null && lon !== null) drv.last_ping_at = new Date();
+    if (statusRaw && ["AVAILABLE", "ON_ROUTE", "RESTING", "OFF_DUTY"].includes(statusRaw)) {
+      drv.duty_status = statusRaw as "AVAILABLE" | "ON_ROUTE" | "RESTING" | "OFF_DUTY";
+      if (statusRaw === "AVAILABLE") drv.assigned_to = null;
+    }
+    if (hosDrive !== null) drv.hos_drive_remaining_hours = Math.max(0, Math.min(11, hosDrive));
+    if (hosDuty !== null) drv.hos_duty_remaining_hours = Math.max(0, Math.min(14, hosDuty));
+    saveLocalStore(store);
+    return ok([{ id: drv.id, name: drv.name }], 1);
+  }
+
+  if (/UPDATE drivers[\s\S]*assigned_to/i.test(sql)) {
+    const ref = params[0] != null ? String(params[0]) : null;
+    const statusRaw = params[1] != null ? String(params[1]).toUpperCase() : ref ? "ON_ROUTE" : "AVAILABLE";
+    const driverId = String(params[2] ?? "");
+    const drv = seed.drivers.find((d) => d.id === driverId);
+    if (!drv) return ok([], 0);
+    drv.assigned_to = ref;
+    if (["AVAILABLE", "ON_ROUTE", "RESTING", "OFF_DUTY"].includes(statusRaw)) {
+      drv.duty_status = statusRaw as "AVAILABLE" | "ON_ROUTE" | "RESTING" | "OFF_DUTY";
+    }
+    saveLocalStore(store);
+    return ok([{ id: drv.id, name: drv.name }], 1);
+  }
+
+  if (/INSERT INTO shipment_legs/i.test(sql)) {
+    const shipmentId = String(params[0] ?? "");
+    const sequence = Number(params[1] ?? 1);
+    const mode = String(params[2] ?? "ROAD").toUpperCase();
+    const state = String(params[3] ?? "PLANNED").toUpperCase();
+    const distanceKm = String(params[4] ?? "0");
+    const costMinor = params[5] != null ? String(params[5]) : null;
+    const currency = String(params[6] ?? "USD").toUpperCase();
+    const loadType = String(params[7] ?? "FTL");
+    const co2eKg = String(params[8] ?? "0");
+    let metadata: Record<string, unknown> = {};
+    if (typeof params[9] === "string") {
+      try {
+        metadata = JSON.parse(params[9]);
+      } catch {
+        metadata = {};
+      }
+    } else if (params[9] && typeof params[9] === "object") {
+      metadata = params[9] as Record<string, unknown>;
+    }
+    const existing = seed.legs.find(
+      (l) => l.shipment_id === shipmentId && l.sequence === sequence,
+    );
+    if (existing) {
+      existing.mode = mode;
+      existing.state = state;
+      existing.distance_km = distanceKm;
+      existing.cost_minor = costMinor;
+      existing.currency = currency;
+      existing.load_type = loadType;
+      existing.co2e_kg = co2eKg;
+      existing.metadata = metadata;
+    } else {
+      seed.legs.push({
+        shipment_id: shipmentId,
+        sequence,
+        mode,
+        state,
+        distance_km: distanceKm,
+        cost_minor: costMinor,
+        currency,
+        load_type: loadType,
+        co2e_kg: co2eKg,
+        metadata,
+      });
+    }
+    saveLocalStore(store);
+    return ok([{ shipment_id: shipmentId, sequence }], 1);
+  }
+
+  if (/INSERT INTO quotes/i.test(sql)) {
+    const id = `qt-${randomUUID().slice(0, 8)}`;
+    const shipmentId = String(params[0] ?? "");
+    const carrierCode = String(params[1] ?? "AUTO").toUpperCase();
+    const carrierName = String(params[2] ?? "Autonomous Carrier").trim();
+    const state = String(params[3] ?? "RECEIVED").toUpperCase();
+    const source = String(params[4] ?? "AUTONOMOUS_ENGINE");
+    const amountMinor = String(params[5] ?? "0");
+    const currency = String(params[6] ?? "USD").toUpperCase();
+    const transitHours = String(params[7] ?? "24");
+    const confidence = String(params[8] ?? "0.94");
+    const score = String(params[9] ?? "0.90");
+    let scoreBreakdown: {
+      parts: Record<string, { weight: number; value: number; contribution: number }>;
+    } = { parts: {} };
+    if (typeof params[10] === "string") {
+      try {
+        scoreBreakdown = JSON.parse(params[10]);
+      } catch {
+        scoreBreakdown = { parts: {} };
+      }
+    } else if (params[10] && typeof params[10] === "object") {
+      scoreBreakdown = params[10] as typeof scoreBreakdown;
+    }
+    const round = Number(params[11] ?? 1);
+    const rec = {
+      id,
+      shipment_id: shipmentId,
+      carrier_code: carrierCode,
+      carrier_name: carrierName,
+      state,
+      source,
+      amount_minor: amountMinor,
+      currency,
+      transit_hours: transitHours,
+      confidence,
+      raw_text: `${carrierName} ${currency} ${Math.round(Number(amountMinor) / 100)} (${transitHours}h)`,
+      parsed_by: "autonomous-rate-engine",
+      score,
+      score_breakdown: scoreBreakdown,
+      round,
+    };
+    seed.quotes.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id }], 1);
+  }
+
+  if (/INSERT INTO proposed_actions/i.test(sql)) {
+    const id = `pa-${randomUUID().slice(0, 8)}`;
+    const shipmentId = String(params[0] ?? "");
+    const action = String(params[1] ?? "BOOK_CARRIER");
+    const rationale = String(params[2] ?? "");
+    const policyReason = String(params[3] ?? "Autonomous policy evaluation");
+    const policyDecision = String(params[4] ?? "ALLOW");
+    const state = String(params[5] ?? "EXECUTED");
+    let actionParams: Record<string, unknown> = {};
+    if (typeof params[6] === "string") {
+      try {
+        actionParams = JSON.parse(params[6]);
+      } catch {
+        actionParams = {};
+      }
+    } else if (params[6] && typeof params[6] === "object") {
+      actionParams = params[6] as Record<string, unknown>;
+    }
+    const rec = {
+      id,
+      shipment_id: shipmentId,
+      agent_run_id: null,
+      action,
+      rationale,
+      policy_reason: policyReason,
+      policy_decision: policyDecision,
+      state,
+      params: actionParams,
+      created_at: new Date(),
+    };
+    seed.proposedActions.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id }], 1);
+  }
+
+  if (/INSERT INTO approvals/i.test(sql)) {
+    const id = `apr-${randomUUID().slice(0, 8)}`;
+    const shipmentId = String(params[0] ?? "");
+    const proposedActionId = String(params[1] ?? "");
+    const token = String(params[2] ?? randomUUID().replace(/-/g, ""));
+    const summary = String(params[3] ?? "Carrier booking approval");
+    const rationale = String(params[4] ?? "");
+    const amountMinor = String(params[5] ?? "0");
+    const currency = String(params[6] ?? "USD").toUpperCase();
+    const now = new Date();
+    const rec = {
+      id,
+      shipment_id: shipmentId,
+      proposed_action_id: proposedActionId,
+      token,
+      state: "PENDING" as const,
+      summary,
+      rationale,
+      amount_minor: amountMinor,
+      currency,
+      requested_at: now,
+      expires_at: new Date(now.getTime() + 48 * 3_600_000),
+      decided_by: null,
+      decided_at: null,
+    };
+    seed.approvals.unshift(rec);
+    saveLocalStore(store);
+    return ok([{ id: rec.id, token: rec.token }], 1);
+  }
+
+  if (/UPDATE shipments\s+SET\s+state\s*=\s*\$1,\s*booking\s*=\s*\$2/i.test(sql)) {
+    const nextState = String(params[0] ?? "BOOKED");
+    const bookingRaw = params[1];
+    const allocationRaw = params[2];
+    const customerId = params[3] != null ? String(params[3]) : null;
+    const sid = String(params[4] ?? "");
+    const s = shipById(sid);
+    if (!s) return ok([], 0);
+    s.state = nextState;
+    if (bookingRaw != null) {
+      try {
+        s.booking =
+          typeof bookingRaw === "string"
+            ? JSON.parse(bookingRaw)
+            : (bookingRaw as Record<string, unknown>);
+      } catch {
+        // keep
+      }
+    }
+    if (allocationRaw != null) {
+      try {
+        s.allocation =
+          typeof allocationRaw === "string"
+            ? JSON.parse(allocationRaw)
+            : (allocationRaw as Record<string, unknown>);
+      } catch {
+        // keep
+      }
+    }
+    if (customerId) s.customer_id = customerId;
+    s.version += 1;
+    s.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([{ id: s.id, reference: s.reference, state: s.state }], 1);
   }
 
   // Fallback for unhandled queries
@@ -2566,7 +3105,6 @@ function isConnectionError(err: unknown): boolean {
   const code = (err as { code?: string })?.code;
   if (
     code === "ECONNREFUSED" ||
-    code === "EACCES" ||
     code === "ENOTFOUND" ||
     code === "ETIMEDOUT" ||
     code === "ECONNRESET"
