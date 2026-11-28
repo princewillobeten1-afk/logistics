@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import test, { after, beforeEach } from "node:test";
 
 import {
@@ -72,18 +72,22 @@ import {
   verifyWorkspaceTelegramSecret,
 } from "../workspace-admin";
 
-const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
+const LOCAL_STORE_PATH =
+  process.env.LOGISTICS_LOCAL_STORE_PATH?.trim() ||
+  "/tmp/logistics-local-store.json";
 const originalStoreBackup = existsSync(LOCAL_STORE_PATH)
   ? readFileSync(LOCAL_STORE_PATH, "utf8")
   : null;
 
 after(() => {
-  if (originalStoreBackup !== null) {
-    try {
+  try {
+    if (originalStoreBackup !== null) {
       writeFileSync(LOCAL_STORE_PATH, originalStoreBackup, "utf8");
-    } catch {
-      // ignore cleanup failures
+    } else if (existsSync(LOCAL_STORE_PATH)) {
+      rmSync(LOCAL_STORE_PATH, { force: true });
     }
+  } catch {
+    // ignore cleanup failures
   }
 });
 

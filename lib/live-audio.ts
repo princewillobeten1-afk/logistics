@@ -129,3 +129,69 @@ export type LiveServerPacket =
   | { type: "interrupted" }
   | { type: "turnComplete" }
   | { type: "error"; message: string };
+
+/**
+ * Returns progressive `getUserMedia` audio constraint candidates so mobile
+ * browsers / Bluetooth headsets with strict channel rules fall back cleanly.
+ */
+export function getAudioConstraintCandidates(): MediaStreamConstraints[] {
+  return [
+    {
+      audio: {
+        channelCount: { ideal: 1 },
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    },
+    {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    },
+    { audio: true },
+  ];
+}
+
+export function isOverconstrainedMediaError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = "name" in err ? String((err as { name?: unknown }).name ?? "") : "";
+  return (
+    name === "OverconstrainedError" ||
+    name === "ConstraintNotSatisfiedError" ||
+    name === "NotFoundError"
+  );
+}
+
+/**
+ * Maps browser microphone errors and mobile context limits to clear operator guidance.
+ */
+export function classifyVoiceMediaError(
+  err: unknown,
+  options?: { isSecureContext?: boolean; hasMediaDevices?: boolean },
+): string {
+  if (options?.isSecureContext === false) {
+    return "Microphone capture requires a secure HTTPS connection on mobile browsers. Switch to Text mode or open over HTTPS.";
+  }
+  if (options?.hasMediaDevices === false) {
+    return "This mobile browser or in-app view does not expose microphone access. Use Text mode to converse with audio replies.";
+  }
+  const name =
+    err && typeof err === "object" && "name" in err
+      ? String((err as { name?: unknown }).name ?? "")
+      : "";
+
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+    return "Microphone permission was blocked. Enable microphone access in your browser settings, or use Text mode.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "No microphone was found on this device. Switch to Text mode to continue with live audio replies.";
+  }
+  if (name === "NotReadableError" || name === "TrackStartError" || name === "AbortError") {
+    return "Microphone is busy in another app or phone call. Close the other audio app or switch to Text mode.";
+  }
+  return "Microphone access was unavailable on this device. Allow microphone permissions or switch to Text mode.";
+}
+

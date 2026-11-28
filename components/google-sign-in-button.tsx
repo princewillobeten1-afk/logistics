@@ -5,6 +5,7 @@ import {
   consumeGoogleRedirectResult,
   googleSignIn,
 } from "@/lib/google-auth";
+import { markOnboardingPendingAfterAuth } from "@/lib/onboarding";
 
 function isEmbeddedIframe(): boolean {
   if (typeof window === "undefined") return false;
@@ -93,14 +94,20 @@ export function GoogleSignInButton({
         authenticated?: boolean;
       };
       if (!checkData.authenticated) {
-        setNewTabUrl(window.location.href);
+        const embedded = isEmbeddedIframe();
+        if (embedded) {
+          setNewTabUrl(window.location.href);
+        }
         setError(
-          "Your browser blocked session cookies inside this embedded preview.",
+          embedded
+            ? "Your browser blocked session cookies inside this embedded preview."
+            : "Your browser blocked the session cookie. Enable cookies for this site and try again.",
         );
         setPending(false);
         return;
       }
 
+      markOnboardingPendingAfterAuth();
       window.location.assign(data.redirectTo ?? "/");
     },
     [companyName, next],
@@ -135,9 +142,9 @@ export function GoogleSignInButton({
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (
-        (code === "auth/popup-blocked" ||
-          code === "auth/web-storage-unsupported") &&
-        isEmbeddedIframe()
+        isEmbeddedIframe() &&
+        code !== "auth/popup-closed-by-user" &&
+        code !== "auth/cancelled-popup-request"
       ) {
         setNewTabUrl(window.location.href);
       }

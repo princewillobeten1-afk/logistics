@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Monitor, Moon, Search, Sun } from "lucide-react";
+import { HelpCircle, Monitor, Moon, Search, Sun } from "lucide-react";
 import { CommandPalette } from "@/components/command-palette";
 import { LiveVoiceWidget } from "@/components/live-voice-widget";
+import { dispatchOpenOnboarding } from "@/components/onboarding-modal";
 
 const ROUTE_META: Record<string, { group: string; label: string }> = {
   "/": { group: "Operations", label: "Overview" },
@@ -184,6 +185,16 @@ export function TopBar() {
           </button>
 
           <LiveVoiceWidget />
+
+          <button
+            type="button"
+            className="tour-trigger"
+            onClick={dispatchOpenOnboarding}
+            aria-label="Open onboarding tour"
+            title="Platform tour"
+          >
+            <HelpCircle size={15} strokeWidth={1.85} aria-hidden="true" />
+          </button>
 
           <div className="theme-switch" role="group" aria-label="Color theme">
             <button

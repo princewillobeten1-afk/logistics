@@ -3,7 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import firebaseConfig from "@/firebase-applet-config.json";
 import { recordAudit } from "@/lib/audit";
 import { SESSION_COOKIE, signInWithGoogle } from "@/lib/auth";
-import { verifySameOriginMutation } from "@/lib/request-origin";
+import {
+  sanitizeAuthRedirectTarget,
+  verifySameOriginMutation,
+} from "@/lib/request-origin";
 
 type LookupUser = {
   localId?: string;
@@ -165,8 +168,7 @@ export async function POST(req: NextRequest) {
     userAgent,
   });
 
-  const next = body.next ?? "/";
-  const redirectTo = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const redirectTo = sanitizeAuthRedirectTarget(body.next);
 
   const response = NextResponse.json({
     ok: true,

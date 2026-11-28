@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { currentUser } from "@/lib/auth";
+import { sanitizeAuthRedirectTarget } from "@/lib/request-origin";
 import { LoginForm } from "./form";
 
 export const dynamic = "force-dynamic";
@@ -13,11 +14,11 @@ export default async function LoginPage({
   searchParams: Promise<{ next?: string; reset?: string; expired?: string }>;
 }) {
   const { next, reset, expired } = await searchParams;
+  const safeNext = sanitizeAuthRedirectTarget(next);
   if (!expired) {
     const user = await currentUser();
     if (user) {
-      const target = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
-      redirect(target);
+      redirect(safeNext);
     }
   }
 
@@ -105,7 +106,7 @@ export default async function LoginPage({
               Your previous session expired. Sign in to continue.
             </p>
           ) : null}
-          <LoginForm next={next ?? "/"} />
+          <LoginForm next={safeNext} />
           <div className="auth-links">
             <Link href="/forgot-password" className="auth-link">
               Forgot password?

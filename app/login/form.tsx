@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { GoogleSignInButton } from "@/components/google-sign-in-button";
+import { markOnboardingPendingAfterAuth } from "@/lib/onboarding";
 
 export function LoginForm({ next }: { next: string }) {
   const [email, setEmail] = useState("");
@@ -60,14 +61,25 @@ export function LoginForm({ next }: { next: string }) {
         authenticated?: boolean;
       };
       if (!checkData.authenticated) {
-        setNewTabUrl(window.location.href);
+        let embedded = false;
+        try {
+          embedded = window.self !== window.top;
+        } catch {
+          embedded = true;
+        }
+        if (embedded) {
+          setNewTabUrl(window.location.href);
+        }
         setError(
-          "Your browser blocked session cookies inside this embedded preview.",
+          embedded
+            ? "Your browser blocked session cookies inside this embedded preview."
+            : "Your browser blocked the session cookie. Enable cookies for this site and try again.",
         );
         setPending(false);
         return;
       }
 
+      markOnboardingPendingAfterAuth();
       window.location.assign(data.redirectTo ?? "/");
     } catch {
       setError("Unable to reach the sign-in service. Please try again.");

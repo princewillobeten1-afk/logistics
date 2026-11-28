@@ -3,8 +3,11 @@ import test from "node:test";
 import {
   LIVE_INPUT_SAMPLE_RATE,
   LIVE_OUTPUT_SAMPLE_RATE,
+  classifyVoiceMediaError,
   computeAudioLevel,
   float32ToPcm16Base64,
+  getAudioConstraintCandidates,
+  isOverconstrainedMediaError,
   normalizeLiveVoice,
   pcm16Base64ToFloat32,
   resampleFloat32,
@@ -56,3 +59,35 @@ test("computeAudioLevel returns 0 for silence and bounded 0..1 energy for speech
   const moderate = computeAudioLevel(new Float32Array([0.1, -0.1, 0.1, -0.1]));
   assert.ok(moderate > 0.2 && moderate < 0.5);
 });
+
+test("getAudioConstraintCandidates provides progressive mobile fallbacks ending in { audio: true }", () => {
+  const candidates = getAudioConstraintCandidates();
+  assert.equal(candidates.length, 3);
+  assert.deepEqual(candidates[candidates.length - 1], { audio: true });
+  const firstAudio = candidates[0].audio as MediaTrackConstraints;
+  assert.deepEqual(firstAudio.channelCount, { ideal: 1 });
+  assert.equal(firstAudio.echoCancellation, true);
+});
+
+test("isOverconstrainedMediaError detects constraint/device errors only", () => {
+  assert.equal(isOverconstrainedMediaError({ name: "OverconstrainedError" }), true);
+  assert.equal(isOverconstrainedMediaError({ name: "ConstraintNotSatisfiedError" }), true);
+  assert.equal(isOverconstrainedMediaError({ name: "NotFoundError" }), true);
+  assert.equal(isOverconstrainedMediaError({ name: "NotAllowedError" }), false);
+  assert.equal(isOverconstrainedMediaError(null), false);
+});
+
+test("classifyVoiceMediaError explains HTTPS, unsupported WebView, and mobile permission errors", () => {
+  assert.match(
+    classifyVoiceMediaError(null, { isSecureContext: false, hasMediaDevices: false }),
+    /HTTPS/i,
+  );
+  assert.match(
+    classifyVoiceMediaError(null, { isSecureContext: true, hasMediaDevices: false }),
+    /does not expose microphone access/i,
+  );
+  assert.match(classifyVoiceMediaError({ name: "NotAllowedError" }), /blocked/i);
+  assert.match(classifyVoiceMediaError({ name: "NotFoundError" }), /No microphone/i);
+  assert.match(classifyVoiceMediaError({ name: "NotReadableError" }), /another app/i);
+});
+

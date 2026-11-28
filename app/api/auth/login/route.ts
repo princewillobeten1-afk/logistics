@@ -2,7 +2,10 @@ import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { recordAudit } from "@/lib/audit";
 import { SESSION_COOKIE, signIn } from "@/lib/auth";
-import { verifySameOriginMutation } from "@/lib/request-origin";
+import {
+  sanitizeAuthRedirectTarget,
+  verifySameOriginMutation,
+} from "@/lib/request-origin";
 
 export async function POST(req: NextRequest) {
   if (!verifySameOriginMutation(req)) {
@@ -25,8 +28,7 @@ export async function POST(req: NextRequest) {
   const email = typeof body.email === "string" ? body.email.trim() : "";
   const password = typeof body.password === "string" ? body.password : "";
   const nextRaw = typeof body.next === "string" ? body.next : "/";
-  const redirectTo =
-    nextRaw.startsWith("/") && !nextRaw.startsWith("//") ? nextRaw : "/";
+  const redirectTo = sanitizeAuthRedirectTarget(nextRaw);
 
   if (!email || !password) {
     return NextResponse.json(

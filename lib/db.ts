@@ -18,7 +18,9 @@ const globalForPg = globalThis as unknown as {
   pgUnavailableUntil?: number;
 };
 
-const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
+const LOCAL_STORE_PATH =
+  process.env.LOGISTICS_LOCAL_STORE_PATH?.trim() ||
+  "/tmp/logistics-local-store.json";
 
 type LocalOrg = {
   id: string;

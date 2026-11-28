@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { signUp } from "@/lib/auth";
 import { resetLocalStoreForTests } from "@/lib/db";
 import { claimDistributedWebhookReplay } from "@/lib/distributed-guard";
@@ -22,6 +23,27 @@ import {
   upsertInternationalFreightRecord,
   upsertThirdPartyClient,
 } from "./store";
+
+const LOCAL_STORE_PATH =
+  process.env.LOGISTICS_LOCAL_STORE_PATH?.trim() ||
+  "/tmp/logistics-local-store.json";
+
+let storeBackup: string | null = null;
+
+test.before(() => {
+  storeBackup = existsSync(LOCAL_STORE_PATH)
+    ? readFileSync(LOCAL_STORE_PATH, "utf8")
+    : null;
+  resetLocalStoreForTests();
+});
+
+test.after(() => {
+  if (storeBackup !== null) {
+    writeFileSync(LOCAL_STORE_PATH, storeBackup, "utf8");
+  } else if (existsSync(LOCAL_STORE_PATH)) {
+    rmSync(LOCAL_STORE_PATH, { force: true });
+  }
+});
 
 test("P2.1 Distributed webhook replay protection deduplicates per-org & allows expiry re-claim", async () => {
   resetLocalStoreForTests();

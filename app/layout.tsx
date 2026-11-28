@@ -8,6 +8,7 @@ import { TopBar } from "@/app/top-bar";
 import { MapsQuotaBanner } from "@/components/maps-quota-banner";
 import { CustomerSupportWidget } from "@/components/customer-support-widget";
 import { MotionProvider } from "@/components/motion-provider";
+import { OnboardingModal } from "@/components/onboarding-modal";
 import { currentUser, requireUser } from "@/lib/auth";
 import { getWorkspaceNavAdaptation } from "@/lib/business-config/store";
 
@@ -133,6 +134,11 @@ export default async function RootLayout({
             </div>
           </div>
           <CustomerSupportWidget />
+          <OnboardingModal
+            userId={user.id}
+            userName={user.name}
+            orgName={user.orgName}
+          />
         </MotionProvider>
       </body>
     </html>

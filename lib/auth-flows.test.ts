@@ -13,9 +13,15 @@ import {
   verifyActiveSessionToken,
 } from "./auth";
 import { resetLocalStoreForTests } from "./db";
-import { resolvePublicOrigin, verifySameOriginMutation } from "./request-origin";
+import {
+  resolvePublicOrigin,
+  sanitizeAuthRedirectTarget,
+  verifySameOriginMutation,
+} from "./request-origin";
 
-const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
+const LOCAL_STORE_PATH =
+  process.env.LOGISTICS_LOCAL_STORE_PATH?.trim() ||
+  "/tmp/logistics-local-store.json";
 
 function withEnv<T>(
   patch: Record<string, string | undefined>,
@@ -133,6 +139,21 @@ test("verifySameOriginMutation and resolvePublicOrigin support localhost, Cloud 
     resolvePublicOrigin(localReq.headers, false),
     "http://localhost:3000",
   );
+});
+
+test("sanitizeAuthRedirectTarget blocks open redirects and auth-entry loops", () => {
+  assert.equal(sanitizeAuthRedirectTarget(undefined), "/");
+  assert.equal(sanitizeAuthRedirectTarget(""), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/orders?x=1"), "/orders?x=1");
+  assert.equal(sanitizeAuthRedirectTarget("/fleet#active"), "/fleet#active");
+  assert.equal(sanitizeAuthRedirectTarget("/login"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/login?next=/orders"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/signup"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/forgot-password"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/reset-password?token=abc"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("//evil.com"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("/\\evil.com"), "/");
+  assert.equal(sanitizeAuthRedirectTarget("https://evil.com"), "/");
 });
 
 test("email signup and case-insensitive email sign-in create isolated session and validate passwords", async () => {

@@ -31,6 +31,9 @@ export type GoogleAuthPayload = {
   accessToken: string | null;
 };
 
+const REDIRECT_PENDING_KEY = "ct_google_redirect_pending_ts";
+const REDIRECT_PENDING_TTL_MS = 10 * 60 * 1000;
+
 let authInstance: Auth | null = null;
 let prewarmPromise: Promise<GoogleAuthPayload | null> | null = null;
 let pendingRedirectPayload: GoogleAuthPayload | null = null;
@@ -68,6 +71,26 @@ function isEmbeddedFrame(): boolean {
   }
 }
 
+function markRedirectPending(): void {
+  try {
+    sessionStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+  } catch {
+    // Ignore restricted sessionStorage
+  }
+}
+
+function consumeRedirectPendingFlag(): boolean {
+  try {
+    const raw = sessionStorage.getItem(REDIRECT_PENDING_KEY);
+    if (!raw) return false;
+    sessionStorage.removeItem(REDIRECT_PENDING_KEY);
+    const ts = Number(raw);
+    return Number.isFinite(ts) && Date.now() - ts < REDIRECT_PENDING_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Pre-initializes Firebase Auth and resolves any completed signInWithRedirect
  * flow without discarding the credential.
@@ -76,6 +99,7 @@ export function prewarmGoogleAuth(): Promise<GoogleAuthPayload | null> {
   if (typeof window === "undefined") return Promise.resolve(null);
   if (!prewarmPromise) {
     prewarmPromise = (async () => {
+      const wasRedirectPending = consumeRedirectPendingFlag();
       try {
         const auth = getFirebaseAuth();
         await auth.authStateReady();
@@ -96,8 +120,34 @@ export function prewarmGoogleAuth(): Promise<GoogleAuthPayload | null> {
           }
           return payload;
         }
-      } catch {
-        // Non-fatal: signInWithPopup initializes on demand if prewarm fails.
+
+        // Recover signed-in Firebase user if modern browser storage partitioning
+        // cleared Firebase's redirect metadata while still hydrating auth.currentUser.
+        if (wasRedirectPending && auth.currentUser) {
+          const idToken = await auth.currentUser.getIdToken();
+          const payload: GoogleAuthPayload = {
+            user: auth.currentUser,
+            idToken,
+            accessToken: null,
+          };
+          if (!redirectConsumed) {
+            pendingRedirectPayload = payload;
+          }
+          return payload;
+        }
+
+        if (wasRedirectPending) {
+          const err = new Error(
+            "Google sign-in redirect did not finish because your browser blocked third-party redirect storage. Allow popups or sign in with email below.",
+          ) as Error & { code?: string };
+          err.code = "auth/web-storage-unsupported";
+          throw err;
+        }
+      } catch (err) {
+        if (wasRedirectPending) {
+          throw err;
+        }
+        // Non-fatal during passive prewarm when no redirect was pending.
       }
       return null;
     })();
@@ -129,7 +179,7 @@ export function initGoogleAuth(
   onAuthFailure?: () => void,
 ) {
   const auth = getFirebaseAuth();
-  void prewarmGoogleAuth();
+  void prewarmGoogleAuth().catch(() => {});
   return onAuthStateChanged(auth, (user: User | null) => {
     if (user && cachedAccessToken) {
       onAuthSuccess?.(user, cachedAccessToken);
@@ -180,12 +230,13 @@ export async function googleSignIn(options?: {
       return { user: result.user, idToken, accessToken };
     } catch (err) {
       const code = (err as { code?: string })?.code;
-      if (
-        (code === "auth/popup-blocked" ||
-          code === "auth/web-storage-unsupported") &&
-        !isEmbeddedFrame()
-      ) {
+      const canRedirectFallback =
+        code === "auth/popup-blocked" ||
+        code === "auth/web-storage-unsupported" ||
+        code === "auth/operation-not-supported-in-this-environment";
+      if (canRedirectFallback && !isEmbeddedFrame()) {
         redirectConsumed = false;
+        markRedirectPending();
         await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
         // Browser navigates away on redirect; keep promise pending briefly.
         return await new Promise<GoogleAuthPayload>(() => {});

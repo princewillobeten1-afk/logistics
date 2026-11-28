@@ -99,3 +99,31 @@ export function resolvePublicOrigin(
 
   return "http://localhost:3000";
 }
+
+const AUTH_ENTRY_PREFIXES = [
+  "/login",
+  "/signup",
+  "/forgot-password",
+  "/reset-password",
+];
+
+/**
+ * Ensures post-login redirects stay on an internal non-auth route and never
+ * open-redirect or loop back onto /login or /signup.
+ */
+export function sanitizeAuthRedirectTarget(next?: string | null): string {
+  const raw = next?.trim() ?? "";
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
+    return "/";
+  }
+  const pathOnly = raw.split(/[?#]/)[0]?.toLowerCase() ?? "/";
+  if (
+    AUTH_ENTRY_PREFIXES.some(
+      (prefix) => pathOnly === prefix || pathOnly.startsWith(`${prefix}/`),
+    )
+  ) {
+    return "/";
+  }
+  return raw;
+}
+
