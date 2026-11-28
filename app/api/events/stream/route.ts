@@ -1,5 +1,11 @@
-import { currentUser } from "@/lib/auth";
+import { cookies } from "next/headers";
+import {
+  currentUser,
+  SESSION_COOKIE,
+  verifyActiveSessionToken,
+} from "@/lib/auth";
 import { queryAs } from "@/lib/db";
+import { detectWorkspaceTampering } from "@/lib/tenant-guard";
 
 // Needs the pg driver, and must never be cached or statically rendered.
 export const runtime = "nodejs";
@@ -7,6 +13,7 @@ export const dynamic = "force-dynamic";
 
 const POLL_MS = 2000;
 const HEARTBEAT_MS = 20_000;
+const SESSION_REVERIFY_EVERY_TICKS = 5; // ~10s
 // A client that has been away long enough to miss more than this gets the
 // most recent slice rather than a catch-up flood it would only discard.
 const MAX_BATCH = 50;
@@ -22,34 +29,28 @@ type Row = {
 
 /**
  * Server-sent events over `shipment_events` (§37).
- *
- * **The stream carries "something changed", not the change itself.** Clients
- * respond by re-reading the page through the normal server components, which
- * is what makes the whole thing safe: `shipment_events.id` comes from a
- * sequence, and sequences commit out of order — a row with id 100 can become
- * visible while 99 is still uncommitted, so polling `id > last` can step over
- * one. If the payload were the data, that would be a silently lost update.
- * Because it is only a nudge, a skipped id costs nothing: the next event
- * triggers a full re-read that includes whatever was missed, and the page
- * never renders from the stream.
- *
- * Polling rather than LISTEN/NOTIFY on purpose. NOTIFY needs a dedicated
- * connection held open per client, and the pool has five; a 2-second poll of
- * an indexed `id >` on an append-only table is cheaper than that at any scale
- * this system will see.
  */
 export async function GET(request: Request): Promise<Response> {
   // Middleware only saw that a cookie exists. This is where it is verified.
+  const sessionToken = (await cookies()).get(SESSION_COOKIE)?.value ?? null;
   const user = await currentUser();
-  if (!user) {
+  if (!user || !sessionToken) {
     return new Response("Not signed in.", { status: 401 });
   }
   const orgId = user.orgId;
 
+  const url = new URL(request.url);
+  const tamper = detectWorkspaceTampering(
+    { headers: request.headers, nextUrl: url },
+    orgId,
+  );
+  if (tamper) {
+    return new Response(tamper, { status: 403 });
+  }
+
   // Resume where the client left off. `Last-Event-ID` is sent automatically by
   // EventSource on reconnect, so a dropped connection does not replay from the
   // beginning of time.
-  const url = new URL(request.url);
   const resumeFrom =
     request.headers.get("last-event-id") ?? url.searchParams.get("since");
 
@@ -105,10 +106,25 @@ export async function GET(request: Request): Promise<Response> {
       }
 
       let sinceHeartbeat = 0;
+      let ticks = 0;
 
       const tick = async () => {
         if (closed) return;
         try {
+          ticks += 1;
+          if (ticks % SESSION_REVERIFY_EVERY_TICKS === 0) {
+            const activeSession = await verifyActiveSessionToken(sessionToken);
+            if (!activeSession || activeSession.orgId !== orgId) {
+              send(
+                `event: revoked\ndata: ${JSON.stringify({
+                  message: "Session expired or revoked.",
+                })}\n\n`,
+              );
+              shutdown();
+              return;
+            }
+          }
+
           const rows = await queryAs<Row>(
             orgId,
             `SELECT e.id::text, e.type, e.actor, e.to_state, e.created_at,
@@ -148,11 +164,14 @@ export async function GET(request: Request): Promise<Response> {
           }
         } catch (error) {
           // A failed poll is not fatal — Postgres restarting, a pool timeout.
-          // Report it and keep the connection; the next tick usually works,
-          // and dropping the stream would make every client reconnect at once.
+          // Log details server-side and send a generic status to the browser.
+          console.warn(
+            "[events/stream] poll error:",
+            error instanceof Error ? error.message : String(error),
+          );
           send(
             `event: warning\ndata: ${JSON.stringify({
-              message: error instanceof Error ? error.message : "poll failed",
+              message: "Temporary live-feed interruption; retrying.",
             })}\n\n`,
           );
         }

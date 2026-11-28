@@ -9,6 +9,7 @@ import { MapsQuotaBanner } from "@/components/maps-quota-banner";
 import { CustomerSupportWidget } from "@/components/customer-support-widget";
 import { MotionProvider } from "@/components/motion-provider";
 import { currentUser, requireUser } from "@/lib/auth";
+import { getWorkspaceNavAdaptation } from "@/lib/business-config/store";
 
 const plusJakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
@@ -82,7 +83,7 @@ export default async function RootLayout({
     </html>
   );
 
-  if (PUBLIC.has(pathname)) {
+  if (PUBLIC.has(pathname) || pathname.startsWith("/invite/")) {
     return renderPublicShell();
   }
 
@@ -95,6 +96,8 @@ export default async function RootLayout({
   } else {
     user = await requireUser();
   }
+
+  const navAdaptation = await getWorkspaceNavAdaptation(user.orgId);
 
   return (
     <html lang="en" className={fontVars} suppressHydrationWarning>
@@ -112,6 +115,8 @@ export default async function RootLayout({
           <div className="shell">
             <NavShell
               orgName={user.orgName}
+              tierLabel={navAdaptation.tierLabel}
+              disabledHrefs={navAdaptation.disabledHrefs}
               account={
                 <AccountBar
                   email={user.email}

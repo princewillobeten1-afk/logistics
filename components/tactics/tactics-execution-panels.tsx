@@ -189,7 +189,7 @@ export function MixedShipmentsPanel({
                     <span>{plan.totalUnits} total units</span>
                     <span aria-hidden="true">·</span>
                     <span>
-                      Weight {plan.totalWeightKg.toLocaleString()} kg ({plan.weightFillPct}%)
+                      Weight {plan.totalWeightKg.toLocaleString("en-US")} kg ({plan.weightFillPct}%)
                     </span>
                     <span aria-hidden="true">·</span>
                     <span>
@@ -266,7 +266,7 @@ export function MixedShipmentsPanel({
               ][]
             ).map(([key, info]) => (
               <option key={key} value={key}>
-                {info.label} (max {info.maxWeightKg.toLocaleString()} kg / {info.maxVolumeCbm} cbm)
+                {info.label} (max {info.maxWeightKg.toLocaleString("en-US")} kg / {info.maxVolumeCbm} cbm)
               </option>
             ))}
           </select>
@@ -338,7 +338,7 @@ export function MixedShipmentsPanel({
           <div>
             <span>Weight Fill</span>
             <strong>
-              {liveEval.totalWeightKg.toLocaleString()} kg ({liveEval.weightFillPct}%)
+              {liveEval.totalWeightKg.toLocaleString("en-US")} kg ({liveEval.weightFillPct}%)
             </strong>
           </div>
           <div>

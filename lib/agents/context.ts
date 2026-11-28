@@ -3,7 +3,12 @@ import {
   findNearbyDrivers,
   resolveCityCoordinates,
 } from "@/lib/driver-dispatch";
-import { query } from "@/lib/db";
+import { getCurrentScopedOrgId, query } from "@/lib/db";
+import {
+  assertVerifiedOrgId,
+  filterByBranchScope,
+  type WorkspaceDepartment,
+} from "@/lib/tenant-guard";
 import {
   activePolicy,
   deadWork,
@@ -137,14 +142,43 @@ function buildNearbyDriverMatchesForShipments(
   });
 }
 
+export interface AgentUserScope {
+  role?: string;
+  departments?: WorkspaceDepartment[];
+  branchCodes?: string[];
+}
+
 export async function gatherOperationalContext(
   agentId: CoreAgentId,
   shipmentReference?: string,
+  userScope?: AgentUserScope,
 ): Promise<{
   snapshot: Record<string, unknown>;
   shipmentId: string | null;
   resolvedReference: string | null;
 }> {
+  const verifiedOrgId = assertVerifiedOrgId(
+    getCurrentScopedOrgId(),
+    "gatherOperationalContext",
+  );
+
+  const scopeUser = {
+    role: userScope?.role ?? "ADMIN",
+    branchCodes: userScope?.branchCodes ?? [],
+  };
+
+  const applyShipmentScope = <T extends { origin?: Record<string, unknown> | null; destination?: Record<string, unknown> | null }>(
+    rows: T[],
+  ): T[] =>
+    filterByBranchScope(rows, scopeUser, (s) => [
+      typeof s.origin?.city === "string" ? s.origin.city : null,
+      typeof s.origin?.port === "string" ? s.origin.port : null,
+      typeof s.origin?.code === "string" ? s.origin.code : null,
+      typeof s.destination?.city === "string" ? s.destination.city : null,
+      typeof s.destination?.port === "string" ? s.destination.port : null,
+      typeof s.destination?.code === "string" ? s.destination.code : null,
+    ]);
+
   const [stats, counts, queue] = await Promise.all([
     overviewStats(),
     shipmentCounts(),
@@ -155,7 +189,10 @@ export async function gatherOperationalContext(
   let targetDetails: Record<string, unknown> | null = null;
 
   if (shipmentReference?.trim()) {
-    targetShipment = await getShipment(shipmentReference.trim());
+    const candidate = await getShipment(shipmentReference.trim());
+    if (candidate && applyShipmentScope([candidate]).length > 0) {
+      targetShipment = candidate;
+    }
     if (targetShipment) {
       const [events, legs, quotes] = await Promise.all([
         getEvents(targetShipment.id),
@@ -200,6 +237,7 @@ export async function gatherOperationalContext(
   }
 
   const base: Record<string, unknown> = {
+    tenantWorkspaceId: verifiedOrgId,
     overview: stats,
     shipmentCountsByState: counts,
     workQueueByState: queue,
@@ -221,20 +259,20 @@ export async function gatherOperationalContext(
         listDrivers(),
         listDocuments(),
       ]);
-    base.activeShipments = shipments.slice(0, 8).map(summarizeShipment);
+    base.activeShipments = applyShipmentScope(shipments).slice(0, 8).map(summarizeShipment);
     base.openExceptions = exceptions.slice(0, 8);
     base.pendingApprovals = approvals.slice(0, 8);
     base.stalledDeadWork = dead.slice(0, 6);
     base.activePolicy = policy;
     base.logisticsReadiness = computeLogisticsReadiness({
       drivers,
-      shipments,
+      shipments: applyShipmentScope(shipments),
       documents,
     });
   }
 
   if (agentId === "shipment-management" || agentId === "shipment-tracking") {
-    const [shipments, exceptions, documents, customs, drivers] =
+    const [rawShipments, exceptions, documents, customs, drivers] =
       await Promise.all([
         listShipments(),
         openExceptions(),
@@ -242,6 +280,7 @@ export async function gatherOperationalContext(
         listCustoms(),
         listDrivers(),
       ]);
+    const shipments = applyShipmentScope(rawShipments);
     base.shipments = shipments.slice(0, 10).map(summarizeShipment);
     base.openExceptions = exceptions.slice(0, 8);
     base.unverifiedDocuments = documents.filter((d) => !d.verified_at).slice(0, 8);
@@ -254,7 +293,7 @@ export async function gatherOperationalContext(
   }
 
   if (agentId === "route-optimization" || agentId === "fleet-management") {
-    const [shipments, conveyances, drivers, legs, lanes, locations] =
+    const [rawShipments, conveyances, drivers, legs, lanes, locations] =
       await Promise.all([
         listShipments(),
         listConveyances(),
@@ -263,6 +302,7 @@ export async function gatherOperationalContext(
         laneStats(),
         listLocations(),
       ]);
+    const shipments = applyShipmentScope(rawShipments);
     base.planningAndTransitShipments = shipments
       .filter((s) => !["CLOSED", "CANCELLED", "FAILED"].includes(s.state))
       .slice(0, 18)
@@ -283,11 +323,12 @@ export async function gatherOperationalContext(
   }
 
   if (agentId === "carrier-management") {
-    const [carriers, approvals, shipments] = await Promise.all([
+    const [carriers, approvals, rawShipments] = await Promise.all([
       listCarriers(),
       openApprovals(),
       listShipments(),
     ]);
+    const shipments = applyShipmentScope(rawShipments);
     base.carriers = carriers;
     base.pendingApprovals = approvals;
     base.sourcingShipments = shipments
@@ -297,14 +338,21 @@ export async function gatherOperationalContext(
   }
 
   if (agentId === "order-management" || agentId === "warehouse-coordination") {
-    const [orders, drafts, warehouses, inventory] = await Promise.all([
+    const [orders, rawDrafts, rawWarehouses, rawInventory] = await Promise.all([
       listOrders(),
       listShipments("DRAFT"),
       listWarehouses(),
       listInventory(),
     ]);
+    const warehouses = filterByBranchScope(rawWarehouses, scopeUser, (w) => [
+      w.code,
+      w.city,
+    ]);
+    const inventory = filterByBranchScope(rawInventory, scopeUser, (inv) => [
+      inv.warehouse,
+    ]);
     base.orders = orders.slice(0, 20);
-    base.draftShipments = drafts.slice(0, 15).map(summarizeShipment);
+    base.draftShipments = applyShipmentScope(rawDrafts).slice(0, 15).map(summarizeShipment);
     base.warehouses = warehouses;
     base.inventory = inventory;
   }

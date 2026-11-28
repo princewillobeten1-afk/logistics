@@ -43,7 +43,8 @@ export async function POST(req: NextRequest) {
   let result;
   try {
     result = await signIn(email, password, { ip, userAgent });
-  } catch {
+  } catch (err) {
+    console.error("[auth/login] signIn failed", err);
     return NextResponse.json(
       {
         ok: false,

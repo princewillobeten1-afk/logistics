@@ -20,6 +20,10 @@ import {
   openExceptions,
   queueStats,
 } from "@/lib/queries";
+import {
+  assertVerifiedOrgId,
+  filterByBranchScope,
+} from "@/lib/tenant-guard";
 
 export function parseBiPeriod(raw: string | number | null | undefined): BiPeriodDays {
   const n = Number(raw);
@@ -63,19 +67,23 @@ export async function collectBiSnapshot({
   orgName,
   role,
   periodDays = 7,
+  branchCodes = [],
 }: {
   orgId: string;
   orgName: string;
   role: Role;
   periodDays?: BiPeriodDays;
+  branchCodes?: string[];
 }): Promise<BiSnapshot> {
-  return runWithOrgScope(orgId, async () => {
+  const verifiedOrgId = assertVerifiedOrgId(orgId, "collectBiSnapshot");
+  const scopeUser = { role, branchCodes };
+  return runWithOrgScope(verifiedOrgId, async () => {
     const [
-      shipments,
+      rawShipments,
       legs,
       quotes,
-      warehouses,
-      inventory,
+      rawWarehouses,
+      rawInventory,
       conveyances,
       drivers,
       orders,
@@ -116,6 +124,18 @@ export async function collectBiSnapshot({
       deadWork(),
       activePolicy(),
       auditLogs(150),
+    ]);
+
+    const shipments = filterByBranchScope(rawShipments, scopeUser, (s) => [
+      typeof s.origin?.city === "string" ? s.origin.city : null,
+      typeof s.destination?.city === "string" ? s.destination.city : null,
+    ]);
+    const warehouses = filterByBranchScope(rawWarehouses, scopeUser, (w) => [
+      w.code,
+      w.city,
+    ]);
+    const inventory = filterByBranchScope(rawInventory, scopeUser, (inv) => [
+      inv.warehouse,
     ]);
 
     const policyRules = (policy?.rules ?? {}) as Record<string, unknown>;

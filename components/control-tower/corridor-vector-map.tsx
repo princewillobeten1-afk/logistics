@@ -38,12 +38,14 @@ const WORLD_LAND_PATHS = [
   "M 340,36 L 412,30 L 434,54 L 394,82 L 352,74 Z",
 ];
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function projectLon(lon: number): number {
-  return ((lon + 180) / 360) * 1000;
+  return round2(((lon + 180) / 360) * 1000);
 }
 
 function projectLat(lat: number): number {
-  return ((90 - lat) / 180) * 500;
+  return round2(((90 - lat) / 180) * 500);
 }
 
 export function CorridorVectorMap({
@@ -110,8 +112,8 @@ export function CorridorVectorMap({
       oneMinusT * oneMinusT * oPt.y + 2 * oneMinusT * t * cy + t * t * dPt.y;
     return {
       pathD: `M ${oPt.x.toFixed(2)} ${oPt.y.toFixed(2)} Q ${cx.toFixed(2)} ${cy.toFixed(2)} ${dPt.x.toFixed(2)} ${dPt.y.toFixed(2)}`,
-      ctrlPt: { x: cx, y: cy },
-      markerPt: { x: px, y: py },
+      ctrlPt: { x: round2(cx), y: round2(cy) },
+      markerPt: { x: round2(px), y: round2(py) },
     };
   }, [oPt, dPt, liveLat, liveLon, timelineProgress]);
 
@@ -217,7 +219,7 @@ export function CorridorVectorMap({
       >
         <g className="ct-land-layer">
           {WORLD_LAND_PATHS.map((d, i) => (
-            <path key={i} d={d} strokeWidth={scaleStroke * 1.2} />
+            <path key={i} d={d} strokeWidth={round2(scaleStroke * 1.2)} />
           ))}
         </g>
 
@@ -235,15 +237,15 @@ export function CorridorVectorMap({
               <circle
                 cx={hx}
                 cy={hy}
-                r={isEndpoint ? scaleStroke * 3.8 : scaleStroke * 2.1}
+                r={round2(isEndpoint ? scaleStroke * 3.8 : scaleStroke * 2.1)}
                 className={isEndpoint ? "ct-hub-active" : "ct-hub-dot"}
               />
               {framing === "REGIONAL" && isEndpoint ? (
                 <text
                   x={hx}
-                  y={isDest && hy < oPt.y ? hy - scaleStroke * 8 : hy + scaleStroke * 13}
+                  y={round2(isDest && hy < oPt.y ? hy - scaleStroke * 8 : hy + scaleStroke * 13)}
                   textAnchor="middle"
-                  fontSize={scaleStroke * 8.5}
+                  fontSize={round2(scaleStroke * 8.5)}
                   className="ct-hub-label"
                 >
                   {hub.code?.slice(0, 3) ?? hub.city?.slice(0, 3).toUpperCase()}
@@ -258,34 +260,34 @@ export function CorridorVectorMap({
           d={pathD}
           fill="none"
           className={`ct-corridor-arc${isAlert ? " is-alert" : ""}`}
-          strokeWidth={scaleStroke * 2.2}
-          strokeDasharray={`${scaleStroke * 4.5} ${scaleStroke * 3.5}`}
+          strokeWidth={round2(scaleStroke * 2.2)}
+          strokeDasharray={`${round2(scaleStroke * 4.5)} ${round2(scaleStroke * 3.5)}`}
         />
 
         {/* Origin & Destination Pins */}
         <circle
           cx={oPt.x}
           cy={oPt.y}
-          r={scaleStroke * 6.5}
+          r={round2(scaleStroke * 6.5)}
           className="ct-pin-halo"
         />
         <circle
           cx={oPt.x}
           cy={oPt.y}
-          r={scaleStroke * 3.6}
+          r={round2(scaleStroke * 3.6)}
           className="ct-pin-origin"
         />
 
         <circle
           cx={dPt.x}
           cy={dPt.y}
-          r={scaleStroke * 6.5}
+          r={round2(scaleStroke * 6.5)}
           className="ct-pin-halo-dest"
         />
         <circle
           cx={dPt.x}
           cy={dPt.y}
-          r={scaleStroke * 3.6}
+          r={round2(scaleStroke * 3.6)}
           className="ct-pin-dest"
         />
 
@@ -293,13 +295,13 @@ export function CorridorVectorMap({
         <circle
           cx={markerPt.x}
           cy={markerPt.y}
-          r={scaleStroke * 7.5}
+          r={round2(scaleStroke * 7.5)}
           className={`ct-vehicle-halo${isAlert ? " is-alert" : ""}`}
         />
         <circle
           cx={markerPt.x}
           cy={markerPt.y}
-          r={scaleStroke * 3.4}
+          r={round2(scaleStroke * 3.4)}
           className={`ct-vehicle-core${isAlert ? " is-alert" : ""}`}
         />
       </svg>

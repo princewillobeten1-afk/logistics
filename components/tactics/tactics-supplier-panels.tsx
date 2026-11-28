@@ -114,6 +114,7 @@ export function SupplierCommunicationsPanel({
                       {new Date(sync.nextSyncDueAt).toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",
+                        timeZone: "UTC",
                       })}
                     </td>
                     <td>

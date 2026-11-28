@@ -8,6 +8,7 @@ import {
   type FrontendLogisticsRequest,
 } from "@/lib/controllers/action-controller";
 import type { IntakeSourceChannel } from "@/lib/agents/autonomous";
+import { detectWorkspaceTampering } from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -28,13 +29,17 @@ function revalidateAffectedRoutes(intent: string) {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const user = await currentUser();
   if (!user) {
     return NextResponse.json(
       { ok: false, error: "Authentication required." },
       { status: 401 },
     );
+  }
+  const tamper = detectWorkspaceTampering(req, user.orgId);
+  if (tamper) {
+    return NextResponse.json({ ok: false, error: tamper }, { status: 403 });
   }
 
   return NextResponse.json({
@@ -46,12 +51,22 @@ export async function GET() {
       role: user.role,
       orgId: user.orgId,
       orgName: user.orgName,
+      departments: user.departments,
+      branchCodes: user.branchCodes,
     },
     supportedIntents: SUPPORTED_FRONTEND_INTENTS,
   });
 }
 
 export async function POST(req: NextRequest) {
+  const user = await currentUser();
+  if (!user) {
+    return NextResponse.json(
+      { ok: false, error: "Authentication required." },
+      { status: 401 },
+    );
+  }
+
   let raw: Record<string, unknown>;
   try {
     raw = (await req.json()) as Record<string, unknown>;
@@ -67,6 +82,11 @@ export async function POST(req: NextRequest) {
       { ok: false, error: "Request body must be a JSON object." },
       { status: 400 },
     );
+  }
+
+  const tamper = detectWorkspaceTampering(req, user.orgId, raw);
+  if (tamper) {
+    return NextResponse.json({ ok: false, error: tamper }, { status: 403 });
   }
 
   const rawIntent = String(raw.intent ?? "AUTO")

@@ -12,6 +12,63 @@ type LookupUser = {
   displayName?: string;
 };
 
+type GoogleTokenInfo = {
+  aud?: string;
+  email?: string;
+  email_verified?: string | boolean;
+  name?: string;
+};
+
+async function verifyGoogleToken(idToken: string): Promise<{
+  email: string;
+  name: string | null;
+} | null> {
+  // 1. Primary path: verify Firebase ID token via Identity Toolkit
+  const verifyRes = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken }),
+      cache: "no-store",
+    },
+  );
+
+  if (verifyRes.ok) {
+    const verified = (await verifyRes.json()) as { users?: LookupUser[] };
+    const account = verified.users?.[0];
+    if (account?.email && account.emailVerified !== false) {
+      return {
+        email: account.email,
+        name: account.displayName ?? null,
+      };
+    }
+    return null;
+  }
+
+  // 2. Fallback path: verify direct Google Identity Services ID token against pinned OAuth client ID
+  const expectedAud = firebaseConfig.oAuthClientId;
+  if (!expectedAud) return null;
+
+  const gisRes = await fetch(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+    { cache: "no-store" },
+  );
+  if (!gisRes.ok) return null;
+
+  const info = (await gisRes.json()) as GoogleTokenInfo;
+  const emailVerified =
+    info.email_verified === true || info.email_verified === "true";
+  if (info.aud === expectedAud && info.email && emailVerified) {
+    return {
+      email: info.email,
+      name: info.name ?? null,
+    };
+  }
+
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   if (!verifySameOriginMutation(req)) {
     return NextResponse.json(
@@ -40,18 +97,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Verify the Firebase ID token via Firebase Auth REST API
-  let verifyRes: Response;
+  let account: { email: string; name: string | null } | null;
   try {
-    verifyRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken }),
-        cache: "no-store",
-      },
-    );
+    account = await verifyGoogleToken(idToken);
   } catch {
     return NextResponse.json(
       { ok: false, error: "Unable to contact Google verification service." },
@@ -59,24 +107,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!verifyRes.ok) {
-    const errText = await verifyRes.text().catch(() => "");
-    console.error(
-      "[auth/google] accounts:lookup failed",
-      verifyRes.status,
-      errText,
-    );
+  if (!account) {
     return NextResponse.json(
-      { ok: false, error: "Could not verify Google sign-in token." },
-      { status: 401 },
-    );
-  }
-
-  const verified = (await verifyRes.json()) as { users?: LookupUser[] };
-  const account = verified.users?.[0];
-  if (!account?.email) {
-    return NextResponse.json(
-      { ok: false, error: "Google account has no verified email address." },
+      { ok: false, error: "Could not verify Google account email." },
       { status: 401 },
     );
   }
@@ -91,12 +124,13 @@ export async function POST(req: NextRequest) {
     result = await signInWithGoogle(
       {
         email: account.email,
-        name: account.displayName ?? null,
+        name: account.name,
         companyName: body.companyName ?? null,
       },
       { ip, userAgent },
     );
-  } catch {
+  } catch (err) {
+    console.error("[auth/google] signInWithGoogle failed", err);
     return NextResponse.json(
       {
         ok: false,

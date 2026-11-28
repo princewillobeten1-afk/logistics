@@ -58,14 +58,14 @@ export function ThroughputChart({ daily }: { daily: DailyThroughput[] }) {
                   className="spark-bar spark-bar-created"
                   data-empty={created === 0}
                   style={{
-                    height: `${created === 0 ? 4 : Math.max(12, (created / maxDaily) * 100)}%`,
+                    height: `${created === 0 ? 4 : Math.max(12, (created / maxDaily) * 100).toFixed(2)}%`,
                   }}
                 />
                 <span
                   className="spark-bar spark-bar-closed"
                   data-empty={closed === 0}
                   style={{
-                    height: `${closed === 0 ? 4 : Math.max(12, (closed / maxDaily) * 100)}%`,
+                    height: `${closed === 0 ? 4 : Math.max(12, (closed / maxDaily) * 100).toFixed(2)}%`,
                   }}
                 />
               </span>

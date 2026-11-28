@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { pool } from "./db";
+import { queryAs } from "./db";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -67,50 +67,24 @@ export async function recordAudit(entry: {
   ];
 
   try {
-    if (!process.env.DATABASE_URL?.trim()) {
-      if (entry.orgId) {
-        await pool.query(
-          `INSERT INTO audit_logs
-             (actor, actor_type, action, entity_type, entity_id,
-              before, after, ip_address, user_agent)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          values,
-        );
-      }
-      return;
-    }
-    const client = await pool.connect();
-    try {
-      await client.query("SET ROLE logistics_app");
-      await client.query("SELECT set_config('app.current_org', $1, false)", [
-        entry.orgId ?? "",
-      ]);
+    if (!entry.orgId) {
       // A failed sign-in has no organisation, so it has no row to belong to.
       // Recording it in the application log is the honest outcome — inventing
       // an org for it would put one tenant's noise in another's audit trail.
-      if (!entry.orgId) {
-        console.warn(
-          `audit: ${entry.action} by ${entry.actor} (no organisation resolved)`,
-        );
-        return;
-      }
-      await client.query(
-        `INSERT INTO audit_logs
-           (actor, actor_type, action, entity_type, entity_id,
-            before, after, ip_address, user_agent)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        values,
+      console.warn(
+        `audit: ${entry.action} by ${entry.actor} (no organisation resolved)`,
       );
-    } finally {
-      try {
-        await client.query(
-          "RESET ROLE; SELECT set_config('app.current_org', '', false)",
-        );
-        client.release();
-      } catch (err) {
-        client.release(err as Error);
-      }
+      return;
     }
+
+    await queryAs(
+      entry.orgId,
+      `INSERT INTO audit_logs
+         (actor, actor_type, action, entity_type, entity_id,
+          before, after, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      values,
+    );
   } catch (err) {
     console.error("audit: write failed", entry.action, err);
   }

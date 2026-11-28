@@ -54,6 +54,7 @@ export interface UniversalIngestResult {
   };
   outcomes: IngestRecordOutcome[];
   events: PublicIntegrationEvent[];
+  parseError?: string;
 }
 
 function makeCode(prefix: string, raw: string): string {
@@ -129,6 +130,24 @@ export async function processUniversalIngestion({
   maxRecords?: number;
 }): Promise<UniversalIngestResult> {
   const parsed = detectAndParseRawPayload(rawPayload, contentType);
+  if (parsed.parseError) {
+    return {
+      ok: false,
+      connectorId: connector.id,
+      connectorName: connector.name,
+      autonomyMode: connector.autonomy_mode,
+      format: parsed.format,
+      totalReceived: 0,
+      processed: 0,
+      duplicates: 0,
+      failed: 1,
+      entityCounts: {},
+      takeoverSummary: { booked: 0, awaitingApproval: 0 },
+      outcomes: [],
+      events: [],
+      parseError: parsed.parseError,
+    };
+  }
   const records = parsed.records.slice(0, maxRecords);
 
   const outcomes: IngestRecordOutcome[] = [];
@@ -769,7 +788,7 @@ export async function processUniversalIngestion({
     }
   }
 
-  await bumpConnectorStats(connector.id, processed, failed);
+  await bumpConnectorStats(connector.id, processed, failed, connector.org_id);
 
   return {
     ok: failed === 0,

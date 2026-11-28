@@ -139,9 +139,12 @@ export function FleetDispatchConsole({
   const [regName, setRegName] = useState("");
   const [regPhone, setRegPhone] = useState("");
   const [regLicence, setRegLicence] = useState("");
-  const [regExpiry, setRegExpiry] = useState(() =>
-    new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10),
-  );
+  const [regExpiry, setRegExpiry] = useState("");
+  useEffect(() => {
+    setRegExpiry((prev) =>
+      prev || new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10),
+    );
+  }, []);
   const [regCity, setRegCity] = useState(
     initialLocations[0]?.city ?? "Lagos",
   );

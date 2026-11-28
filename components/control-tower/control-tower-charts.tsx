@@ -6,6 +6,8 @@ import type { ModeVolumePoint, QuoteBookingPoint } from "@/lib/queries";
 
 type TimeRange = "TODAY" | "7D" | "14D";
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function buildSmoothPath(pts: { x: number; y: number }[]): string {
   if (pts.length === 0) return "";
   if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
@@ -109,10 +111,10 @@ export function ControlTowerCharts({
   );
 
   const xAt = (i: number, len: number) =>
-    len <= 1 ? PAD_L + plotW / 2 : PAD_L + (i / (len - 1)) * plotW;
+    round2(len <= 1 ? PAD_L + plotW / 2 : PAD_L + (i / (len - 1)) * plotW);
 
   const yAt = (val: number, maxVal: number) =>
-    PAD_T + plotH - (Math.max(0, val) / maxVal) * plotH;
+    round2(PAD_T + plotH - (Math.max(0, val) / maxVal) * plotH);
 
   const bookingPts = leftSeries.map((d, i) => ({
     x: xAt(i, leftSeries.length),
@@ -195,7 +197,7 @@ export function ControlTowerCharts({
           >
             {/* Horizontal grid lines */}
             {[0, 0.25, 0.5, 0.75, 1].map((frac, idx) => {
-              const y = PAD_T + plotH * (1 - frac);
+              const y = round2(PAD_T + plotH * (1 - frac));
               const val = Math.round(leftMax * frac);
               return (
                 <g key={idx}>
@@ -206,7 +208,7 @@ export function ControlTowerCharts({
                     y2={y}
                     className="ct-grid-line"
                   />
-                  <text x={PAD_L - 8} y={y + 3.5} textAnchor="end" className="ct-axis-text">
+                  <text x={PAD_L - 8} y={round2(y + 3.5)} textAnchor="end" className="ct-axis-text">
                     {val}
                   </text>
                 </g>
@@ -261,9 +263,9 @@ export function ControlTowerCharts({
                   />
                   {/* Wide hit target per column */}
                   <rect
-                    x={bPt.x - plotW / (Math.max(1, leftSeries.length) * 2)}
+                    x={round2(bPt.x - plotW / (Math.max(1, leftSeries.length) * 2))}
                     y={PAD_T}
-                    width={plotW / Math.max(1, leftSeries.length)}
+                    width={round2(plotW / Math.max(1, leftSeries.length))}
                     height={plotH + PAD_B}
                     fill="transparent"
                     className="ct-hit-zone"
@@ -280,8 +282,8 @@ export function ControlTowerCharts({
 
             {!leftHasData ? (
               <text
-                x={PAD_L + plotW / 2}
-                y={PAD_T + plotH / 2 - 4}
+                x={round2(PAD_L + plotW / 2)}
+                y={round2(PAD_T + plotH / 2 - 4)}
                 textAnchor="middle"
                 className="ct-axis-text"
               >
@@ -294,7 +296,7 @@ export function ControlTowerCharts({
             <div
               className="ct-chart-popover"
               style={{
-                left: `${Math.min(72, Math.max(12, (bookingPts[safeLeftIdx].x / W) * 100))}%`,
+                left: `${Math.min(72, Math.max(12, (bookingPts[safeLeftIdx].x / W) * 100)).toFixed(2)}%`,
               }}
             >
               <div className="ct-popover-title">{activeLeft.label}</div>
@@ -372,7 +374,7 @@ export function ControlTowerCharts({
             aria-label="Shipment volume by transport mode chart"
           >
             {[0, 0.25, 0.5, 0.75, 1].map((frac, idx) => {
-              const y = PAD_T + plotH * (1 - frac);
+              const y = round2(PAD_T + plotH * (1 - frac));
               const val = Math.round(rightMax * frac);
               return (
                 <g key={idx}>
@@ -383,7 +385,7 @@ export function ControlTowerCharts({
                     y2={y}
                     className="ct-grid-line"
                   />
-                  <text x={PAD_L - 8} y={y + 3.5} textAnchor="end" className="ct-axis-text">
+                  <text x={PAD_L - 8} y={round2(y + 3.5)} textAnchor="end" className="ct-axis-text">
                     {val}
                   </text>
                 </g>
@@ -428,9 +430,9 @@ export function ControlTowerCharts({
                     </text>
                   ) : null}
                   <rect
-                    x={pt.x - plotW / (Math.max(1, rightSeries.length) * 2)}
+                    x={round2(pt.x - plotW / (Math.max(1, rightSeries.length) * 2))}
                     y={PAD_T}
-                    width={plotW / Math.max(1, rightSeries.length)}
+                    width={round2(plotW / Math.max(1, rightSeries.length))}
                     height={plotH + PAD_B}
                     fill="transparent"
                     className="ct-hit-zone"
@@ -447,8 +449,8 @@ export function ControlTowerCharts({
 
             {!rightHasData ? (
               <text
-                x={PAD_L + plotW / 2}
-                y={PAD_T + plotH / 2 - 4}
+                x={round2(PAD_L + plotW / 2)}
+                y={round2(PAD_T + plotH / 2 - 4)}
                 textAnchor="middle"
                 className="ct-axis-text"
               >
@@ -461,7 +463,7 @@ export function ControlTowerCharts({
             <div
               className="ct-chart-popover"
               style={{
-                left: `${Math.min(72, Math.max(12, (roadPts[safeRightIdx].x / W) * 100))}%`,
+                left: `${Math.min(72, Math.max(12, (roadPts[safeRightIdx].x / W) * 100)).toFixed(2)}%`,
               }}
             >
               <div className="ct-popover-title">{activeRight.label}</div>

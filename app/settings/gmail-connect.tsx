@@ -186,6 +186,7 @@ export function GmailConnect({ compact = false }: { compact?: boolean }) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
@@ -300,7 +301,7 @@ export function GmailConnect({ compact = false }: { compact?: boolean }) {
         {profile ? (
           <div>
             <dt>inbox threads</dt>
-            <dd>{profile.threadsTotal.toLocaleString()}</dd>
+            <dd>{profile.threadsTotal.toLocaleString("en-US")}</dd>
           </div>
         ) : null}
         <div>

@@ -3,10 +3,19 @@ import { headers } from "next/headers";
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { ChannelCards } from "@/app/settings/channels";
 import { listChannels } from "@/app/settings/channel-actions";
+import { BusinessConfigurationPanel } from "@/components/settings/business-configuration-panel";
+import { TeamAccessPanel } from "@/components/settings/team-access-panel";
+import { WorkspaceSecurityPanel } from "@/components/settings/workspace-security-panel";
 import { currentUser } from "@/lib/auth";
+import { getWorkspaceConfiguration } from "@/lib/business-config/store";
 import { money, relative, when } from "@/lib/format";
 import { listOrgConnectors } from "@/lib/integrations/store";
 import { activePolicy, currencies, latestRates, migrations } from "@/lib/queries";
+import {
+  getWorkspaceSecurityProfile,
+  listTeamInvitations,
+  listWorkspaceMembers,
+} from "@/lib/workspace-admin";
 
 export const dynamic = "force-dynamic";
 
@@ -43,15 +52,42 @@ export default async function Settings() {
   const keyConfigured = Boolean(process.env.CREDENTIALS_KEY);
 
   const user = await currentUser();
-  let policy, currencyList, rates, applied, channels, connectedSystems;
+  const isAdmin = user?.role === "ADMIN";
+  let policy,
+    currencyList,
+    rates,
+    applied,
+    channels,
+    connectedSystems,
+    teamMembers,
+    teamInvitations,
+    workspaceSecurity,
+    businessConfig;
   try {
-    [policy, currencyList, rates, applied, channels, connectedSystems] = await Promise.all([
+    [
+      policy,
+      currencyList,
+      rates,
+      applied,
+      channels,
+      connectedSystems,
+      teamMembers,
+      teamInvitations,
+      workspaceSecurity,
+      businessConfig,
+    ] = await Promise.all([
       activePolicy(),
       currencies(),
       latestRates(),
       migrations(),
       listChannels(),
       user ? listOrgConnectors(user.orgId) : Promise.resolve([]),
+      user && isAdmin ? listWorkspaceMembers(user.orgId) : Promise.resolve([]),
+      user && isAdmin ? listTeamInvitations(user.orgId) : Promise.resolve([]),
+      user && isAdmin
+        ? getWorkspaceSecurityProfile(user.orgId)
+        : Promise.resolve(null),
+      user ? getWorkspaceConfiguration(user.orgId) : Promise.resolve(null),
     ]);
   } catch (error) {
     return (
@@ -121,6 +157,65 @@ export default async function Settings() {
           .
         </p>
       </div>
+
+      {user && businessConfig ? (
+        <Panel
+          title="Business classification & feature entitlements"
+          hint={`${businessConfig.configuration.classification.tier} · ${businessConfig.configuration.classification.archetype.replace(/_/g, " ")}`}
+        >
+          <BusinessConfigurationPanel
+            initialBundle={businessConfig}
+            canEdit={isAdmin}
+          />
+        </Panel>
+      ) : null}
+
+      {user && isAdmin ? (
+        <>
+          <Panel
+            title="Team & access control"
+            hint={`${teamMembers.length} member${teamMembers.length === 1 ? "" : "s"} · single workspace per email`}
+          >
+            <TeamAccessPanel
+              initialMembers={teamMembers}
+              initialInvitations={teamInvitations}
+              currentUserId={user.id}
+              origin={origin}
+            />
+          </Panel>
+
+          {workspaceSecurity && (
+            <Panel
+              title="Workspace webhook & intake security"
+              hint="per-workspace signed endpoints and API keys"
+            >
+              <WorkspaceSecurityPanel
+                initialSecurity={workspaceSecurity}
+                origin={origin}
+              />
+            </Panel>
+          )}
+        </>
+      ) : user ? (
+        <Panel title="Your workspace access scope" hint={user.orgName}>
+          <dl className="kv">
+            <dt>Role</dt>
+            <dd className="ref">{user.role}</dd>
+            <dt>Departments</dt>
+            <dd>
+              {user.departments.length > 0
+                ? user.departments.join(", ")
+                : "All workspace departments"}
+            </dd>
+            <dt>Branches</dt>
+            <dd>
+              {user.branchCodes.length > 0
+                ? user.branchCodes.join(", ")
+                : "All workspace branches"}
+            </dd>
+          </dl>
+        </Panel>
+      ) : null}
 
       <Panel
         title="Customer channels"

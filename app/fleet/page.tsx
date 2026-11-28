@@ -3,8 +3,11 @@ import {
   FleetDispatchConsole,
   type DispatchShipmentOption,
 } from "@/components/fleet-dispatch-console";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
 import { computeLogisticsReadiness, normalizeDutyStatus } from "@/lib/driver-dispatch";
 import { relative } from "@/lib/format";
+import { paginateArray } from "@/lib/pagination";
 import {
   listConveyances,
   listDocuments,
@@ -25,7 +28,12 @@ function licenceTone(days: string | null): string | null {
   return null;
 }
 
-export default async function Fleet() {
+export default async function Fleet({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string; pageSize?: string }>;
+}) {
+  const { q, page, pageSize } = await searchParams;
   let vehicles, drivers, locations, shipments, documents;
   try {
     [vehicles, drivers, locations, shipments, documents] = await Promise.all([
@@ -86,6 +94,26 @@ export default async function Fleet() {
           : null,
     }));
 
+  const pagedVehicles = paginateArray(vehicles, {
+    q,
+    page,
+    pageSize,
+    matcher: (v, needle) =>
+      `${v.registration ?? ""} ${v.carrier_code ?? ""} ${v.mode} ${v.kind ?? ""} ${v.assigned_to ?? ""}`
+        .toLowerCase()
+        .includes(needle),
+  });
+
+  const pagedDrivers = paginateArray(drivers, {
+    q,
+    page,
+    pageSize,
+    matcher: (d, needle) =>
+      `${d.name} ${d.phone ?? ""} ${d.carrier_code ?? ""} ${d.current_city ?? ""} ${d.licence_number ?? ""} ${d.assigned_to ?? ""}`
+        .toLowerCase()
+        .includes(needle),
+  });
+
   return (
     <>
       <div className="page-head">
@@ -134,197 +162,250 @@ export default async function Fleet() {
         initialReadiness={readiness}
       />
 
-      <Panel title="Vehicles" hint={`${vehicles.length} on file`} flush>
-        {vehicles.length === 0 ? (
-          <Empty
-            message="No vehicles yet"
-            hint="Vehicles are registered against a carrier by an administrator or synced from fleet telematics."
-          />
-        ) : (
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Vehicles"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Registration</th>
-                  <th scope="col">Carrier</th>
-                  <th scope="col">Mode</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Capacity</th>
-                  <th scope="col">Handling</th>
-                  <th scope="col">Assigned to</th>
-                  <th scope="col">Last seen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {vehicles.map((v) => (
-                  <tr key={v.id}>
-                    <td className="ref">{v.registration ?? "—"}</td>
-                    <td className="text-muted">
-                      {v.carrier_code ?? "unassigned"}
-                    </td>
-                    <td className="num">{v.mode}</td>
-                    <td className="num text-muted">
-                      {v.kind ?? "—"}
-                    </td>
-                    <td className="num">
-                      {v.capacity_kg
-                        ? `${Number(v.capacity_kg).toLocaleString()} kg`
-                        : "—"}
-                    </td>
-                    <td className="text-xs">
-                      {v.reefer ? <span className="tag">reefer</span> : null}
-                      {v.hazmat_certified ? (
-                        <span className="tag">hazmat</span>
-                      ) : null}
-                      {!v.reefer && !v.hazmat_certified ? (
-                        <span className="text-faint">general</span>
-                      ) : null}
-                    </td>
-                    <td className="ref">
-                      {v.assigned_to ? (
-                        <ShipmentLink reference={v.assigned_to} />
-                      ) : (
-                        <span className="text-faint">idle</span>
-                      )}
-                    </td>
-                    <td className="num text-faint">
-                      {v.last_seen_at ? relative(v.last_seen_at) : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Panel>
+      <TableSearchBar
+        basePath="/fleet"
+        initialQuery={pagedVehicles.query}
+        pageSize={pagedVehicles.pageSize}
+        placeholder="Filter vehicles & drivers by registration, carrier, city, licence, or shipment…"
+        label="Search fleet vehicles and drivers"
+        summaryText={`${pagedVehicles.total.toLocaleString()} vehicles · ${pagedDrivers.total.toLocaleString()} drivers`}
+      />
 
-      <Panel title="Drivers roster" hint={`${drivers.length} on file`} flush>
-        {drivers.length === 0 ? (
+      <Panel
+        title="Vehicles"
+        hint={`${pagedVehicles.total.toLocaleString()} matching · page ${pagedVehicles.page} of ${pagedVehicles.totalPages}`}
+        flush
+      >
+        {pagedVehicles.items.length === 0 ? (
           <Empty
-            message="No drivers yet"
-            hint="Use Register driver above or connect an ELD / TMS integration."
+            message={pagedVehicles.query ? "No matching vehicles" : "No vehicles yet"}
+            hint={
+              pagedVehicles.query
+                ? "Clear your filter to view all registered vehicles."
+                : "Vehicles are registered against a carrier by an administrator or synced from fleet telematics."
+            }
           />
         ) : (
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Drivers"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Name</th>
-                  <th scope="col">Location / GPS</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">HOS Clock</th>
-                  <th scope="col">Equipment</th>
-                  <th scope="col">Licence</th>
-                  <th scope="col">Expires</th>
-                  <th scope="col">Assigned to</th>
-                </tr>
-              </thead>
-              <tbody>
-                {drivers.map((d) => {
-                  const tone = licenceTone(d.days_to_expiry);
-                  const duty = normalizeDutyStatus(d);
-                  const hosDrive =
-                    typeof d.hos_drive_remaining_hours === "number"
-                      ? d.hos_drive_remaining_hours
-                      : 9.5;
-                  return (
-                    <tr key={d.id}>
-                      <td>
-                        <div className="font-semibold">{d.name}</div>
-                        <div className="font-mono text-xs text-faint">
-                          {d.phone ?? d.carrier_code ?? "—"}
-                        </div>
+          <>
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Vehicles"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Registration</th>
+                    <th scope="col">Carrier</th>
+                    <th scope="col">Mode</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Capacity</th>
+                    <th scope="col">Handling</th>
+                    <th scope="col">Assigned to</th>
+                    <th scope="col">Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedVehicles.items.map((v) => (
+                    <tr key={v.id}>
+                      <td className="ref">{v.registration ?? "—"}</td>
+                      <td className="text-muted">
+                        {v.carrier_code ?? "unassigned"}
                       </td>
-                      <td>
-                        <div>{d.current_city ?? "—"}</div>
-                        {d.current_lat && d.current_lon ? (
-                          <div className="font-mono text-xs text-faint">
-                            {Number(d.current_lat).toFixed(3)},{" "}
-                            {Number(d.current_lon).toFixed(3)}
-                          </div>
-                        ) : (
-                          <div className="text-xs text-faint">No GPS ping</div>
-                        )}
-                      </td>
-                      <td>
-                        <span
-                          className="status-tag"
-                          data-tone={
-                            duty === "AVAILABLE"
-                              ? "ok"
-                              : duty === "ON_ROUTE"
-                                ? "warn"
-                                : "neutral"
-                          }
-                        >
-                          {duty.replace(/_/g, " ").toLowerCase()}
-                        </span>
+                      <td className="num">{v.mode}</td>
+                      <td className="num text-muted">
+                        {v.kind ?? "—"}
                       </td>
                       <td className="num">
-                        <span
-                          className={
-                            hosDrive < 2.5 ? "text-crit font-semibold" : undefined
-                          }
-                        >
-                          {hosDrive.toFixed(1)}h drive
-                        </span>
+                        {v.capacity_kg
+                          ? `${Number(v.capacity_kg).toLocaleString("en-US")} kg`
+                          : "—"}
                       </td>
                       <td className="text-xs">
-                        <span className="font-mono">
-                          {d.vehicle_registration ?? d.equipment_type ?? "DRY_VAN"}
-                        </span>
-                        {d.hazmat_certified ? (
-                          <span className="tag" style={{ marginLeft: 4 }}>
-                            hazmat
-                          </span>
+                        {v.reefer ? <span className="tag">reefer</span> : null}
+                        {v.hazmat_certified ? (
+                          <span className="tag">hazmat</span>
                         ) : null}
-                        {d.reefer_capable ? (
-                          <span className="tag" style={{ marginLeft: 4 }}>
-                            reefer
-                          </span>
+                        {!v.reefer && !v.hazmat_certified ? (
+                          <span className="text-faint">general</span>
                         ) : null}
-                      </td>
-                      <td className="num">{d.licence_number ?? "—"}</td>
-                      <td className="num">
-                        {d.licence_expiry ? (
-                          <span
-                            className={
-                              tone
-                                ? `text-${tone} font-semibold`
-                                : undefined
-                            }
-                          >
-                            {Number(d.days_to_expiry) < 0
-                              ? "expired"
-                              : `${d.days_to_expiry} days`}
-                          </span>
-                        ) : (
-                          "—"
-                        )}
                       </td>
                       <td className="ref">
-                        {d.assigned_to ? (
-                          <ShipmentLink reference={d.assigned_to} />
+                        {v.assigned_to ? (
+                          <ShipmentLink reference={v.assigned_to} />
                         ) : (
                           <span className="text-faint">idle</span>
                         )}
                       </td>
+                      <td className="num text-faint">
+                        {v.last_seen_at ? relative(v.last_seen_at) : "—"}
+                      </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <PaginationBar
+              basePath="/fleet"
+              page={pagedVehicles.page}
+              pageSize={pagedVehicles.pageSize}
+              total={pagedVehicles.total}
+              totalPages={pagedVehicles.totalPages}
+              startIndex={pagedVehicles.startIndex}
+              endIndex={pagedVehicles.endIndex}
+              queryParams={{ q: pagedVehicles.query || undefined }}
+              itemLabel="vehicles"
+            />
+          </>
+        )}
+      </Panel>
+
+      <Panel
+        title="Drivers roster"
+        hint={`${pagedDrivers.total.toLocaleString()} matching · page ${pagedDrivers.page} of ${pagedDrivers.totalPages}`}
+        flush
+      >
+        {pagedDrivers.items.length === 0 ? (
+          <Empty
+            message={pagedDrivers.query ? "No matching drivers" : "No drivers yet"}
+            hint={
+              pagedDrivers.query
+                ? "Clear your filter to view all drivers on file."
+                : "Use Register driver above or connect an ELD / TMS integration."
+            }
+          />
+        ) : (
+          <>
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Drivers"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Location / GPS</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">HOS Clock</th>
+                    <th scope="col">Equipment</th>
+                    <th scope="col">Licence</th>
+                    <th scope="col">Expires</th>
+                    <th scope="col">Assigned to</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedDrivers.items.map((d) => {
+                    const tone = licenceTone(d.days_to_expiry);
+                    const duty = normalizeDutyStatus(d);
+                    const hosDrive =
+                      typeof d.hos_drive_remaining_hours === "number"
+                        ? d.hos_drive_remaining_hours
+                        : 9.5;
+                    return (
+                      <tr key={d.id}>
+                        <td>
+                          <div className="font-semibold">{d.name}</div>
+                          <div className="font-mono text-xs text-faint">
+                            {d.phone ?? d.carrier_code ?? "—"}
+                          </div>
+                        </td>
+                        <td>
+                          <div>{d.current_city ?? "—"}</div>
+                          {d.current_lat && d.current_lon ? (
+                            <div className="font-mono text-xs text-faint">
+                              {Number(d.current_lat).toFixed(3)},{" "}
+                              {Number(d.current_lon).toFixed(3)}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-faint">No GPS ping</div>
+                          )}
+                        </td>
+                        <td>
+                          <span
+                            className="status-tag"
+                            data-tone={
+                              duty === "AVAILABLE"
+                                ? "ok"
+                                : duty === "ON_ROUTE"
+                                  ? "warn"
+                                  : "neutral"
+                            }
+                          >
+                            {duty.replace(/_/g, " ").toLowerCase()}
+                          </span>
+                        </td>
+                        <td className="num">
+                          <span
+                            className={
+                              hosDrive < 2.5 ? "text-crit font-semibold" : undefined
+                            }
+                          >
+                            {hosDrive.toFixed(1)}h drive
+                          </span>
+                        </td>
+                        <td className="text-xs">
+                          <span className="font-mono">
+                            {d.vehicle_registration ?? d.equipment_type ?? "DRY_VAN"}
+                          </span>
+                          {d.hazmat_certified ? (
+                            <span className="tag" style={{ marginLeft: 4 }}>
+                              hazmat
+                            </span>
+                          ) : null}
+                          {d.reefer_capable ? (
+                            <span className="tag" style={{ marginLeft: 4 }}>
+                              reefer
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="num">{d.licence_number ?? "—"}</td>
+                        <td className="num">
+                          {d.licence_expiry ? (
+                            <span
+                              className={
+                                tone
+                                  ? `text-${tone} font-semibold`
+                                  : undefined
+                              }
+                            >
+                              {Number(d.days_to_expiry) < 0
+                                ? "expired"
+                                : `${d.days_to_expiry} days`}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="ref">
+                          {d.assigned_to ? (
+                            <ShipmentLink reference={d.assigned_to} />
+                          ) : (
+                            <span className="text-faint">idle</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <PaginationBar
+              basePath="/fleet"
+              page={pagedDrivers.page}
+              pageSize={pagedDrivers.pageSize}
+              total={pagedDrivers.total}
+              totalPages={pagedDrivers.totalPages}
+              startIndex={pagedDrivers.startIndex}
+              endIndex={pagedDrivers.endIndex}
+              queryParams={{ q: pagedDrivers.query || undefined }}
+              itemLabel="drivers"
+            />
+          </>
         )}
       </Panel>
     </>

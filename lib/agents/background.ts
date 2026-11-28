@@ -6,6 +6,10 @@ import {
 import { getServerGeminiKey } from "./gemini-client";
 import { executeAgentTask, type ExecuteAgentTaskOutput } from "./orchestrator";
 import { query, runWithOrgScope } from "@/lib/db";
+import {
+  assertVerifiedOrgId,
+  checkTenantRateLimit,
+} from "@/lib/tenant-guard";
 
 const globalForBg = globalThis as unknown as {
   agentBgCooldowns?: Map<string, { lastRunAt: number; inFlight?: Promise<unknown> }>;
@@ -38,6 +42,7 @@ export async function runBackendAgentWorkflow({
   actorEmail,
   workKind,
 }: BackgroundDispatchInput): Promise<ExecuteAgentTaskOutput | null> {
+  const verifiedOrgId = assertVerifiedOrgId(orgId, "runBackendAgentWorkflow");
   if (!getServerGeminiKey()) {
     return null;
   }
@@ -45,7 +50,7 @@ export async function runBackendAgentWorkflow({
   const agent = getAgentForBackendWorkflow(workflow);
   const resolvedTask = task?.trim() || agent.quickPrompts[0];
 
-  return runWithOrgScope(orgId, async () => {
+  return runWithOrgScope(verifiedOrgId, async () => {
     const out = await executeAgentTask({
       agentId: agent.id as CoreAgentId,
       task: resolvedTask,
@@ -88,12 +93,18 @@ export async function runBackendAgentWorkflow({
 export function scheduleBackgroundAgent(
   input: BackgroundDispatchInput,
 ): void {
+  const verifiedOrgId = assertVerifiedOrgId(input.orgId, "scheduleBackgroundAgent");
   if (!getServerGeminiKey()) return;
 
+  const rate = checkTenantRateLimit(verifiedOrgId, "bg-agents", 60, 60_000);
+  if (!rate.allowed) return;
+
   const cooldownMs = input.cooldownMs ?? 90_000;
-  const key =
-    input.dedupeKey ??
-    `${input.orgId ?? "global"}:${input.workflow}:${input.reference ?? "all"}`;
+  const rawDedupe =
+    input.dedupeKey ?? `${input.workflow}:${input.reference ?? "all"}`;
+  const key = rawDedupe.startsWith(`${verifiedOrgId}:`)
+    ? rawDedupe
+    : `${verifiedOrgId}:${rawDedupe}`;
   const existing = cooldownStore.get(key);
   const now = Date.now();
 
@@ -102,7 +113,7 @@ export function scheduleBackgroundAgent(
     if (now - existing.lastRunAt < cooldownMs) return;
   }
 
-  const job = runBackendAgentWorkflow(input)
+  const job = runBackendAgentWorkflow({ ...input, orgId: verifiedOrgId })
     .catch((err) => {
       console.warn(
         `[BackgroundAgents] Workflow "${input.workflow}" failed silently:`,
@@ -183,6 +194,7 @@ export async function runBackgroundOperationsSweep({
   }>;
   skippedReason?: string;
 }> {
+  const verifiedOrgId = assertVerifiedOrgId(orgId, "runBackgroundOperationsSweep");
   if (!getServerGeminiKey()) {
     return {
       scope,
@@ -209,7 +221,7 @@ export async function runBackgroundOperationsSweep({
     try {
       const out = await runBackendAgentWorkflow({
         workflow: wf,
-        orgId,
+        orgId: verifiedOrgId,
         reference,
         actorEmail,
         workKind: `sweep.${wf}`,

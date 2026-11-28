@@ -1,5 +1,5 @@
 import { revalidatePath } from "next/cache";
-import { processOmnichannelSupportTurn, resolveDefaultOrgId } from "@/lib/agents/autonomous";
+import { processOmnichannelSupportTurn } from "@/lib/agents/autonomous";
 import { identityQuery, query, runWithOrgScope } from "@/lib/db";
 import { sealWebhookSecret, unsealWebhookSecret } from "@/lib/integrations/security";
 
@@ -158,27 +158,24 @@ export async function sendTelegramBotMessage(
 export async function getStoredTelegramToken(
   orgId?: string | null,
 ): Promise<string | null> {
-  const effectiveOrgId = orgId ?? (await resolveDefaultOrgId());
-  if (effectiveOrgId) {
-    try {
-      const token = await runWithOrgScope(effectiveOrgId, async () => {
-        const rows = await query<StoredChannelRow>(
-          `SELECT channel, credentials, config, cursor, state, enabled
-             FROM channel_connections
-            WHERE channel = $1
-            LIMIT 1`,
-          ["TELEGRAM"],
-        );
-        const row = rows[0];
-        if (!row) return null;
-        return extractBotTokenFromStored(row.credentials, row.config);
-      });
-      if (token) return token;
-    } catch {
-      // Fall back to environment variable
-    }
+  if (!orgId || !orgId.trim()) return null;
+  try {
+    const token = await runWithOrgScope(orgId.trim(), async () => {
+      const rows = await query<StoredChannelRow>(
+        `SELECT channel, credentials, config, cursor, state, enabled
+           FROM channel_connections
+          WHERE channel = $1
+          LIMIT 1`,
+        ["TELEGRAM"],
+      );
+      const row = rows[0];
+      if (!row) return null;
+      return extractBotTokenFromStored(row.credentials, row.config);
+    });
+    return token ?? null;
+  } catch {
+    return null;
   }
-  return process.env.TELEGRAM_BOT_TOKEN?.trim() || null;
 }
 
 export async function configureTelegramChannelInDb({
@@ -507,10 +504,6 @@ export async function syncTelegramUpdatesNow(opts?: {
       orgIds = rows.map((r) => r.id);
     } catch {
       orgIds = [];
-    }
-    if (orgIds.length === 0) {
-      const def = await resolveDefaultOrgId();
-      if (def) orgIds = [def];
     }
   }
 

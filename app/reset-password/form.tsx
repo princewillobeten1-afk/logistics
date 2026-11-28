@@ -1,43 +1,71 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useFormStatus } from "react-dom";
-
-import { resetPasswordAction, type ResetState } from "./actions";
+import { useState, type FormEvent } from "react";
 
 const MIN_PASSWORD_LENGTH = 10;
 
-// Disabled only while submitting — see the note in app/signup/form.tsx.
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <button
-      type="submit"
-      className="auth-submit"
-      data-pending={pending}
-      disabled={pending}
-    >
-      {pending ? "Setting password…" : "Set new password"}
-    </button>
-  );
-}
-
 export function ResetPasswordForm({ token }: { token: string }) {
-  const [state, action] = useActionState<ResetState, FormData>(
-    resetPasswordAction,
-    { error: null },
-  );
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const mismatch = confirm.length > 0 && password !== confirm;
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
 
-  return (
-    <form action={action} className="auth-form">
-      <input type="hidden" name="token" value={token} />
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
 
+    setError(null);
+
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+
+    setPending(true);
+    try {
+      const res = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        body: JSON.stringify({
+          token: token.trim(),
+          password,
+          confirm,
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        redirectTo?: string;
+      };
+
+      if (!res.ok || !data.ok) {
+        setError(data.error ?? "Unable to reset password. Please try again.");
+        setPending(false);
+        return;
+      }
+
+      window.location.assign(data.redirectTo ?? "/login?reset=1");
+    } catch {
+      setError("Unable to reach the recovery service. Please try again.");
+      setPending(false);
+    }
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate className="auth-form">
       <div className="auth-field">
         <label htmlFor="reset-password">New password</label>
         <div className="password-wrap">
@@ -89,13 +117,20 @@ export function ResetPasswordForm({ token }: { token: string }) {
         </p>
       ) : null}
 
-      {state.error ? (
+      {error ? (
         <p className="auth-error" role="alert">
-          {state.error}
+          {error}
         </p>
       ) : null}
 
-      <SubmitButton />
+      <button
+        type="submit"
+        className="auth-submit"
+        data-pending={pending}
+        disabled={pending}
+      >
+        {pending ? "Setting password…" : "Set new password"}
+      </button>
     </form>
   );
 }

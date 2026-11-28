@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { ClientWhen } from "@/components/client-time";
 import {
   askQuestion,
   conversation,
@@ -18,17 +19,6 @@ const TRACK_SUGGESTIONS = [
 ];
 
 type ChannelMode = "WEBSITE_CHAT" | "WHATSAPP" | "TELEGRAM";
-
-function when(iso: string | null): string {
-  if (!iso) return "not yet confirmed";
-  return new Date(iso).toLocaleString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export function TrackChat({ initialReference }: { initialReference?: string }) {
   const [channel, setChannel] = useState<ChannelMode>("WEBSITE_CHAT");
@@ -275,11 +265,23 @@ export function TrackChat({ initialReference }: { initialReference?: string }) {
             </div>
             <div>
               <dt>Promised</dt>
-              <dd>{when(shipment.promised_by)}</dd>
+              <dd>
+                {shipment.promised_by ? (
+                  <ClientWhen date={shipment.promised_by} />
+                ) : (
+                  "not yet confirmed"
+                )}
+              </dd>
             </div>
             <div>
               <dt>Estimated</dt>
-              <dd>{when(shipment.estimated_arrival)}</dd>
+              <dd>
+                {shipment.estimated_arrival ? (
+                  <ClientWhen date={shipment.estimated_arrival} />
+                ) : (
+                  "not yet confirmed"
+                )}
+              </dd>
             </div>
             <div>
               <dt>Carrier</dt>

@@ -9,6 +9,8 @@ import {
 
 type MetricKey = "shipments" | "emissions" | "costPerShipment";
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 function buildSmoothPath(pts: { x: number; y: number }[]): string {
   if (pts.length === 0) return "";
   if (pts.length === 1) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
@@ -149,18 +151,24 @@ export function PerformanceTrendChart({
         ? "emissions"
         : null;
 
-  const colWidth = data.length > 0 ? plotW / data.length : plotW;
-  const xAt = (i: number) => PAD_L + colWidth * i + colWidth / 2;
+  const colWidth = round2(data.length > 0 ? plotW / data.length : plotW);
+  const xAt = (i: number) => round2(PAD_L + colWidth * i + colWidth / 2);
   const yAt = (val: number, maxVal: number) =>
-    PAD_T + plotH - (Math.max(0, val) / maxVal) * plotH;
+    round2(PAD_T + plotH - (Math.max(0, val) / maxVal) * plotH);
 
-  const barWidth = Math.min(44, Math.max(18, colWidth * 0.34));
+  const barWidth = round2(Math.min(44, Math.max(18, colWidth * 0.34)));
 
   const shipmentBars = data.map((d, i) => {
     const xCenter = xAt(i);
     const yTop = yAt(d.shipments, maxShipments);
-    const height = Math.max(0, PAD_T + plotH - yTop);
-    return { x: xCenter - barWidth / 2, y: yTop, width: barWidth, height, xCenter };
+    const height = round2(Math.max(0, PAD_T + plotH - yTop));
+    return {
+      x: round2(xCenter - barWidth / 2),
+      y: yTop,
+      width: barWidth,
+      height,
+      xCenter,
+    };
   });
 
   const emissionPts = data.map((d, i) => ({
@@ -186,7 +194,7 @@ export function PerformanceTrendChart({
     return formatCompactCurrency(maxCost * frac, currency);
   }
 
-  const popoverLeftPct = Math.min(76, Math.max(12, (activeX / W) * 100));
+  const popoverLeftPct = Math.min(76, Math.max(12, (activeX / W) * 100)).toFixed(2);
 
   return (
     <section
@@ -285,7 +293,7 @@ export function PerformanceTrendChart({
         >
           {/* Horizontal grid + adaptive left & right axis ticks */}
           {[0, 0.25, 0.5, 0.75, 1].map((frac, idx) => {
-            const y = PAD_T + plotH * (1 - frac);
+            const y = round2(PAD_T + plotH * (1 - frac));
             return (
               <g key={idx}>
                 <line
@@ -297,7 +305,7 @@ export function PerformanceTrendChart({
                 />
                 <text
                   x={PAD_L - 10}
-                  y={y + 3.5}
+                  y={round2(y + 3.5)}
                   textAnchor="end"
                   className="ct-axis-text"
                 >
@@ -306,7 +314,7 @@ export function PerformanceTrendChart({
                 {rightAxisMetric ? (
                   <text
                     x={W - PAD_R + 10}
-                    y={y + 3.5}
+                    y={round2(y + 3.5)}
                     textAnchor="start"
                     className="ct-axis-text"
                   >
@@ -431,7 +439,7 @@ export function PerformanceTrendChart({
                 ) : null}
 
                 <rect
-                  x={PAD_L + colWidth * i}
+                  x={round2(PAD_L + colWidth * i)}
                   y={PAD_T}
                   width={colWidth}
                   height={plotH + PAD_B}
@@ -450,8 +458,8 @@ export function PerformanceTrendChart({
 
           {!summary.hasAnyData ? (
             <text
-              x={PAD_L + plotW / 2}
-              y={PAD_T + plotH / 2}
+              x={round2(PAD_L + plotW / 2)}
+              y={round2(PAD_T + plotH / 2)}
               textAnchor="middle"
               className="ct-axis-text"
             >

@@ -62,6 +62,8 @@ const HUB_NODES = [
   { x: 1320, y: 114, r: 4, tone: "slate" },
 ] as const;
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 const COMPASS_TICKS = Array.from({ length: 24 }, (_, idx) => {
   const angleRad = (idx * 15 * Math.PI) / 180;
   const cx = 720;
@@ -69,10 +71,10 @@ const COMPASS_TICKS = Array.from({ length: 24 }, (_, idx) => {
   const rInner = idx % 2 === 0 ? 352 : 358;
   const rOuter = 368;
   return {
-    x1: cx + Math.cos(angleRad) * rInner,
-    y1: cy + Math.sin(angleRad) * rInner,
-    x2: cx + Math.cos(angleRad) * rOuter,
-    y2: cy + Math.sin(angleRad) * rOuter,
+    x1: round2(cx + Math.cos(angleRad) * rInner),
+    y1: round2(cy + Math.sin(angleRad) * rInner),
+    x2: round2(cx + Math.cos(angleRad) * rOuter),
+    y2: round2(cy + Math.sin(angleRad) * rOuter),
     major: idx % 2 === 0,
   };
 });

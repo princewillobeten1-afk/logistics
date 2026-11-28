@@ -13,6 +13,7 @@ import {
   inMemoryPersistence,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type Auth,
   type User,
@@ -24,8 +25,16 @@ export const SCOPES = [
   "https://www.googleapis.com/auth/gmail.send",
 ] as const;
 
+export type GoogleAuthPayload = {
+  user: User;
+  idToken: string;
+  accessToken: string | null;
+};
+
 let authInstance: Auth | null = null;
-let prewarmPromise: Promise<void> | null = null;
+let prewarmPromise: Promise<GoogleAuthPayload | null> | null = null;
+let pendingRedirectPayload: GoogleAuthPayload | null = null;
+let redirectConsumed = false;
 
 function getFirebaseAuth(): Auth {
   if (typeof window === "undefined") {
@@ -50,25 +59,64 @@ function getFirebaseAuth(): Auth {
   return authInstance;
 }
 
+function isEmbeddedFrame(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
 /**
- * Pre-initializes Firebase Auth and the popup/redirect iframe resolver on mount
- * so clicking Sign in with Google does not have to await iframe setup before
- * opening the popup window (prevents Safari/WebKit and iframe popup blocking).
+ * Pre-initializes Firebase Auth and resolves any completed signInWithRedirect
+ * flow without discarding the credential.
  */
-export function prewarmGoogleAuth(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
+export function prewarmGoogleAuth(): Promise<GoogleAuthPayload | null> {
+  if (typeof window === "undefined") return Promise.resolve(null);
   if (!prewarmPromise) {
     prewarmPromise = (async () => {
       try {
         const auth = getFirebaseAuth();
         await auth.authStateReady();
-        await getRedirectResult(auth, browserPopupRedirectResolver);
+        const result = await getRedirectResult(
+          auth,
+          browserPopupRedirectResolver,
+        );
+        if (result?.user) {
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          const idToken = await result.user.getIdToken();
+          const payload: GoogleAuthPayload = {
+            user: result.user,
+            idToken,
+            accessToken: credential?.accessToken ?? null,
+          };
+          if (!redirectConsumed) {
+            pendingRedirectPayload = payload;
+          }
+          return payload;
+        }
       } catch {
         // Non-fatal: signInWithPopup initializes on demand if prewarm fails.
       }
+      return null;
     })();
   }
   return prewarmPromise;
+}
+
+/**
+ * Consumes a pending Google redirect sign-in credential once on page mount.
+ */
+export async function consumeGoogleRedirectResult(): Promise<GoogleAuthPayload | null> {
+  const fromPrewarm = await prewarmGoogleAuth();
+  if (redirectConsumed) return null;
+  const payload = pendingRedirectPayload ?? fromPrewarm;
+  if (payload) {
+    redirectConsumed = true;
+    pendingRedirectPayload = null;
+  }
+  return payload;
 }
 
 // In-memory cache ONLY (never localStorage or sessionStorage).
@@ -97,15 +145,12 @@ export function initGoogleAuth(
 
 /**
  * Sign into the Control Tower workspace using Google Sign-In.
- * Optionally requests Gmail scopes in the same consent prompt.
+ * Accepts any Google account (`prompt: select_account`). Falls back to
+ * top-level redirect if popups are blocked outside embedded iframes.
  */
 export async function googleSignIn(options?: {
   includeGmailScopes?: boolean;
-}): Promise<{
-  user: User;
-  idToken: string;
-  accessToken: string | null;
-}> {
+}): Promise<GoogleAuthPayload> {
   const auth = getFirebaseAuth();
   isSigningIn = true;
   try {
@@ -117,21 +162,36 @@ export async function googleSignIn(options?: {
       }
     }
 
-    const result = await signInWithPopup(
-      auth,
-      provider,
-      browserPopupRedirectResolver,
-    );
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    const idToken = await result.user.getIdToken();
-    const accessToken = credential?.accessToken ?? null;
+    try {
+      const result = await signInWithPopup(
+        auth,
+        provider,
+        browserPopupRedirectResolver,
+      );
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const idToken = await result.user.getIdToken();
+      const accessToken = credential?.accessToken ?? null;
 
-    if (options?.includeGmailScopes && accessToken) {
-      cachedAccessToken = accessToken;
-      cachedTokenEmail = result.user.email ?? null;
+      if (options?.includeGmailScopes && accessToken) {
+        cachedAccessToken = accessToken;
+        cachedTokenEmail = result.user.email ?? null;
+      }
+
+      return { user: result.user, idToken, accessToken };
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (
+        (code === "auth/popup-blocked" ||
+          code === "auth/web-storage-unsupported") &&
+        !isEmbeddedFrame()
+      ) {
+        redirectConsumed = false;
+        await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
+        // Browser navigates away on redirect; keep promise pending briefly.
+        return await new Promise<GoogleAuthPayload>(() => {});
+      }
+      throw err;
     }
-
-    return { user: result.user, idToken, accessToken };
   } finally {
     isSigningIn = false;
   }

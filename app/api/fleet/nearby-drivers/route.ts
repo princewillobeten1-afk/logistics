@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { scheduleBackgroundAgent } from "@/lib/agents/background";
-import { currentUser } from "@/lib/auth";
+import { currentUser, may } from "@/lib/auth";
 import { isReachable, query, runWithOrgScope } from "@/lib/db";
+import {
+  detectWorkspaceTampering,
+  hasDepartmentAccess,
+} from "@/lib/tenant-guard";
 import {
   computeLogisticsReadiness,
   findNearbyDrivers,
@@ -64,6 +68,16 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(
       { error: "Authentication required." },
       { status: 401 },
+    );
+  }
+  const tamper = detectWorkspaceTampering(request, user.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+  if (!hasDepartmentAccess(user, "FLEET")) {
+    return NextResponse.json(
+      { error: "Your department scope does not include Fleet operations." },
+      { status: 403 },
     );
   }
 
@@ -271,6 +285,12 @@ export async function POST(request: NextRequest) {
       { status: 401 },
     );
   }
+  if (!may(user.role, "EDIT_SHIPMENT") || !hasDepartmentAccess(user, "FLEET")) {
+    return NextResponse.json(
+      { error: "Fleet dispatcher permissions are required for driver mutations." },
+      { status: 403 },
+    );
+  }
 
   let body: Record<string, unknown>;
   try {
@@ -280,6 +300,11 @@ export async function POST(request: NextRequest) {
       { error: "Invalid JSON payload." },
       { status: 400 },
     );
+  }
+
+  const tamper = detectWorkspaceTampering(request, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
 
   const action = String(body.action ?? "").trim();

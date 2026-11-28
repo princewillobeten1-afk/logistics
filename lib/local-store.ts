@@ -247,6 +247,11 @@ export interface DocumentRecord {
   extraction_confidence: string | null;
   verified_at: Date | null;
   created_at: Date;
+  storage_key?: string | null;
+  content_type?: string | null;
+  byte_size?: number | null;
+  sha256?: string | null;
+  uploaded_by?: string | null;
 }
 
 export interface CustomsRecord {

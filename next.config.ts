@@ -21,7 +21,12 @@ const nextConfig: NextConfig = {
   typescript: { ignoreBuildErrors: false },
   experimental: {
     serverActions: {
-      allowedOrigins: ["*.run.app", "localhost:3000", "127.0.0.1:3000"],
+      allowedOrigins: [
+        "*.run.app",
+        "*.vercel.app",
+        "localhost:3000",
+        "127.0.0.1:3000",
+      ],
     },
   },
 };

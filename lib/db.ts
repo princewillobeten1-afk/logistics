@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { Pool, type PoolClient, type QueryResult } from "pg";
 
@@ -20,7 +20,20 @@ const globalForPg = globalThis as unknown as {
 
 const LOCAL_STORE_PATH = "/tmp/logistics-local-store.json";
 
-type LocalOrg = { id: string; name: string; slug: string; active: boolean };
+type LocalOrg = {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  webhook_token?: string | null;
+  intake_api_key_hash?: string | null;
+  intake_api_key_prefix?: string | null;
+  whatsapp_phone_number_id?: string | null;
+  whatsapp_verify_token?: string | null;
+  whatsapp_app_secret_sealed?: string | null;
+  telegram_webhook_secret_hash?: string | null;
+};
+
 type LocalUser = {
   id: string;
   org_id: string;
@@ -29,8 +42,12 @@ type LocalUser = {
   role: string;
   name: string | null;
   active: boolean;
+  departments: string[];
+  branch_codes: string[];
   last_login_at: Date | null;
+  created_at?: Date;
 };
+
 type LocalSession = {
   token: string;
   user_id: string;
@@ -38,6 +55,7 @@ type LocalSession = {
   ip_address: string | null;
   user_agent: string | null;
 };
+
 type LocalReset = {
   token: string;
   user_id: string;
@@ -47,22 +65,117 @@ type LocalReset = {
   ip_address: string | null;
 };
 
+type LocalInvitation = {
+  id: string;
+  org_id: string;
+  token_hash: string;
+  email: string;
+  role: string;
+  departments: string[];
+  branch_codes: string[];
+  invited_by: string | null;
+  expires_at: Date;
+  accepted_at: Date | null;
+  revoked_at: Date | null;
+  created_at: Date;
+};
+
+type LocalWebhookDelivery = {
+  id: string;
+  org_id: string;
+  channel: string;
+  delivery_id: string;
+  received_at: Date;
+  expires_at?: Date | null;
+};
+
+type LocalRateLimitRow = {
+  org_id: string;
+  bucket: string;
+  window_start_ms: number;
+  hit_count: number;
+  expires_at_ms: number;
+};
+
 type LocalStore = {
   orgs: LocalOrg[];
   users: LocalUser[];
   sessions: LocalSession[];
   resets: LocalReset[];
-  data: OperationalState;
+  invitations: LocalInvitation[];
+  tacticsByOrg: Record<string, Record<string, unknown>>;
+  configsByOrg: Record<string, Record<string, unknown>>;
+  thirdPartyClientsByOrg: Record<string, Array<Record<string, unknown>>>;
+  internationalFreightByOrg: Record<string, Array<Record<string, unknown>>>;
+  rateLimits: LocalRateLimitRow[];
+  webhookDeliveries: LocalWebhookDelivery[];
+  /** Strict per-workspace operational partitions keyed by verified orgId. */
+  dataByOrg: Record<string, OperationalState>;
+  /** Held only when pre-migration legacy data exists before the first org is registered. */
+  pendingLegacyData?: OperationalState | null;
 };
 
+function hasOperationalRecords(state: OperationalState | undefined | null): boolean {
+  if (!state) return false;
+  return (
+    state.shipments.length > 0 ||
+    state.orders.length > 0 ||
+    state.customers.length > 0 ||
+    state.warehouses.length > 0 ||
+    state.carriers.length > 0 ||
+    state.conveyances.length > 0 ||
+    state.drivers.length > 0 ||
+    state.documents.length > 0 ||
+    state.integrationConnectors.length > 0
+  );
+}
+
 function reviveLocalStore(raw: unknown): LocalStore {
-  const parsed = (raw ?? {}) as Partial<LocalStore>;
+  const parsed = (raw ?? {}) as Partial<LocalStore> & { data?: Partial<OperationalState> };
+  const orgs: LocalOrg[] = Array.isArray(parsed.orgs)
+    ? parsed.orgs.map((o) => ({
+        ...o,
+        webhook_token: o.webhook_token ?? randomBytes(18).toString("hex"),
+      }))
+    : [];
+
+  const dataByOrg: Record<string, OperationalState> = {};
+  if (parsed.dataByOrg && typeof parsed.dataByOrg === "object") {
+    for (const [orgId, bucket] of Object.entries(parsed.dataByOrg)) {
+      if (orgId && bucket && typeof bucket === "object") {
+        dataByOrg[orgId] = reviveOperationalStateDates(bucket);
+      }
+    }
+  }
+
+  // Safe non-destructive migration: assign any pre-existing legacy unscoped `data`
+  // bucket to the first active workspace while keeping all subsequent workspaces clean.
+  let pendingLegacyData: OperationalState | null = parsed.pendingLegacyData
+    ? reviveOperationalStateDates(parsed.pendingLegacyData)
+    : null;
+  if (parsed.data && typeof parsed.data === "object") {
+    const legacy = reviveOperationalStateDates(parsed.data);
+    if (hasOperationalRecords(legacy)) {
+      const firstOrg = orgs[0];
+      if (firstOrg) {
+        if (!dataByOrg[firstOrg.id] || !hasOperationalRecords(dataByOrg[firstOrg.id])) {
+          dataByOrg[firstOrg.id] = legacy;
+        }
+      } else if (!pendingLegacyData) {
+        pendingLegacyData = legacy;
+      }
+    }
+  }
+
   return {
-    orgs: Array.isArray(parsed.orgs) ? parsed.orgs : [],
+    orgs,
     users: Array.isArray(parsed.users)
       ? parsed.users.map((u) => ({
           ...u,
+          departments: Array.isArray(u.departments) ? u.departments : [],
+          branch_codes: Array.isArray(u.branch_codes) ? u.branch_codes : [],
           last_login_at: u.last_login_at ? new Date(u.last_login_at) : null,
+          created_at: u.created_at ? new Date(u.created_at) : new Date(),
         }))
       : [],
     sessions: Array.isArray(parsed.sessions)
@@ -79,8 +192,55 @@ function reviveLocalStore(raw: unknown): LocalStore {
           used_at: r.used_at ? new Date(r.used_at) : null,
         }))
       : [],
-    data: reviveOperationalStateDates(parsed.data),
+    invitations: Array.isArray(parsed.invitations)
+      ? parsed.invitations.map((inv) => ({
+          ...inv,
+          departments: Array.isArray(inv.departments) ? inv.departments : [],
+          branch_codes: Array.isArray(inv.branch_codes) ? inv.branch_codes : [],
+          expires_at: new Date(inv.expires_at),
+          accepted_at: inv.accepted_at ? new Date(inv.accepted_at) : null,
+          revoked_at: inv.revoked_at ? new Date(inv.revoked_at) : null,
+          created_at: new Date(inv.created_at),
+        }))
+      : [],
+    tacticsByOrg:
+      parsed.tacticsByOrg && typeof parsed.tacticsByOrg === "object"
+        ? parsed.tacticsByOrg
+        : {},
+    configsByOrg:
+      parsed.configsByOrg && typeof parsed.configsByOrg === "object"
+        ? parsed.configsByOrg
+        : {},
+    thirdPartyClientsByOrg:
+      parsed.thirdPartyClientsByOrg && typeof parsed.thirdPartyClientsByOrg === "object"
+        ? parsed.thirdPartyClientsByOrg
+        : {},
+    internationalFreightByOrg:
+      parsed.internationalFreightByOrg && typeof parsed.internationalFreightByOrg === "object"
+        ? parsed.internationalFreightByOrg
+        : {},
+    rateLimits: Array.isArray(parsed.rateLimits)
+      ? parsed.rateLimits.filter(
+          (r) => r && typeof r.org_id === "string" && typeof r.bucket === "string",
+        )
+      : [],
+    webhookDeliveries: Array.isArray(parsed.webhookDeliveries)
+      ? parsed.webhookDeliveries.map((d) => ({
+          ...d,
+          received_at: new Date(d.received_at),
+          expires_at: d.expires_at ? new Date(d.expires_at) : null,
+        }))
+      : [],
+    dataByOrg,
+    pendingLegacyData,
   };
+}
+
+function getOrCreateOrgBucket(store: LocalStore, orgId: string): OperationalState {
+  if (!store.dataByOrg[orgId]) {
+    store.dataByOrg[orgId] = createEmptyOperationalState();
+  }
+  return store.dataByOrg[orgId];
 }
 
 function getLocalStore(): LocalStore {
@@ -106,7 +266,15 @@ function getLocalStore(): LocalStore {
       users: [],
       sessions: [],
       resets: [],
-      data: createEmptyOperationalState(),
+      invitations: [],
+      tacticsByOrg: {},
+      configsByOrg: {},
+      thirdPartyClientsByOrg: {},
+      internationalFreightByOrg: {},
+      rateLimits: [],
+      webhookDeliveries: [],
+      dataByOrg: {},
+      pendingLegacyData: null,
     };
   }
   return globalForPg.logisticsLocalStore;
@@ -134,10 +302,10 @@ const TERMINAL_OR_DELIVERED = new Set([
 function localQuery(
   text: string,
   params: unknown[] = [],
+  scopedOrgId: string | null = null,
 ): QueryResult<Record<string, unknown>> {
   const sql = text.trim();
   const store = getLocalStore();
-  const seed = store.data;
 
   const ok = (rows: Record<string, unknown>[], rowCount = rows.length) =>
     ({
@@ -148,17 +316,16 @@ function localQuery(
       fields: [],
     }) as QueryResult<Record<string, unknown>>;
 
-  const shipById = (id: string | null | undefined) =>
-    id ? seed.shipments.find((s) => s.id === id) : undefined;
-
   // Session / role setup statements
   if (
-    /^(BEGIN|COMMIT|ROLLBACK|SET ROLE|RESET ROLE|SELECT set_config)/i.test(sql)
+    /^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|ROLLBACK\s+TO\s+SAVEPOINT|SET LOCAL ROLE|SET ROLE|RESET ROLE|SELECT set_config)/i.test(
+      sql,
+    )
   ) {
     return ok([], 0);
   }
 
-  // Current session lookup
+  // Current session lookup (includes department & branch scope)
   if (/FROM sessions s\s+JOIN users u/i.test(sql)) {
     const token = String(params[0] ?? "");
     const now = Date.now();
@@ -178,6 +345,8 @@ function localQuery(
         email: user.email,
         name: user.name,
         role: user.role,
+        departments: user.departments ?? [],
+        branch_codes: user.branch_codes ?? [],
       },
     ]);
   }
@@ -197,6 +366,8 @@ function localQuery(
         email: user.email,
         name: user.name,
         role: user.role,
+        departments: user.departments ?? [],
+        branch_codes: user.branch_codes ?? [],
         active: user.active,
         org_active: org.active,
         password_hash: user.password_hash,
@@ -204,16 +375,61 @@ function localQuery(
     ]);
   }
 
-  // Fallback & active org lookup for external webhooks / background workers
+  // Organisation lookup by webhook_token, intake_api_key_hash, whatsapp_phone_number_id, or id
+  if (/FROM organisations WHERE webhook_token = \$1/i.test(sql)) {
+    const tok = String(params[0] ?? "");
+    const org = store.orgs.find((o) => o.active && o.webhook_token === tok);
+    return org ? ok([org as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM organisations WHERE intake_api_key_hash = \$1/i.test(sql)) {
+    const hash = String(params[0] ?? "");
+    const org = store.orgs.find((o) => o.active && o.intake_api_key_hash === hash);
+    return org ? ok([org as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM organisations WHERE whatsapp_phone_number_id = \$1/i.test(sql)) {
+    const phoneId = String(params[0] ?? "");
+    const org = store.orgs.find((o) => o.active && o.whatsapp_phone_number_id === phoneId);
+    return org ? ok([org as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/FROM organisations WHERE id = \$1/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const org = store.orgs.find((o) => o.id === id);
+    return org ? ok([org as unknown as Record<string, unknown>], 1) : ok([]);
+  }
+
+  if (/UPDATE organisations\s+SET[\s\S]*WHERE id = \$/i.test(sql)) {
+    const orgId = String(params[params.length - 1] ?? "");
+    const org = store.orgs.find((o) => o.id === orgId);
+    if (!org) return ok([], 0);
+    if (/webhook_token\s*=\s*\$1/i.test(sql)) {
+      org.webhook_token = params[0] != null ? String(params[0]) : org.webhook_token;
+    }
+    if (/intake_api_key_hash\s*=\s*\$1/i.test(sql)) {
+      org.intake_api_key_hash = params[0] != null ? String(params[0]) : null;
+      org.intake_api_key_prefix = params[1] != null ? String(params[1]) : null;
+    }
+    if (/whatsapp_phone_number_id\s*=\s*\$1/i.test(sql)) {
+      org.whatsapp_phone_number_id = params[0] != null ? String(params[0]) : null;
+      org.whatsapp_verify_token = params[1] != null ? String(params[1]) : null;
+      org.whatsapp_app_secret_sealed = params[2] != null ? String(params[2]) : null;
+    }
+    if (/telegram_webhook_secret_hash\s*=\s*\$1/i.test(sql)) {
+      org.telegram_webhook_secret_hash = params[0] != null ? String(params[0]) : null;
+    }
+    saveLocalStore(store);
+    return ok([org as unknown as Record<string, unknown>], 1);
+  }
+
+  // Active organisations listing (used only by per-org background poller)
   if (/FROM organisations\b/i.test(sql) && !/WHERE slug/i.test(sql) && !/JOIN/i.test(sql)) {
     const limitMatch = sql.match(/LIMIT\s+(\d+)/i);
     const limit = limitMatch ? Number(limitMatch[1]) : 25;
     const activeOnly = /active\s*=\s*true/i.test(sql);
     const orgs = (activeOnly ? store.orgs.filter((o) => o.active) : store.orgs).slice(0, limit);
-    if (orgs.length > 0) {
-      return ok(orgs.map((o) => ({ id: o.id, name: o.name })));
-    }
-    return ok([{ id: "00000000-0000-0000-0000-000000000001", name: "Operations Workspace" }]);
+    return ok(orgs.map((o) => ({ id: o.id, name: o.name })));
   }
 
   // Unique org slug check
@@ -223,20 +439,34 @@ function localQuery(
     return ok([{ n: String(n) }]);
   }
 
-  // Insert organisation
+  // Insert organisation (safely inherits pendingLegacyData ONLY for the first org)
   if (/INSERT INTO organisations/i.test(sql)) {
+    const isFirstOrg = store.orgs.length === 0;
     const org: LocalOrg = {
       id: randomUUID(),
       name: String(params[0] ?? ""),
       slug: String(params[1] ?? ""),
       active: true,
+      webhook_token: randomBytes(18).toString("hex"),
+      intake_api_key_hash: null,
+      intake_api_key_prefix: null,
+      whatsapp_phone_number_id: null,
+      whatsapp_verify_token: null,
+      whatsapp_app_secret_sealed: null,
+      telegram_webhook_secret_hash: null,
     };
     store.orgs.push(org);
+    if (isFirstOrg && store.pendingLegacyData && hasOperationalRecords(store.pendingLegacyData)) {
+      store.dataByOrg[org.id] = store.pendingLegacyData;
+      store.pendingLegacyData = null;
+    } else {
+      store.dataByOrg[org.id] = createEmptyOperationalState();
+    }
     saveLocalStore(store);
-    return ok([{ id: org.id, name: org.name }], 1);
+    return ok([{ id: org.id, name: org.name, webhook_token: org.webhook_token }], 1);
   }
 
-  // Insert user
+  // Insert user (supports both signup ADMIN and invited members with role/departments/branch_codes)
   if (/INSERT INTO users/i.test(sql)) {
     const email = String(params[1] ?? "").toLowerCase();
     if (store.users.some((u) => u.email.toLowerCase() === email)) {
@@ -250,22 +480,102 @@ function localQuery(
       err.constraint = "users_email_idx";
       throw err;
     }
+    const explicitRole = /VALUES\s*\(\s*\$1\s*,\s*\$2\s*,\s*\$3\s*,\s*\$4/i.test(sql);
+    const role = explicitRole ? String(params[3] ?? "VIEWER") : "ADMIN";
+    const name = explicitRole
+      ? (params[4] != null ? String(params[4]) : null)
+      : (params[3] != null ? String(params[3]) : null);
+    const departments = explicitRole && Array.isArray(params[5]) ? params[5].map(String) : [];
+    const branchCodes = explicitRole && Array.isArray(params[6]) ? params[6].map(String) : [];
     const user: LocalUser = {
       id: randomUUID(),
       org_id: String(params[0] ?? ""),
       email,
       password_hash: String(params[2] ?? ""),
-      role: "ADMIN",
-      name: params[3] != null ? String(params[3]) : null,
+      role,
+      name,
       active: true,
+      departments,
+      branch_codes: branchCodes,
       last_login_at: null,
+      created_at: new Date(),
     };
     store.users.push(user);
     saveLocalStore(store);
     return ok(
-      [{ id: user.id, email: user.email, name: user.name, role: user.role }],
+      [
+        {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          departments: user.departments,
+          branch_codes: user.branch_codes,
+        },
+      ],
       1,
     );
+  }
+
+  // Org-scoped team members listing & updates
+  if (/FROM users\s+WHERE org_id = \$1/i.test(sql)) {
+    const orgId = String(params[0] ?? "");
+    const members = store.users
+      .filter((u) => u.org_id === orgId)
+      .map((u) => ({
+        id: u.id,
+        org_id: u.org_id,
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        active: u.active,
+        departments: u.departments ?? [],
+        branch_codes: u.branch_codes ?? [],
+        last_login_at: u.last_login_at,
+        created_at: u.created_at ?? new Date(),
+      }));
+    return ok(members as unknown as Record<string, unknown>[]);
+  }
+
+  if (/UPDATE users SET role = \$1/i.test(sql)) {
+    const role = String(params[0] ?? "VIEWER");
+    const departments = Array.isArray(params[1]) ? params[1].map(String) : [];
+    const branchCodes = Array.isArray(params[2]) ? params[2].map(String) : [];
+    const active = Boolean(params[3]);
+    const userId = String(params[4] ?? "");
+    const orgId = String(params[5] ?? "");
+    const user = store.users.find((u) => u.id === userId && u.org_id === orgId);
+    if (!user) return ok([], 0);
+    user.role = role;
+    user.departments = departments;
+    user.branch_codes = branchCodes;
+    user.active = active;
+    saveLocalStore(store);
+    return ok([user as unknown as Record<string, unknown>], 1);
+  }
+
+  // Team invitations token lookup (public invite acceptance before session exists)
+  if (/FROM team_invitations ti\s+JOIN organisations o/i.test(sql)) {
+    const tokenHash = String(params[0] ?? "");
+    const inv = store.invitations.find((i) => i.token_hash === tokenHash);
+    if (!inv) return ok([]);
+    const org = store.orgs.find((o) => o.id === inv.org_id && o.active);
+    if (!org) return ok([]);
+    return ok([
+      {
+        ...inv,
+        org_name: org.name,
+      } as unknown as Record<string, unknown>,
+    ]);
+  }
+
+  if (/UPDATE team_invitations SET accepted_at = now\(\) WHERE id = \$1/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const inv = store.invitations.find((i) => i.id === id);
+    if (!inv) return ok([], 0);
+    inv.accepted_at = new Date();
+    saveLocalStore(store);
+    return ok([inv as unknown as Record<string, unknown>], 1);
   }
 
   // Insert session
@@ -308,13 +618,18 @@ function localQuery(
     return ok([], before - store.sessions.length);
   }
 
-  // Password resets
+  // Password resets (count only unused, unexpired tokens inside cooldown window)
   if (/FROM password_resets[\s\S]*created_at >/i.test(sql)) {
     const userId = String(params[0] ?? "");
     const mins = Number(params[1] ?? 5);
-    const cutoff = Date.now() - mins * 60_000;
+    const now = Date.now();
+    const cutoff = now - mins * 60_000;
     const n = store.resets.filter(
-      (r) => r.user_id === userId && r.created_at.getTime() > cutoff,
+      (r) =>
+        r.user_id === userId &&
+        r.used_at === null &&
+        r.expires_at.getTime() > now &&
+        r.created_at.getTime() > cutoff,
     ).length;
     return ok([{ n: String(n) }]);
   }
@@ -369,6 +684,504 @@ function localQuery(
       saveLocalStore(store);
     }
     return ok([], reset ? 1 : 0);
+  }
+
+  // Connector API key authentication (searches across org buckets by unguessable 256-bit key hash)
+  if (/FROM\s+integration_connectors\s+WHERE\s+api_key_hash\s*=\s*\$1/i.test(sql)) {
+    const hash = String(params[0] ?? "");
+    for (const bucket of Object.values(store.dataByOrg)) {
+      const found = bucket.integrationConnectors.find((c) => c.api_key_hash === hash);
+      if (found) {
+        return ok([found as unknown as Record<string, unknown>], 1);
+      }
+    }
+    return ok([]);
+  }
+
+  // DDL no-ops in local store mode
+  if (/^(CREATE|ALTER)\s+(?:TABLE|INDEX)/i.test(sql)) {
+    return ok([], 0);
+  }
+
+  // ---------------- STRICT TENANT ISOLATION BOUNDARY ----------------
+  // Mirrors PostgreSQL FORCE ROW LEVEL SECURITY: every operational table
+  // requires a verified non-empty scopedOrgId. Missing orgId fails closed.
+  if (!scopedOrgId) {
+    if (/^(INSERT|UPDATE|DELETE)\b/i.test(sql)) {
+      throw new Error(
+        "Tenant isolation violation: cannot mutate operational data without a verified workspace context.",
+      );
+    }
+    return ok([], 0);
+  }
+
+  const seed = getOrCreateOrgBucket(store, scopedOrgId);
+  const shipById = (id: string | null | undefined) =>
+    id ? seed.shipments.find((s) => s.id === id) : undefined;
+
+  // Tenant-scoped team invitations CRUD
+  if (/INSERT INTO team_invitations/i.test(sql)) {
+    const inv: LocalInvitation = {
+      id: randomUUID(),
+      org_id: scopedOrgId,
+      token_hash: String(params[0] ?? ""),
+      email: String(params[1] ?? "").toLowerCase(),
+      role: String(params[2] ?? "VIEWER"),
+      departments: Array.isArray(params[3]) ? params[3].map(String) : [],
+      branch_codes: Array.isArray(params[4]) ? params[4].map(String) : [],
+      invited_by: params[5] != null ? String(params[5]) : null,
+      expires_at:
+        params[6] instanceof Date ? params[6] : new Date(String(params[6])),
+      accepted_at: null,
+      revoked_at: null,
+      created_at: new Date(),
+    };
+    store.invitations.unshift(inv);
+    saveLocalStore(store);
+    return ok([inv as unknown as Record<string, unknown>], 1);
+  }
+
+  if (/FROM team_invitations\b/i.test(sql)) {
+    const rows = store.invitations
+      .filter((i) => i.org_id === scopedOrgId)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    return ok(rows as unknown as Record<string, unknown>[]);
+  }
+
+  if (/UPDATE team_invitations SET revoked_at = now\(\)/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const inv = store.invitations.find((i) => i.id === id && i.org_id === scopedOrgId);
+    if (!inv) return ok([], 0);
+    inv.revoked_at = new Date();
+    saveLocalStore(store);
+    return ok([inv as unknown as Record<string, unknown>], 1);
+  }
+
+  // Tenant-scoped tactics state table
+  if (/FROM tactics_state\b/i.test(sql)) {
+    const payload = store.tacticsByOrg[scopedOrgId];
+    return payload ? ok([{ payload }]) : ok([]);
+  }
+
+  if (/INSERT INTO tactics_state/i.test(sql)) {
+    const rawPayload = params[0];
+    let parsed: Record<string, unknown> = {};
+    if (typeof rawPayload === "string") {
+      try {
+        parsed = JSON.parse(rawPayload) as Record<string, unknown>;
+      } catch {
+        parsed = {};
+      }
+    } else if (rawPayload && typeof rawPayload === "object") {
+      parsed = rawPayload as Record<string, unknown>;
+    }
+    store.tacticsByOrg[scopedOrgId] = parsed;
+    saveLocalStore(store);
+    return ok([{ org_id: scopedOrgId, payload: parsed }], 1);
+  }
+
+  // Tenant-scoped webhook replay deduplication table with TTL expiration
+  if (/DELETE FROM webhook_deliveries/i.test(sql)) {
+    const now = Date.now();
+    if (params.length >= 2) {
+      const channel = String(params[0] ?? "");
+      const deliveryId = String(params[1] ?? "");
+      store.webhookDeliveries = store.webhookDeliveries.filter(
+        (d) =>
+          !(
+            d.org_id === scopedOrgId &&
+            d.channel === channel &&
+            d.delivery_id === deliveryId &&
+            d.expires_at &&
+            d.expires_at.getTime() < now
+          ),
+      );
+    } else {
+      store.webhookDeliveries = store.webhookDeliveries.filter(
+        (d) => !(d.org_id === scopedOrgId && d.expires_at && d.expires_at.getTime() < now),
+      );
+    }
+    saveLocalStore(store);
+    return ok([], 0);
+  }
+
+  if (/INSERT INTO webhook_deliveries/i.test(sql)) {
+    const channel = String(params[0] ?? "");
+    const deliveryId = String(params[1] ?? "");
+    const expiresAt = params[2]
+      ? new Date(String(params[2]))
+      : new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const now = Date.now();
+    // Prune expired entry for the same key before checking uniqueness
+    store.webhookDeliveries = store.webhookDeliveries.filter(
+      (d) => !(d.expires_at && d.expires_at.getTime() < now),
+    );
+    const exists = store.webhookDeliveries.some(
+      (d) =>
+        d.org_id === scopedOrgId &&
+        d.channel === channel &&
+        d.delivery_id === deliveryId,
+    );
+    if (exists) return ok([], 0);
+    const rec: LocalWebhookDelivery = {
+      id: randomUUID(),
+      org_id: scopedOrgId,
+      channel,
+      delivery_id: deliveryId,
+      received_at: new Date(),
+      expires_at: expiresAt,
+    };
+    store.webhookDeliveries.unshift(rec);
+    if (store.webhookDeliveries.length > 2000) {
+      store.webhookDeliveries = store.webhookDeliveries.slice(0, 2000);
+    }
+    saveLocalStore(store);
+    return ok([{ id: rec.id }], 1);
+  }
+
+  // Tenant-scoped 3PL Multi-Client Accounts (strictly inside a single tenant workspace)
+  if (/FROM third_party_clients\b/i.test(sql)) {
+    const list = [...(store.thirdPartyClientsByOrg[scopedOrgId] ?? [])].sort((a, b) => {
+      const aActive = a.active !== false ? 1 : 0;
+      const bActive = b.active !== false ? 1 : 0;
+      if (aActive !== bActive) return bActive - aActive;
+      return String(a.client_name ?? "").localeCompare(String(b.client_name ?? ""));
+    });
+    return ok(list);
+  }
+
+  if (/INSERT INTO third_party_clients\b/i.test(sql)) {
+    const list = store.thirdPartyClientsByOrg[scopedOrgId] ?? [];
+    const clientCode = String(params[0] ?? "").toUpperCase();
+    const now = new Date();
+    const existingIdx = list.findIndex(
+      (r) => String(r.client_code ?? "").toUpperCase() === clientCode,
+    );
+    const row: Record<string, unknown> = {
+      id: existingIdx >= 0 ? list[existingIdx].id : randomUUID(),
+      org_id: scopedOrgId,
+      client_code: clientCode,
+      client_name: String(params[1] ?? ""),
+      contact_email: params[2] != null ? String(params[2]) : null,
+      sla_hours: Number(params[3] ?? 48),
+      billing_model: String(params[4] ?? "HYBRID_STORAGE_PICK"),
+      dedicated_warehouses: Array.isArray(params[5]) ? params[5] : [],
+      sku_prefixes: Array.isArray(params[6]) ? params[6] : [],
+      monthly_storage_rate_usd: Number(params[7] ?? 18.5),
+      per_order_pick_fee_usd: Number(params[8] ?? 3.25),
+      active: params[9] !== false,
+      notes: params[10] != null ? String(params[10]) : null,
+      created_at: existingIdx >= 0 ? list[existingIdx].created_at : now,
+      updated_at: now,
+    };
+    if (existingIdx >= 0) {
+      list[existingIdx] = row;
+    } else {
+      list.push(row);
+    }
+    store.thirdPartyClientsByOrg[scopedOrgId] = list;
+    saveLocalStore(store);
+    return ok([row], 1);
+  }
+
+  if (/UPDATE third_party_clients\b/i.test(sql)) {
+    const list = store.thirdPartyClientsByOrg[scopedOrgId] ?? [];
+    const code = String(params[0] ?? "").toUpperCase();
+    const found = list.find((r) => String(r.client_code ?? "").toUpperCase() === code);
+    if (!found) return ok([], 0);
+    found.active = false;
+    found.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([{ id: found.id }], 1);
+  }
+
+  // Tenant-scoped International Freight & Customs Consignment Records
+  if (/FROM international_freight_records\b/i.test(sql)) {
+    const list = [...(store.internationalFreightByOrg[scopedOrgId] ?? [])].sort(
+      (a, b) =>
+        new Date(String(b.updated_at ?? 0)).getTime() -
+        new Date(String(a.updated_at ?? 0)).getTime(),
+    );
+    return ok(list);
+  }
+
+  if (/INSERT INTO international_freight_records\b/i.test(sql)) {
+    const list = store.internationalFreightByOrg[scopedOrgId] ?? [];
+    const ref = String(params[0] ?? "").toUpperCase();
+    const now = new Date();
+    const existingIdx = list.findIndex(
+      (r) => String(r.shipment_reference ?? "").toUpperCase() === ref,
+    );
+    const row: Record<string, unknown> = {
+      id: existingIdx >= 0 ? list[existingIdx].id : randomUUID(),
+      org_id: scopedOrgId,
+      shipment_reference: ref,
+      direction: String(params[1] ?? "EXPORT"),
+      transport_mode: String(params[2] ?? "SEA"),
+      incoterm: String(params[3] ?? "FOB"),
+      container_or_waybill: String(params[4] ?? ""),
+      origin_country: String(params[5] ?? ""),
+      destination_country: String(params[6] ?? ""),
+      port_of_loading: params[7] != null ? String(params[7]) : null,
+      port_of_discharge: params[8] != null ? String(params[8]) : null,
+      hs_codes: Array.isArray(params[9]) ? params[9] : [],
+      declared_value_usd: Number(params[10] ?? 0),
+      estimated_duty_usd: Number(params[11] ?? 0),
+      customs_broker: params[12] != null ? String(params[12]) : null,
+      clearance_status: String(params[13] ?? "PENDING_DOCS"),
+      commercial_invoice_ready: Boolean(params[14]),
+      packing_list_ready: Boolean(params[15]),
+      certificate_of_origin_ready: Boolean(params[16]),
+      milestone_note: params[17] != null ? String(params[17]) : null,
+      updated_by: params[18] != null ? String(params[18]) : null,
+      created_at: existingIdx >= 0 ? list[existingIdx].created_at : now,
+      updated_at: now,
+    };
+    if (existingIdx >= 0) {
+      list[existingIdx] = row;
+    } else {
+      list.unshift(row);
+    }
+    store.internationalFreightByOrg[scopedOrgId] = list;
+    saveLocalStore(store);
+    return ok([row], 1);
+  }
+
+  if (/UPDATE international_freight_records\b/i.test(sql)) {
+    const list = store.internationalFreightByOrg[scopedOrgId] ?? [];
+    const ref = String(params[0] ?? "").toUpperCase();
+    const found = list.find(
+      (r) => String(r.shipment_reference ?? "").toUpperCase() === ref,
+    );
+    if (!found) return ok([], 0);
+    found.clearance_status = String(params[1] ?? found.clearance_status);
+    if (params[2] != null) found.milestone_note = String(params[2]);
+    if (params[3] != null) found.updated_by = String(params[3]);
+    found.updated_at = new Date();
+    saveLocalStore(store);
+    return ok([found], 1);
+  }
+
+  // Tenant-scoped workspace business configuration & feature entitlements
+  if (/FROM workspace_configurations\b/i.test(sql)) {
+    const rec = store.configsByOrg[scopedOrgId];
+    return rec ? ok([rec]) : ok([]);
+  }
+
+  if (/INSERT INTO workspace_configurations/i.test(sql)) {
+    const parseJson = (v: unknown, fallback: unknown) => {
+      if (typeof v === "string") {
+        try {
+          return JSON.parse(v);
+        } catch {
+          return fallback;
+        }
+      }
+      return v ?? fallback;
+    };
+    const row = {
+      org_id: scopedOrgId,
+      profile: parseJson(params[0], {}),
+      classification: parseJson(params[1], {}),
+      approved_config: parseJson(params[2], {}),
+      entitlements: parseJson(params[3], {}),
+      growth_history: parseJson(params[4], []),
+      approved_by: params[5] != null ? String(params[5]) : null,
+      approved_at: params[6] != null ? new Date(String(params[6])) : null,
+      updated_at: new Date(),
+    };
+    store.configsByOrg[scopedOrgId] = row;
+    saveLocalStore(store);
+    return ok([row], 1);
+  }
+
+  // Tenant-scoped distributed rate limits (sliding/fixed window counter)
+  if (/INSERT INTO tenant_rate_limits/i.test(sql)) {
+    const bucket = String(params[0] ?? "");
+    const windowStartMs = Number(params[1] ?? 0);
+    const expiresAtMs = new Date(String(params[2] ?? new Date().toISOString())).getTime();
+    const now = Date.now();
+    // Prune expired buckets opportunistically
+    if (store.rateLimits.length > 500) {
+      store.rateLimits = store.rateLimits.filter((r) => r.expires_at_ms > now);
+    }
+    let existing = store.rateLimits.find(
+      (r) =>
+        r.org_id === scopedOrgId &&
+        r.bucket === bucket &&
+        r.window_start_ms === windowStartMs,
+    );
+    if (existing) {
+      existing.hit_count += 1;
+      existing.expires_at_ms = Math.max(existing.expires_at_ms, expiresAtMs);
+    } else {
+      existing = {
+        org_id: scopedOrgId,
+        bucket,
+        window_start_ms: windowStartMs,
+        hit_count: 1,
+        expires_at_ms: expiresAtMs,
+      };
+      store.rateLimits.push(existing);
+    }
+    saveLocalStore(store);
+    return ok([{ hit_count: existing.hit_count }], 1);
+  }
+
+  if (/DELETE FROM tenant_rate_limits/i.test(sql)) {
+    const now = Date.now();
+    store.rateLimits = store.rateLimits.filter((r) => r.expires_at_ms > now);
+    saveLocalStore(store);
+    return ok([], 0);
+  }
+
+  // Observed workspace operational metrics for Business Growth Reassessment
+  if (/\/\*\s*workspace_observed_metrics\s*\*\//i.test(sql)) {
+    const activeUsers = store.users.filter(
+      (u) => u.org_id === scopedOrgId && u.active !== false,
+    ).length;
+    return ok([
+      {
+        active_users: String(activeUsers),
+        vehicles: String(seed.conveyances.filter((v) => v.active !== false).length),
+        warehouses: String(seed.warehouses.filter((w) => w.active !== false).length),
+        customers: String(seed.customers.filter((c) => c.active !== false).length),
+        carriers: String(seed.carriers.filter((c) => c.active !== false).length),
+        shipments: String(seed.shipments.length),
+        orders: String(seed.orders.length),
+      },
+    ]);
+  }
+
+  // Server-side paginated Shipments query
+  if (/\/\*\s*paginated_shipments\s*\*\//i.test(sql)) {
+    const stateFilter = params[0] ? String(params[0]).trim() : "";
+    const qFilter = params[1] ? String(params[1]).trim().toLowerCase() : "";
+    const limit = Math.max(1, Math.min(Number(params[2] ?? 25), 100));
+    const offset = Math.max(0, Number(params[3] ?? 0));
+    const matched = seed.shipments
+      .filter((s) => {
+        if (stateFilter && s.state !== stateFilter) return false;
+        if (!qFilter) return true;
+        const originCity = String((s.origin as Record<string, unknown> | null)?.city ?? "");
+        const destCity = String((s.destination as Record<string, unknown> | null)?.city ?? "");
+        const cargoDesc = String((s.cargo as Record<string, unknown> | null)?.description ?? "");
+        const hay = `${s.reference} ${s.customer_ref ?? ""} ${originCity} ${destCity} ${cargoDesc}`.toLowerCase();
+        return hay.includes(qFilter);
+      })
+      .sort((a, b) => b.updated_at.getTime() - a.updated_at.getTime());
+    const total = matched.length;
+    const slice = matched.slice(offset, offset + limit).map((row) => ({
+      ...row,
+      total_count: String(total),
+    }));
+    return ok(slice as unknown as Record<string, unknown>[]);
+  }
+
+  if (/\/\*\s*paginated_shipments_count\s*\*\//i.test(sql)) {
+    const stateFilter = params[0] ? String(params[0]).trim() : "";
+    const qFilter = params[1] ? String(params[1]).trim().toLowerCase() : "";
+    const total = seed.shipments.filter((s) => {
+      if (stateFilter && s.state !== stateFilter) return false;
+      if (!qFilter) return true;
+      const originCity = String((s.origin as Record<string, unknown> | null)?.city ?? "");
+      const destCity = String((s.destination as Record<string, unknown> | null)?.city ?? "");
+      const cargoDesc = String((s.cargo as Record<string, unknown> | null)?.description ?? "");
+      const hay = `${s.reference} ${s.customer_ref ?? ""} ${originCity} ${destCity} ${cargoDesc}`.toLowerCase();
+      return hay.includes(qFilter);
+    }).length;
+    return ok([{ total: String(total) }]);
+  }
+
+  // Server-side paginated Orders query
+  if (/\/\*\s*paginated_orders\s*\*\//i.test(sql)) {
+    const sourceFilter = params[0] ? String(params[0]).trim().toUpperCase() : "";
+    const qFilter = params[1] ? String(params[1]).trim().toLowerCase() : "";
+    const limit = Math.max(1, Math.min(Number(params[2] ?? 25), 100));
+    const offset = Math.max(0, Number(params[3] ?? 0));
+    const matched = seed.orders
+      .filter((o) => {
+        if (sourceFilter && String(o.source ?? "").toUpperCase() !== sourceFilter) return false;
+        if (!qFilter) return true;
+        const hay = `${o.reference} ${o.customer ?? ""} ${o.source ?? ""} ${o.state ?? ""}`.toLowerCase();
+        return hay.includes(qFilter);
+      })
+      .sort((a, b) => b.ordered_at.getTime() - a.ordered_at.getTime());
+    const total = matched.length;
+    const slice = matched.slice(offset, offset + limit).map((row) => ({
+      ...row,
+      total_count: String(total),
+    }));
+    return ok(slice as unknown as Record<string, unknown>[]);
+  }
+
+  if (/\/\*\s*paginated_orders_count\s*\*\//i.test(sql)) {
+    const sourceFilter = params[0] ? String(params[0]).trim().toUpperCase() : "";
+    const qFilter = params[1] ? String(params[1]).trim().toLowerCase() : "";
+    const total = seed.orders.filter((o) => {
+      if (sourceFilter && String(o.source ?? "").toUpperCase() !== sourceFilter) return false;
+      if (!qFilter) return true;
+      const hay = `${o.reference} ${o.customer ?? ""} ${o.source ?? ""} ${o.state ?? ""}`.toLowerCase();
+      return hay.includes(qFilter);
+    }).length;
+    return ok([{ total: String(total) }]);
+  }
+
+  // Server-side paginated Customers query
+  if (/\/\*\s*paginated_customers\s*\*\//i.test(sql)) {
+    const qFilter = params[0] ? String(params[0]).trim().toLowerCase() : "";
+    const limit = Math.max(1, Math.min(Number(params[1] ?? 25), 100));
+    const offset = Math.max(0, Number(params[2] ?? 0));
+    const now = Date.now();
+    const enriched = seed.customers
+      .filter((c) => {
+        if (!qFilter) return true;
+        const hay = `${c.code} ${c.name} ${c.payment_terms ?? ""}`.toLowerCase();
+        return hay.includes(qFilter);
+      })
+      .map((c) => {
+        const ships = seed.shipments.filter((s) => s.customer_id === c.id);
+        const last = ships.reduce<Date | null>(
+          (max, s) => (!max || s.created_at > max ? s.created_at : max),
+          null,
+        );
+        return {
+          ...c,
+          total: String(ships.length),
+          open: String(ships.filter((s) => !INACTIVE_STATES.has(s.state)).length),
+          late: String(
+            ships.filter(
+              (s) =>
+                s.deadline &&
+                s.deadline.getTime() < now &&
+                !TERMINAL_OR_DELIVERED.has(s.state),
+            ).length,
+          ),
+          last_shipment_at: last,
+        };
+      })
+      .sort((a, b) => {
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        const diff = Number(b.total) - Number(a.total);
+        if (diff !== 0) return diff;
+        return a.name.localeCompare(b.name);
+      });
+    const total = enriched.length;
+    const slice = enriched.slice(offset, offset + limit).map((row) => ({
+      ...row,
+      total_count: String(total),
+    }));
+    return ok(slice as unknown as Record<string, unknown>[]);
+  }
+
+  if (/\/\*\s*paginated_customers_count\s*\*\//i.test(sql)) {
+    const qFilter = params[0] ? String(params[0]).trim().toLowerCase() : "";
+    const total = seed.customers.filter((c) => {
+      if (!qFilter) return true;
+      const hay = `${c.code} ${c.name} ${c.payment_terms ?? ""}`.toLowerCase();
+      return hay.includes(qFilter);
+    }).length;
+    return ok([{ total: String(total) }]);
   }
 
   // ---------------- Operational Control Tower Queries ----------------
@@ -459,6 +1272,17 @@ function localQuery(
     return ok(rows);
   }
 
+  // 5b. Reference / customer_ref lookup (used by autonomous agent intake)
+  if (/FROM shipments[\s\S]*upper\(reference\)\s*=\s*\$1\s+OR\s+upper\(customer_ref\)\s*=\s*\$1/i.test(sql)) {
+    const ref = String(params[0] ?? "").trim().toUpperCase();
+    const s = seed.shipments.find(
+      (x) =>
+        x.reference.toUpperCase() === ref ||
+        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
+    );
+    return s ? ok([{ id: s.id, reference: s.reference }], 1) : ok([]);
+  }
+
   // 6. Track lookup (returns reference, state, open_exceptions)
   if (/open_exceptions[\s\S]*FROM shipments s WHERE upper\(s\.reference\)/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
@@ -470,16 +1294,20 @@ function localQuery(
     return ok([{ ...s, open_exceptions: String(openExc) }]);
   }
 
-  // 7. Assistant / Track / Approval shipment lookup
-  if (/SELECT id(?:,\s*reference)? FROM shipments WHERE upper\(reference\) = (?:upper\(\$1\)|\$1)/i.test(sql)) {
+  // 7. Assistant / Track / Approval / Omnichannel shipment lookup
+  if (/SELECT\s+[\s\S]+?\s+FROM\s+shipments\s+WHERE\s+upper\(reference\)\s*=\s*(?:upper\(\$1\)|\$1)/i.test(sql)) {
     const ref = String(params[0] ?? "").trim().toUpperCase();
-    const s = seed.shipments.find((x) => x.reference.toUpperCase() === ref);
-    return s ? ok([{ id: s.id, reference: s.reference }], 1) : ok([]);
+    const s = seed.shipments.find(
+      (x) =>
+        x.reference.toUpperCase() === ref ||
+        (x.customer_ref && x.customer_ref.toUpperCase() === ref),
+    );
+    return s ? ok([s as unknown as Record<string, unknown>], 1) : ok([]);
   }
 
-  if (/SELECT reference FROM shipments WHERE id = \$1/i.test(sql)) {
+  if (/SELECT\s+[\s\S]+?\s+FROM\s+shipments\s+WHERE\s+id\s*=\s*\$1/i.test(sql)) {
     const s = shipById(String(params[0] ?? ""));
-    return s ? ok([{ reference: s.reference }], 1) : ok([]);
+    return s ? ok([s as unknown as Record<string, unknown>], 1) : ok([]);
   }
 
   // 8. Assistant thread select / insert / delete
@@ -1168,15 +1996,35 @@ function localQuery(
       ? rawSev
       : "HIGH") as "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
     const detectedBy = String(params[3] ?? "autonomous_intake");
+    const hasSummaryCol = /INSERT INTO exceptions\s*\([^)]*\bsummary\b/i.test(sql);
+    const rawDetail = hasSummaryCol ? params[5] : params[4];
     let detail: Record<string, unknown> = {};
     try {
       detail =
-        typeof params[4] === "string"
-          ? JSON.parse(params[4])
-          : ((params[4] as Record<string, unknown>) ?? {});
+        typeof rawDetail === "string"
+          ? JSON.parse(rawDetail)
+          : ((rawDetail as Record<string, unknown>) ?? {});
     } catch {
       detail = {};
     }
+    if (hasSummaryCol && typeof params[4] === "string" && !detail.summary) {
+      detail.summary = params[4];
+    }
+
+    if (/ON\s+CONFLICT\s*\(\s*shipment_id\s*,\s*kind\s*\)/i.test(sql)) {
+      const existing = seed.exceptions.find(
+        (e) =>
+          e.shipment_id === shipmentId &&
+          e.kind === kind &&
+          e.state !== "RESOLVED",
+      );
+      if (existing) {
+        existing.detail = detail;
+        saveLocalStore(store);
+        return ok([{ id: existing.id }], 1);
+      }
+    }
+
     seed.exceptions.unshift({
       id,
       shipment_id: shipmentId,
@@ -1460,6 +2308,48 @@ function localQuery(
   // 21. Orders, Documents, Customs, Exceptions
   if (/FROM orders o/i.test(sql)) {
     return ok(seed.orders as unknown as Record<string, unknown>[]);
+  }
+
+  if (/INSERT INTO documents/i.test(sql)) {
+    const doc = {
+      id: randomUUID(),
+      shipment_id: String(params[0] ?? ""),
+      kind: String(params[1] ?? "OTHER"),
+      direction: String(params[2] ?? "INBOUND"),
+      filename: String(params[3] ?? "document.pdf"),
+      storage_key: params[4] != null ? String(params[4]) : null,
+      content_type: params[5] != null ? String(params[5]) : "application/octet-stream",
+      byte_size: params[6] != null ? Number(params[6]) : null,
+      sha256: params[7] != null ? String(params[7]) : null,
+      uploaded_by: params[8] != null ? String(params[8]) : null,
+      extraction_model: null,
+      extraction_confidence: null,
+      verified_at: null,
+      created_at: new Date(),
+    };
+    seed.documents.unshift(doc);
+    saveLocalStore(store);
+    return ok(
+      [
+        {
+          ...doc,
+          reference: shipById(doc.shipment_id)?.reference ?? null,
+        } as unknown as Record<string, unknown>,
+      ],
+      1,
+    );
+  }
+
+  if (/FROM documents(?:\s+d)?[\s\S]*WHERE\s+(?:d\.)?id\s*=\s*\$1/i.test(sql)) {
+    const id = String(params[0] ?? "");
+    const doc = seed.documents.find((d) => d.id === id);
+    if (!doc) return ok([]);
+    return ok([
+      {
+        ...doc,
+        reference: shipById(doc.shipment_id)?.reference ?? null,
+      } as unknown as Record<string, unknown>,
+    ]);
   }
 
   if (/FROM documents d/i.test(sql)) {
@@ -1992,13 +2882,12 @@ function localQuery(
   }
 
   if (/SELECT\s+org_id,\s*channel,\s*credentials/i.test(sql)) {
-    const defaultOrgId = store.orgs[0]?.id ?? null;
     const filterChannel = extractWhereChannel(sql, params) || null;
     const rows = seed.channels
       .filter((c) => (!filterChannel || c.channel === filterChannel))
       .filter((c) => !/enabled\s*=\s*true/i.test(sql) || (c.enabled && c.state === "VERIFIED"))
       .map((c) => ({
-        org_id: defaultOrgId,
+        org_id: scopedOrgId,
         channel: c.channel,
         credentials: c.credentials ?? null,
         config: c.config ?? {},
@@ -3002,7 +3891,8 @@ function localQuery(
   return ok([]);
 }
 
-function createLocalClient(): PoolClient {
+function createLocalClient(initialOrgId: string | null = null): PoolClient {
+  let activeOrgId = initialOrgId;
   return {
     query: (async (
       textOrConfig: string | { text: string; values?: unknown[] },
@@ -3012,7 +3902,18 @@ function createLocalClient(): PoolClient {
         typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
       const params =
         typeof textOrConfig === "string" ? values : textOrConfig.values;
-      return localQuery(text, params);
+      if (/SELECT\s+set_config\s*\(\s*'app\.current_org'/i.test(text.trim())) {
+        const nextOrg = String(params?.[0] ?? "").trim();
+        activeOrgId = nextOrg || null;
+        return {
+          rows: [],
+          rowCount: 0,
+          command: "SELECT",
+          oid: 0,
+          fields: [],
+        } as QueryResult<Record<string, unknown>>;
+      }
+      return localQuery(text, params, activeOrgId);
     }) as PoolClient["query"],
     release: () => {},
   } as unknown as PoolClient;
@@ -3058,7 +3959,7 @@ if (hasDatabaseUrl) {
 
 export const pool = {
   connect: async (): Promise<PoolClient> => {
-    if (!realPool || isPgInCooldown()) return createLocalClient();
+    if (!realPool || isPgInCooldown()) return createLocalClient(null);
     try {
       const client = await realPool.connect();
       clearPgCooldown();
@@ -3066,7 +3967,7 @@ export const pool = {
     } catch (err) {
       if (isConnectionError(err)) {
         markPgUnavailable();
-        return createLocalClient();
+        return createLocalClient(null);
       }
       throw err;
     }
@@ -3079,7 +3980,7 @@ export const pool = {
       typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
     const params =
       typeof textOrConfig === "string" ? values : textOrConfig.values;
-    if (!realPool || isPgInCooldown()) return localQuery(text, params);
+    if (!realPool || isPgInCooldown()) return localQuery(text, params, null);
     try {
       const res = await realPool.query(textOrConfig as string, values);
       clearPgCooldown();
@@ -3087,7 +3988,7 @@ export const pool = {
     } catch (err) {
       if (isConnectionError(err)) {
         markPgUnavailable();
-        return localQuery(text, params);
+        return localQuery(text, params, null);
       }
       throw err;
     }
@@ -3119,18 +4020,61 @@ function isConnectionError(err: unknown): boolean {
 }
 
 /**
- * Run a callback on a connection pinned to one organisation.
+ * Run a callback on a connection pinned to one organisation using
+ * transaction-local SET LOCAL ROLE + set_config(..., true).
  *
- * Both halves matter. SET ROLE makes the policies apply; app.current_org tells
- * them which tenant. Passing null for the org is not a bypass — it is the
- * fail-closed case, where every tenant-scoped table returns zero rows.
+ * Transaction-local scoping is safe under modern connection poolers
+ * (PgBouncer / Cloud SQL / Neon transaction pooling) because the tenant
+ * context automatically vanishes at COMMIT/ROLLBACK, and we also reset
+ * on pool release as defense-in-depth.
+ *
+ * Passing null for orgId is fail-closed: every tenant-scoped table returns
+ * zero rows and blocks mutations.
  */
+let warnedMissingAppRole = false;
+
+/**
+ * Run idempotent DDL statements as the main pool connection owner (outside
+ * `logistics_app`) when PostgreSQL is active. Safe no-op in local store mode.
+ */
+export async function runSchemaCompatDdl(
+  statements: readonly string[],
+): Promise<void> {
+  if (!realPool || isPgInCooldown()) return;
+  let client: PoolClient;
+  try {
+    client = await realPool.connect();
+    clearPgCooldown();
+  } catch (err) {
+    if (isConnectionError(err)) {
+      markPgUnavailable();
+      return;
+    }
+    throw err;
+  }
+  try {
+    for (const stmt of statements) {
+      try {
+        await client.query(stmt);
+      } catch (err) {
+        const code = (err as { code?: string })?.code;
+        // Ignore duplicate/already-exists or insufficient-privilege on locked roles
+        if (code !== "42501" && code !== "42P07" && code !== "42701") {
+          console.warn("db: schema compat statement skipped:", code ?? err);
+        }
+      }
+    }
+  } finally {
+    client.release();
+  }
+}
+
 async function withScope<T>(
   orgId: string | null,
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
   if (!realPool || isPgInCooldown()) {
-    return fn(createLocalClient());
+    return fn(createLocalClient(orgId));
   }
 
   let client: PoolClient;
@@ -3140,21 +4084,46 @@ async function withScope<T>(
   } catch (err) {
     if (isConnectionError(err)) {
       markPgUnavailable();
-      return fn(createLocalClient());
+      return fn(createLocalClient(orgId));
     }
     throw err;
   }
   try {
-    await client.query(`SET ROLE ${APP_ROLE}`);
-    await client.query("SELECT set_config('app.current_org', $1, false)", [
+    await client.query("BEGIN");
+    await client.query("SAVEPOINT sp_app_role");
+    try {
+      await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+      await client.query("RELEASE SAVEPOINT sp_app_role");
+    } catch (roleErr) {
+      const code = (roleErr as { code?: string })?.code;
+      if (code === "42704" || code === "28000" || code === "42501") {
+        await client.query("ROLLBACK TO SAVEPOINT sp_app_role");
+        await client.query("RELEASE SAVEPOINT sp_app_role");
+        if (!warnedMissingAppRole) {
+          warnedMissingAppRole = true;
+          console.warn(
+            `db: role "${APP_ROLE}" unavailable (${code}); continuing with session connection role.`,
+          );
+        }
+      } else {
+        throw roleErr;
+      }
+    }
+    await client.query("SELECT set_config('app.current_org', $1, true)", [
       orgId ?? "",
     ]);
-    return await fn(client);
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Connection error during rollback will retire the connection below
+    }
+    throw error;
   } finally {
-    // Connections are reused. Without this the next request inherits the
-    // previous tenant's scope, which is the exact leak the design exists to
-    // prevent — so a failure here must retire the connection rather than
-    // return it to the pool.
+    // Defense-in-depth: also reset session state before returning to the pool.
     try {
       await client.query(
         "RESET ROLE; SELECT set_config('app.current_org', '', false)",
@@ -3173,6 +4142,10 @@ export function runWithOrgScope<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   return orgScopeStorage.run(orgId, fn);
+}
+
+export function getCurrentScopedOrgId(): string | null {
+  return orgScopeStorage.getStore() ?? null;
 }
 
 async function resolveCurrentOrgId(): Promise<string | null> {
@@ -3206,20 +4179,16 @@ export async function query<T = Record<string, unknown>>(
 /**
  * `query` for a caller that already knows its organisation.
  *
- * For the SSE stream. That runs long after the response headers are sent,
- * where `cookies()` is no longer available to read — and re-resolving the
- * session on every poll would mean two extra queries per client per tick for
- * an answer that cannot have changed.
- *
- * The org must come from a resolved session. Passing one in from a request
- * parameter would hand any caller any tenant's data, which is the single
- * mistake this whole layer exists to make impossible.
+ * The org must come from a verified server-side session or credential.
  */
 export async function queryAs<T = Record<string, unknown>>(
   orgId: string,
   text: string,
   params: unknown[] = [],
 ): Promise<T[]> {
+  if (!orgId?.trim()) {
+    throw new Error("queryAs requires a verified workspace orgId.");
+  }
   return withScope(orgId, async (client) => {
     const result = await client.query(text, params);
     return result.rows as T[];
@@ -3227,36 +4196,34 @@ export async function queryAs<T = Record<string, unknown>>(
 }
 
 /**
- * A multi-statement transaction, scoped like `query`.
- *
- * For server actions that write more than one row and need them to land
- * together — deciding an approval writes three.
+ * A multi-statement transaction, scoped with transaction-local RLS.
+ * In local JSON fallback mode, snapshots the store before execution and
+ * atomically restores it if any statement inside the transaction throws.
  */
 export async function transaction<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
   const orgId = await resolveCurrentOrgId();
-  return withScope(orgId, async (client) => {
-    await client.query("BEGIN");
+  if (!realPool || isPgInCooldown()) {
+    const snapshot = JSON.stringify(getLocalStore());
     try {
-      const result = await fn(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
+      return await fn(createLocalClient(orgId));
+    } catch (err) {
+      try {
+        const restored = reviveLocalStore(JSON.parse(snapshot));
+        saveLocalStore(restored);
+      } catch {
+        // Best-effort restore if serialization fails
+      }
+      throw err;
     }
-  });
+  }
+  return withScope(orgId, fn);
 }
 
 /**
- * For `users`, `sessions` and `organisations` only — the three tables outside
- * row-level security, because resolving who someone is has to happen before
- * there is an organisation to scope to.
- *
- * Every caller keys on something unguessable or globally unique: a session
- * token, an email, an org slug. It runs as the unprivileged role like
- * everything else; it simply has no org to set yet.
+ * For `users`, `sessions`, `organisations`, `password_resets`, and connector
+ * API-key authentication — identity lookups that happen before an org is known.
  */
 export async function identityQuery<T = Record<string, unknown>>(
   text: string,
@@ -3266,6 +4233,26 @@ export async function identityQuery<T = Record<string, unknown>>(
     const result = await client.query(text, params);
     return result.rows as T[];
   });
+}
+
+/** Test-only helper to inspect or reset local fallback state in automated security tests. */
+export function resetLocalStoreForTests(): void {
+  globalForPg.logisticsLocalStore = {
+    orgs: [],
+    users: [],
+    sessions: [],
+    resets: [],
+    invitations: [],
+    tacticsByOrg: {},
+    configsByOrg: {},
+    thirdPartyClientsByOrg: {},
+    internationalFreightByOrg: {},
+    rateLimits: [],
+    webhookDeliveries: [],
+    dataByOrg: {},
+    pendingLegacyData: null,
+  };
+  saveLocalStore(globalForPg.logisticsLocalStore);
 }
 
 /** True when Postgres is reachable — lets pages show a real message instead

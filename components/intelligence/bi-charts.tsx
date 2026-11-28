@@ -11,6 +11,8 @@ import type {
 
 type ForecastMetric = "shipments" | "spend" | "co2e" | "unit_cost";
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 const METRIC_META: Record<
   ForecastMetric,
   { label: string; color: string; shortUnit: (currency: string) => string }
@@ -111,10 +113,12 @@ export function BiForecastChart({
   ) * 1.12;
 
   const xOf = (idx: number) =>
-    series.length <= 1
-      ? padL + plotW / 2
-      : padL + (idx / (series.length - 1)) * plotW;
-  const yOf = (val: number) => padT + plotH - (val / maxVal) * plotH;
+    round2(
+      series.length <= 1
+        ? padL + plotW / 2
+        : padL + (idx / (series.length - 1)) * plotW,
+    );
+  const yOf = (val: number) => round2(padT + plotH - (val / maxVal) * plotH);
 
   const firstForecastIdx = series.findIndex((s) => s.point.isForecast);
   const splitIdx = firstForecastIdx > 0 ? firstForecastIdx - 1 : -1;
@@ -169,7 +173,7 @@ export function BiForecastChart({
 
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => ({
     val: maxVal * ratio,
-    y: padT + plotH * (1 - ratio),
+    y: round2(padT + plotH * (1 - ratio)),
   }));
 
   const labelStep = Math.max(1, Math.ceil(series.length / 7));
@@ -328,9 +332,9 @@ export function BiForecastChart({
                   strokeWidth="2"
                 />
                 <rect
-                  x={cx - Math.max(8, plotW / Math.max(1, series.length) / 2)}
+                  x={round2(cx - Math.max(8, plotW / Math.max(1, series.length) / 2))}
                   y={padT}
-                  width={Math.max(16, plotW / Math.max(1, series.length))}
+                  width={round2(Math.max(16, plotW / Math.max(1, series.length)))}
                   height={plotH}
                   fill="transparent"
                   className="bi-hit-target"
@@ -399,11 +403,12 @@ export function BiDynamicChart({ chart }: { chart: BiChartSpec }) {
     const plotH = h - padT - padB;
     const pts = chart.points.map((p, i) => ({
       ...p,
-      x:
+      x: round2(
         chart.points.length <= 1
           ? padL + plotW / 2
           : padL + (i / (chart.points.length - 1)) * plotW,
-      y: padT + plotH - (Math.max(0, p.value) / (maxVal * 1.15)) * plotH,
+      ),
+      y: round2(padT + plotH - (Math.max(0, p.value) / (maxVal * 1.15)) * plotH),
     }));
     const d = pts
       .map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
@@ -421,7 +426,7 @@ export function BiDynamicChart({ chart }: { chart: BiChartSpec }) {
         </div>
         <svg viewBox={`0 0 ${w} ${h}`} className="bi-svg-chart" role="img" aria-label={chart.title}>
           {[0, 0.5, 1].map((r, idx) => {
-            const y = padT + plotH * (1 - r);
+            const y = round2(padT + plotH * (1 - r));
             return (
               <line
                 key={idx}
@@ -467,7 +472,7 @@ export function BiDynamicChart({ chart }: { chart: BiChartSpec }) {
       </div>
       <div className="bi-hbar-list">
         {chart.points.map((pt, idx) => {
-          const pct = Math.max(4, Math.min(100, (Math.abs(pt.value) / maxVal) * 100));
+          const pct = Math.max(4, Math.min(100, (Math.abs(pt.value) / maxVal) * 100)).toFixed(2);
           return (
             <div key={`${pt.label}-${idx}`} className="bi-hbar-row">
               <div className="bi-hbar-meta">

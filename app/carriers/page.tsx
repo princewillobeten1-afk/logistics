@@ -1,5 +1,8 @@
 import { Empty, Offline, Panel, Pill } from "@/app/components";
 import { AddCarrierForm, StarterNetworkButton } from "@/components/network-crud";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
+import { paginateArray } from "@/lib/pagination";
 import { listCarriers } from "@/lib/queries";
 import { WEIGHTS, num, scoreCarrier } from "@/lib/scoring";
 
@@ -9,7 +12,12 @@ function pct(value: number | null): string {
   return value === null ? "—" : `${(value * 100).toFixed(0)}%`;
 }
 
-export default async function Carriers() {
+export default async function Carriers({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string; pageSize?: string }>;
+}) {
+  const { q, page, pageSize } = await searchParams;
   let carriers;
   try {
     carriers = await listCarriers();
@@ -36,6 +44,16 @@ export default async function Carriers() {
       }),
     }))
     .sort((a, b) => b.score.normalised - a.score.normalised);
+
+  const paged = paginateArray(scored, {
+    q,
+    page,
+    pageSize,
+    matcher: ({ carrier: c }, needle) =>
+      `${c.name} ${c.code} ${c.integration} ${(c.modes ?? []).join(" ")}`
+        .toLowerCase()
+        .includes(needle),
+  });
 
   return (
     <>
@@ -123,84 +141,119 @@ export default async function Carriers() {
         </Panel>
       </div>
 
-      <Panel title="Carriers by quality score" hint="cost excluded — no live quotes" flush>
-        {carriers.length === 0 ? (
+      <TableSearchBar
+        basePath="/carriers"
+        initialQuery={paged.query}
+        pageSize={paged.pageSize}
+        placeholder="Search carrier name, code, mode, or integration…"
+        label="Search carriers"
+        summaryText={
+          paged.total === 0
+            ? "0 matching carriers"
+            : `Showing ${paged.startIndex}–${paged.endIndex} of ${paged.total.toLocaleString()} carriers`
+        }
+      />
+
+      <Panel
+        title="Carriers by quality score"
+        hint={`${paged.total.toLocaleString()} matching · page ${paged.page} of ${paged.totalPages}`}
+        flush
+      >
+        {paged.items.length === 0 ? (
           <Empty
-            message="No carriers yet"
-            hint="Your carrier network is set up by an administrator. Once carriers are added, their on-time and damage records build up here as they run jobs."
+            message={paged.query ? "No matching carriers" : "No carriers yet"}
+            hint={
+              paged.query
+                ? "Try clearing your search filter to view all registered carriers."
+                : "Your carrier network is set up by an administrator. Once carriers are added, their on-time and damage records build up here as they run jobs."
+            }
           />
         ) : (
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Carriers by quality score"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Carrier</th>
-                  <th scope="col">Modes</th>
-                  <th scope="col">Integration</th>
-                  <th scope="col">Approved</th>
-                  <th scope="col">On-time</th>
-                  <th scope="col">Damage</th>
-                  <th scope="col">Availability</th>
-                  <th scope="col">Service</th>
-                  <th scope="col">Quality score</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scored.map(({ carrier: c, score }) => {
-                  const tone =
-                    score.normalised >= 0.85
-                      ? undefined
-                      : score.normalised >= 0.7
-                        ? "warn"
-                        : "alert";
-                  return (
-                    <tr key={c.id}>
-                      <td>
-                        <div className="font-semibold">{c.name}</div>
-                        <div className="num text-faint text-xs">
-                          {c.code}
-                        </div>
-                      </td>
-                      <td className="num">{(c.modes ?? []).join(", ")}</td>
-                      <td>
-                        <Pill state={c.integration} />
-                      </td>
-                      <td>
-                        {c.approved ? (
-                          <Pill state="OK" />
-                        ) : (
-                          <Pill state="ALERT" />
-                        )}
-                      </td>
-                      <td className="num">{pct(num(c.on_time_rate))}</td>
-                      <td
-                        className={`num${(num(c.damage_rate) ?? 0) > 0.05 ? " text-crit" : ""}`}
-                      >
-                        {pct(num(c.damage_rate))}
-                      </td>
-                      <td className="num">{pct(num(c.availability_rate))}</td>
-                      <td className="num">{pct(num(c.service_score))}</td>
-                      <td>
-                        <div className="row-center">
-                          <span className="bar" data-tone={tone}>
-                            <span style={{ width: `${score.normalised * 100}%` }} />
-                          </span>
-                          <span className="num text-xs" style={{ minWidth: 34 }}>
-                            {(score.normalised * 100).toFixed(0)}
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Carriers by quality score"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Carrier</th>
+                    <th scope="col">Modes</th>
+                    <th scope="col">Integration</th>
+                    <th scope="col">Approved</th>
+                    <th scope="col">On-time</th>
+                    <th scope="col">Damage</th>
+                    <th scope="col">Availability</th>
+                    <th scope="col">Service</th>
+                    <th scope="col">Quality score</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paged.items.map(({ carrier: c, score }) => {
+                    const tone =
+                      score.normalised >= 0.85
+                        ? undefined
+                        : score.normalised >= 0.7
+                          ? "warn"
+                          : "alert";
+                    return (
+                      <tr key={c.id}>
+                        <td>
+                          <div className="font-semibold">{c.name}</div>
+                          <div className="num text-faint text-xs">
+                            {c.code}
+                          </div>
+                        </td>
+                        <td className="num">{(c.modes ?? []).join(", ")}</td>
+                        <td>
+                          <Pill state={c.integration} />
+                        </td>
+                        <td>
+                          {c.approved ? (
+                            <Pill state="OK" />
+                          ) : (
+                            <Pill state="ALERT" />
+                          )}
+                        </td>
+                        <td className="num">{pct(num(c.on_time_rate))}</td>
+                        <td
+                          className={`num${(num(c.damage_rate) ?? 0) > 0.05 ? " text-crit" : ""}`}
+                        >
+                          {pct(num(c.damage_rate))}
+                        </td>
+                        <td className="num">{pct(num(c.availability_rate))}</td>
+                        <td className="num">{pct(num(c.service_score))}</td>
+                        <td>
+                          <div className="row-center">
+                            <span className="bar" data-tone={tone}>
+                              <span style={{ width: `${score.normalised * 100}%` }} />
+                            </span>
+                            <span className="num text-xs" style={{ minWidth: 34 }}>
+                              {(score.normalised * 100).toFixed(0)}
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <PaginationBar
+              basePath="/carriers"
+              page={paged.page}
+              pageSize={paged.pageSize}
+              total={paged.total}
+              totalPages={paged.totalPages}
+              startIndex={paged.startIndex}
+              endIndex={paged.endIndex}
+              queryParams={{ q: paged.query || undefined }}
+              itemLabel="carriers"
+            />
+          </>
         )}
       </Panel>
 

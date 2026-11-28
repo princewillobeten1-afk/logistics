@@ -597,7 +597,7 @@ export function HeroWorkflowShowcase() {
                       </div>
                       <div className="lp-stage-kpi">
                         <span>Projected Cost</span>
-                        <strong>${activeCorridor.costUsd.toLocaleString()}</strong>
+                        <strong>${activeCorridor.costUsd.toLocaleString("en-US")}</strong>
                       </div>
                     </div>
 
@@ -681,7 +681,7 @@ export function HeroWorkflowShowcase() {
 
                         <div className="lp-dark-bid-score-col">
                           <div className="lp-dark-bid-nums">
-                            <span className="lp-dark-bid-price">${bid.quoteUsd.toLocaleString()}</span>
+                            <span className="lp-dark-bid-price">${bid.quoteUsd.toLocaleString("en-US")}</span>
                             <strong className="lp-dark-bid-pts">{bid.total} pts</strong>
                           </div>
                           <div className="lp-dark-bar-track" aria-hidden="true">
@@ -735,7 +735,7 @@ export function HeroWorkflowShowcase() {
                   </div>
                   <div className="lp-recovery-flow-node">
                     <span>02 · Backup Quote</span>
-                    <strong>${recoveryQuoteUsd.toLocaleString()}</strong>
+                    <strong>${recoveryQuoteUsd.toLocaleString("en-US")}</strong>
                   </div>
                   <div className={`lp-recovery-flow-node${recoveryApproved ? " is-ok" : " is-held"}`}>
                     <span>03 · Policy Gate</span>
@@ -750,7 +750,7 @@ export function HeroWorkflowShowcase() {
                         <SlidersHorizontal size={13} aria-hidden="true" />
                         Autonomous Spend Ceiling
                       </label>
-                      <strong>${spendCap.toLocaleString()}</strong>
+                      <strong>${spendCap.toLocaleString("en-US")}</strong>
                     </div>
                     <input
                       id="hero-spend-cap"
@@ -771,7 +771,7 @@ export function HeroWorkflowShowcase() {
                     </div>
                     <div className="lp-recovery-bounds">
                       <span>$2,500 strict</span>
-                      <span>Quote: ${recoveryQuoteUsd.toLocaleString()}</span>
+                      <span>Quote: ${recoveryQuoteUsd.toLocaleString("en-US")}</span>
                       <span>$6,000 flexible</span>
                     </div>
                   </div>
@@ -794,8 +794,8 @@ export function HeroWorkflowShowcase() {
                     </div>
                     <p>
                       {recoveryApproved
-                        ? `Recovery tender ($${recoveryQuoteUsd.toLocaleString()}) clears the $${spendCap.toLocaleString()} policy cap. Backup carrier booked and consignee ETA updated automatically.`
-                        : `Expedited backup quote ($${recoveryQuoteUsd.toLocaleString()}) exceeds your $${spendCap.toLocaleString()} autonomous ceiling by $${(recoveryQuoteUsd - spendCap).toLocaleString()}. Tender held safely for one-tap review.`}
+                        ? `Recovery tender ($${recoveryQuoteUsd.toLocaleString("en-US")}) clears the $${spendCap.toLocaleString("en-US")} policy cap. Backup carrier booked and consignee ETA updated automatically.`
+                        : `Expedited backup quote ($${recoveryQuoteUsd.toLocaleString("en-US")}) exceeds your $${spendCap.toLocaleString("en-US")} autonomous ceiling by $${(recoveryQuoteUsd - spendCap).toLocaleString("en-US")}. Tender held safely for one-tap review.`}
                     </p>
                   </div>
                 </div>

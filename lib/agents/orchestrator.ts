@@ -1,5 +1,6 @@
-import { query } from "@/lib/db";
+import { getCurrentScopedOrgId, query } from "@/lib/db";
 import { matchBestConveyance } from "@/lib/planning";
+import { assertVerifiedOrgId } from "@/lib/tenant-guard";
 import {
   AGENT_DOMAINS,
   CORE_AGENTS,
@@ -11,7 +12,7 @@ import {
   type CoreAgentDefinition,
   type CoreAgentId,
 } from "./catalog";
-import { gatherOperationalContext } from "./context";
+import { gatherOperationalContext, type AgentUserScope } from "./context";
 import {
   generateAgentJson,
   getActiveModelName,
@@ -252,6 +253,7 @@ function buildSpecialistSystemInstruction(agent: CoreAgentDefinition): string {
     `Core Capabilities: ${agent.capabilities.join("; ")}.`,
     `Target Frontend Workspace: ${agent.targetRoute} (${agent.targetLabel}).`,
     "Instructions:",
+    "- STRICT TENANT ISOLATION: Operate exclusively on the verified workspace snapshot provided. Never reference, speculate about, or extrapolate records from any other company or workspace.",
     "- Base every finding and recommendation strictly on the live operational JSON snapshot provided.",
     "- Be concise: write 1-2 short sentences for summary, 2-4 crisp bullet findings, and 2-4 prioritized recommendedActions.",
     "- Never invent shipment references, carrier codes, or dollar/NGN figures not present in the snapshot.",
@@ -276,13 +278,16 @@ export async function executeAgentTask({
   reference,
   actorEmail,
   timeoutMs,
+  userScope,
 }: {
   agentId: CoreAgentId;
   task: string;
   reference?: string;
   actorEmail?: string | null;
   timeoutMs?: number;
+  userScope?: AgentUserScope;
 }): Promise<ExecuteAgentTaskOutput> {
+  assertVerifiedOrgId(getCurrentScopedOrgId(), "executeAgentTask");
   const agent = getAgentById(agentId);
   if (!agent) {
     throw new Error(`Unknown agent id: ${agentId}`);
@@ -292,6 +297,7 @@ export async function executeAgentTask({
   const { snapshot, shipmentId, resolvedReference } = await gatherOperationalContext(
     agentId,
     reference,
+    userScope,
   );
 
   // Orchestrator performs deterministic specialist delegation + multi-domain AI synthesis
@@ -327,7 +333,7 @@ export async function executeAgentTask({
           def.id === "exception-resolution" || def.id === "human-escalation";
         const subCtx = sharesOrchestratorScope
           ? { snapshot: null, shipmentId, resolvedReference }
-          : await gatherOperationalContext(def.id, reference);
+          : await gatherOperationalContext(def.id, reference, userScope);
         return { def, subtask, subCtx };
       }),
     );
@@ -513,6 +519,7 @@ export async function runShipmentAssistantWithGemini({
   confidence: number;
   meta: GeminiGenerationMeta;
 }> {
+  assertVerifiedOrgId(getCurrentScopedOrgId(), "runShipmentAssistantWithGemini");
   const { snapshot } = await gatherOperationalContext("shipment-management", reference);
   const compactContext = {
     focusShipment: snapshot.focusShipment ?? null,
@@ -616,6 +623,7 @@ export async function runCustomerSupportWithGemini({
   autonomousHandoff: SupportAutonomousHandoff;
   meta: GeminiGenerationMeta;
 }> {
+  assertVerifiedOrgId(getCurrentScopedOrgId(), "runCustomerSupportWithGemini");
   const { snapshot } = await gatherOperationalContext(
     "ai-customer-support",
     reference ?? undefined,
@@ -775,6 +783,7 @@ export async function runFleetOptimizationWithGemini(): Promise<{
   updatedCount: number;
   updatedReferences: string[];
 }> {
+  assertVerifiedOrgId(getCurrentScopedOrgId(), "runFleetOptimizationWithGemini");
   const startedAt = Date.now();
   const { listShipments, listConveyances, listDrivers, listLocations } = await import("@/lib/queries");
   const { findNearbyDrivers, resolveCityCoordinates } = await import("@/lib/driver-dispatch");

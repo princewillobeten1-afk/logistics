@@ -1,6 +1,6 @@
 import { after, NextRequest, NextResponse } from "next/server";
-import { scheduleBackgroundAgent } from "@/lib/agents/background";
-import { currentUser } from "@/lib/auth";
+import { currentUser, may } from "@/lib/auth";
+import { detectWorkspaceTampering, hasDepartmentAccess } from "@/lib/tenant-guard";
 
 type GmailHeader = { name?: string; value?: string };
 type GmailMessagePayload = {
@@ -23,6 +23,21 @@ export async function GET(req: NextRequest) {
   const sessionUser = await currentUser();
   if (!sessionUser) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, sessionUser.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+
+  if (
+    !hasDepartmentAccess(sessionUser, "SUPPORT") &&
+    !hasDepartmentAccess(sessionUser, "CUSTOMERS")
+  ) {
+    return NextResponse.json(
+      { error: "Your account is not authorized to access workspace communications." },
+      { status: 403 },
+    );
   }
 
   const authHeader = req.headers.get("Authorization");
@@ -108,7 +123,9 @@ export async function GET(req: NextRequest) {
   );
 
   const unreadMessages = messages.filter((m) => m.unread);
-  if (unreadMessages.length > 0) {
+  const canAutoTriage =
+    may(sessionUser.role, "EDIT_SHIPMENT") || may(sessionUser.role, "ADMINISTER");
+  if (unreadMessages.length > 0 && canAutoTriage) {
     const digest = unreadMessages
       .slice(0, 3)
       .map((m) => `${m.subject} (${m.from}): ${m.snippet.slice(0, 120)}`)

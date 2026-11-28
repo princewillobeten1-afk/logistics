@@ -53,7 +53,8 @@ export async function POST(req: NextRequest) {
       { companyName, name, email, password },
       { ip, userAgent },
     );
-  } catch {
+  } catch (err) {
+    console.error("[auth/signup] signUp failed", err);
     return NextResponse.json(
       {
         ok: false,

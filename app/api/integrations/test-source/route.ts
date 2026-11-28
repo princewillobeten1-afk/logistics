@@ -5,6 +5,7 @@ import {
   testAndFetchExternalApi,
 } from "@/lib/integrations/pull-sync";
 import { verifySameOriginRequest } from "@/lib/integrations/security";
+import { detectWorkspaceTampering } from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,10 @@ export async function POST(req: NextRequest) {
   const user = await currentUser();
   if (!user) {
     return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+  }
+  const tamper = detectWorkspaceTampering(req, user.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
   if (!may(user.role, "ADMINISTER") && !may(user.role, "EDIT_SHIPMENT")) {
     return NextResponse.json(

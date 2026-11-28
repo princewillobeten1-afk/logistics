@@ -28,7 +28,7 @@ import { executeAgentTask, runFleetOptimizationWithGemini } from "./orchestrator
 import { handleFrontendLogisticsAction } from "../controllers/action-controller";
 import { isHttpsRequest, type SessionUser } from "../auth";
 import { sanitizeAuditEntityId, sanitizeAuditIp } from "../audit";
-import { query } from "../db";
+import { query, runWithOrgScope } from "../db";
 import { openExceptions } from "../queries";
 
 const ADMIN_USER: SessionUser = {
@@ -38,6 +38,8 @@ const ADMIN_USER: SessionUser = {
   email: "jaykvngs2@gmail.com",
   name: "Admin Operator",
   role: "ADMIN",
+  departments: [],
+  branchCodes: [],
 };
 
 const VIEWER_USER: SessionUser = {
@@ -405,22 +407,24 @@ test("all 15 core agents execute autonomously through NVIDIA Nemotron and record
       { NVIDIA_API_KEY: "nvapi-agents-suite", GEMINI_API_KEY: undefined },
       async () => {
         assert.equal(CORE_AGENTS.length, 15);
-        for (const agent of CORE_AGENTS) {
-          const out = await executeAgentTask({
-            agentId: agent.id as CoreAgentId,
-            task: agent.quickPrompts[0],
-            actorEmail: ADMIN_USER.email,
-          });
-          assert.equal(out.agent.id, agent.id);
-          assert.equal(out.meta.model, DEFAULT_NVIDIA_MODEL);
-          assert.ok(out.result.summary.length > 0);
-          assert.ok(out.result.confidence >= 0.05 && out.result.confidence <= 1);
-          if (agent.id === "orchestrator") {
-            assert.ok(
-              Array.isArray(out.result.delegations) && out.result.delegations.length > 0,
-            );
+        await runWithOrgScope(ADMIN_USER.orgId, async () => {
+          for (const agent of CORE_AGENTS) {
+            const out = await executeAgentTask({
+              agentId: agent.id as CoreAgentId,
+              task: agent.quickPrompts[0],
+              actorEmail: ADMIN_USER.email,
+            });
+            assert.equal(out.agent.id, agent.id);
+            assert.equal(out.meta.model, DEFAULT_NVIDIA_MODEL);
+            assert.ok(out.result.summary.length > 0);
+            assert.ok(out.result.confidence >= 0.05 && out.result.confidence <= 1);
+            if (agent.id === "orchestrator") {
+              assert.ok(
+                Array.isArray(out.result.delegations) && out.result.delegations.length > 0,
+              );
+            }
           }
-        }
+        });
       },
     );
   } finally {
@@ -469,98 +473,100 @@ test("extractOrderFieldsFromText recognizes multi-carrier logistics tracking num
 
 test("dispatchToAutonomousAgent enqueues PENDING planning.plan & wpcargo.sync and merges replan without losing plan fields", async () => {
   await withEnv({ NVIDIA_API_KEY: undefined, GEMINI_API_KEY: undefined }, async () => {
-    const created = await dispatchToAutonomousAgent({
-      sourceChannel: "WEB_FORM_ORDER",
-      message: "Ship 25 cartons of routers (400 kg) from Lagos to Accra",
-      orgId: ADMIN_USER.orgId,
-      actorEmail: ADMIN_USER.email,
-      structured: {
-        originCity: "Lagos",
-        destinationCity: "Accra",
-        cargoDescription: "Network routers",
-        weightKg: 400,
-        quantity: 25,
-      },
+    await runWithOrgScope(ADMIN_USER.orgId, async () => {
+      const created = await dispatchToAutonomousAgent({
+        sourceChannel: "WEB_FORM_ORDER",
+        message: "Ship 25 cartons of routers (400 kg) from Lagos to Accra",
+        orgId: ADMIN_USER.orgId,
+        actorEmail: ADMIN_USER.email,
+        structured: {
+          originCity: "Lagos",
+          destinationCity: "Accra",
+          cargoDescription: "Network routers",
+          weightKg: 400,
+          quantity: 25,
+        },
+      });
+      assert.ok(created.shipmentReference);
+      assert.ok(created.shipmentId);
+
+      const pendingItems = await query<{ kind: string; state: string; reference: string | null }>(
+        `SELECT w.id, w.kind, w.state, s.reference
+           FROM work_items w
+           LEFT JOIN shipments s ON s.id = w.shipment_id
+          WHERE w.state IN ('PENDING','RUNNING')`,
+      );
+      const forShipment = pendingItems.filter(
+        (w) => w.reference === created.shipmentReference,
+      );
+      assert.ok(
+        forShipment.some((w) => w.kind === "planning.plan" && w.state === "PENDING"),
+        "New shipment must enqueue PENDING planning.plan for Python cuOpt worker",
+      );
+      assert.ok(
+        forShipment.some((w) => w.kind === "wpcargo.sync" && w.state === "PENDING"),
+        "New shipment must enqueue PENDING wpcargo.sync for WPCargo portal registration",
+      );
+
+      // Replan must merge plan JSONB, preserving lane_label/distance_km
+      const replanned = await dispatchToAutonomousAgent({
+        sourceChannel: "WEB_FORM_PLANNING",
+        intentHint: "PLANNING_ROUTING",
+        message: `Reroute ${created.shipmentReference} via expressway`,
+        reference: created.shipmentReference,
+        orgId: ADMIN_USER.orgId,
+        actorEmail: ADMIN_USER.email,
+        structured: { preferredMode: "ROAD", notes: "Avoid Apapa congestion" },
+      });
+      assert.equal(replanned.shipmentReference, created.shipmentReference);
+
+      const rows = await query<{
+        reference: string;
+        plan: Record<string, unknown>;
+      }>(`SELECT reference, state, origin, destination, plan, booking FROM shipments WHERE upper(reference) = $1 LIMIT 1`, [
+        created.shipmentReference.toUpperCase(),
+      ]);
+      assert.equal(rows[0].plan.lane_label, "Lagos → Accra");
+      assert.equal(rows[0].plan.reroute_requested, true);
+
+      // Duplicate exception reports must deduplicate cleanly instead of failing
+      await dispatchToAutonomousAgent({
+        sourceChannel: "WEBSITE_CHAT",
+        intentHint: "EXCEPTION_REPORT",
+        message: `Damaged cartons reported on ${created.shipmentReference}`,
+        reference: created.shipmentReference,
+        orgId: ADMIN_USER.orgId,
+        actorEmail: ADMIN_USER.email,
+      });
+      await dispatchToAutonomousAgent({
+        sourceChannel: "WEBSITE_CHAT",
+        intentHint: "EXCEPTION_REPORT",
+        message: `Second follow-up on damage for ${created.shipmentReference}`,
+        reference: created.shipmentReference,
+        orgId: ADMIN_USER.orgId,
+        actorEmail: ADMIN_USER.email,
+      });
+      const excs = (await openExceptions()).filter(
+        (e) => e.reference === created.shipmentReference && e.kind === "CUSTOMER_REPORTED",
+      );
+      assert.equal(excs.length, 1, "Duplicate customer exception reports must upsert one open exception");
+
+      const afterExcWork = await query<{ kind: string; state: string; reference: string | null }>(
+        `SELECT w.id, w.kind, w.state, s.reference
+           FROM work_items w
+           LEFT JOIN shipments s ON s.id = w.shipment_id
+          WHERE w.state IN ('PENDING','RUNNING')`,
+      );
+      assert.ok(
+        afterExcWork.some(
+          (w) =>
+            w.reference === created.shipmentReference &&
+            w.kind === "exception.investigate" &&
+            w.state === "PENDING",
+        ),
+        "Exception report must enqueue PENDING exception.investigate for Python Exception Agent",
+      );
     });
-    assert.ok(created.shipmentReference);
-    assert.ok(created.shipmentId);
-
-    const pendingItems = await query<{ kind: string; state: string; reference: string | null }>(
-      `SELECT w.id, w.kind, w.state, s.reference
-         FROM work_items w
-         LEFT JOIN shipments s ON s.id = w.shipment_id
-        WHERE w.state IN ('PENDING','RUNNING')`,
-    );
-    const forShipment = pendingItems.filter(
-      (w) => w.reference === created.shipmentReference,
-    );
-    assert.ok(
-      forShipment.some((w) => w.kind === "planning.plan" && w.state === "PENDING"),
-      "New shipment must enqueue PENDING planning.plan for Python cuOpt worker",
-    );
-    assert.ok(
-      forShipment.some((w) => w.kind === "wpcargo.sync" && w.state === "PENDING"),
-      "New shipment must enqueue PENDING wpcargo.sync for WPCargo portal registration",
-    );
-
-    // Replan must merge plan JSONB, preserving lane_label/distance_km
-    const replanned = await dispatchToAutonomousAgent({
-      sourceChannel: "WEB_FORM_PLANNING",
-      intentHint: "PLANNING_ROUTING",
-      message: `Reroute ${created.shipmentReference} via expressway`,
-      reference: created.shipmentReference,
-      orgId: ADMIN_USER.orgId,
-      actorEmail: ADMIN_USER.email,
-      structured: { preferredMode: "ROAD", notes: "Avoid Apapa congestion" },
-    });
-    assert.equal(replanned.shipmentReference, created.shipmentReference);
-
-    const rows = await query<{
-      reference: string;
-      plan: Record<string, unknown>;
-    }>(`SELECT reference, state, origin, destination, plan, booking FROM shipments WHERE upper(reference) = $1 LIMIT 1`, [
-      created.shipmentReference.toUpperCase(),
-    ]);
-    assert.equal(rows[0].plan.lane_label, "Lagos → Accra");
-    assert.equal(rows[0].plan.reroute_requested, true);
-
-    // Duplicate exception reports must deduplicate cleanly instead of failing
-    await dispatchToAutonomousAgent({
-      sourceChannel: "WEBSITE_CHAT",
-      intentHint: "EXCEPTION_REPORT",
-      message: `Damaged cartons reported on ${created.shipmentReference}`,
-      reference: created.shipmentReference,
-      orgId: ADMIN_USER.orgId,
-      actorEmail: ADMIN_USER.email,
-    });
-    await dispatchToAutonomousAgent({
-      sourceChannel: "WEBSITE_CHAT",
-      intentHint: "EXCEPTION_REPORT",
-      message: `Second follow-up on damage for ${created.shipmentReference}`,
-      reference: created.shipmentReference,
-      orgId: ADMIN_USER.orgId,
-      actorEmail: ADMIN_USER.email,
-    });
-    const excs = (await openExceptions()).filter(
-      (e) => e.reference === created.shipmentReference && e.kind === "CUSTOMER_REPORTED",
-    );
-    assert.equal(excs.length, 1, "Duplicate customer exception reports must upsert one open exception");
-
-    const afterExcWork = await query<{ kind: string; state: string; reference: string | null }>(
-      `SELECT w.id, w.kind, w.state, s.reference
-         FROM work_items w
-         LEFT JOIN shipments s ON s.id = w.shipment_id
-        WHERE w.state IN ('PENDING','RUNNING')`,
-    );
-    assert.ok(
-      afterExcWork.some(
-        (w) =>
-          w.reference === created.shipmentReference &&
-          w.kind === "exception.investigate" &&
-          w.state === "PENDING",
-      ),
-      "Exception report must enqueue PENDING exception.investigate for Python Exception Agent",
-    );
   });
 });
 
@@ -766,7 +772,9 @@ test("runFleetOptimizationWithGemini never double-assigns vehicles or violates h
     await withEnv(
       { NVIDIA_API_KEY: "nvapi-fleet-test", GEMINI_API_KEY: undefined },
       async () => {
-        const res = await runFleetOptimizationWithGemini();
+        const res = await runWithOrgScope(ADMIN_USER.orgId, () =>
+          runFleetOptimizationWithGemini(),
+        );
         assert.equal(res.meta.model, DEFAULT_NVIDIA_MODEL);
         assert.ok(res.result.summary.length > 0);
       },

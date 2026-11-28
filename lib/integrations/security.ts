@@ -20,7 +20,14 @@ function getSecretEncryptionKey(): Buffer | null {
 
 export function sealWebhookSecret(plaintext: string): string {
   const key = getSecretEncryptionKey();
-  if (!key) return `plain:${plaintext}`;
+  if (!key) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "CREDENTIALS_KEY must be configured in production before storing integration secrets.",
+      );
+    }
+    return `plain:${plaintext}`;
+  }
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const enc = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
@@ -49,24 +56,43 @@ export function unsealWebhookSecret(stored: string): string {
   return stored;
 }
 
+function stripDefaultPort(host: string): string {
+  return host.trim().toLowerCase().replace(/:(80|443)$/, "");
+}
+
 export function verifySameOriginRequest(headers: Headers): boolean {
-  const origin = headers.get("origin");
-  if (!origin) return true;
-  const expectedHost = (
-    headers.get("x-forwarded-host") ??
-    headers.get("host") ??
-    ""
-  )
-    .split(",")[0]
-    .trim()
+  const origin = headers.get("origin")?.trim();
+  const xRequestedWith = headers.get("x-requested-with")?.trim();
+  const forwardedHost = headers
+    .get("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim()
     .toLowerCase();
-  if (!expectedHost) return true;
-  try {
-    const parsed = new URL(origin);
-    return parsed.host.toLowerCase() === expectedHost;
-  } catch {
-    return false;
+  const host = headers.get("host")?.split(",")[0]?.trim().toLowerCase();
+
+  if (origin) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return false;
+      }
+      const originHost = stripDefaultPort(parsed.host);
+      if (
+        (forwardedHost && originHost === stripDefaultPort(forwardedHost)) ||
+        (host && originHost === stripDefaultPort(host))
+      ) {
+        return true;
+      }
+      if (xRequestedWith === "XMLHttpRequest") {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
+
+  return xRequestedWith === "XMLHttpRequest";
 }
 
 export function generateConnectorApiKey(): {

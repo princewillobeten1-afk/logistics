@@ -3,6 +3,10 @@ import { revalidatePath } from "next/cache";
 import { currentUser } from "@/lib/auth";
 import { handleFrontendLogisticsAction } from "@/lib/controllers/action-controller";
 import { query, runWithOrgScope } from "@/lib/db";
+import {
+  detectWorkspaceTampering,
+  hasDepartmentAccess,
+} from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +21,16 @@ export async function GET(req: NextRequest) {
   const user = await currentUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const tamper = detectWorkspaceTampering(req, user.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+  if (!hasDepartmentAccess(user, "SUPPORT")) {
+    return NextResponse.json(
+      { error: "Your department scope does not include Customer Support." },
+      { status: 403 },
+    );
   }
 
   const sessionKey = req.nextUrl.searchParams.get("sessionKey")?.trim() || `portal:${user.id}`;
@@ -79,16 +93,32 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const user = await currentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!hasDepartmentAccess(user, "SUPPORT")) {
+    return NextResponse.json(
+      { error: "Your department scope does not include Customer Support." },
+      { status: 403 },
+    );
+  }
+
   let body: {
     message?: string;
     reference?: string;
     sessionKey?: string;
     channel?: string;
-  };
+  } & Record<string, unknown>;
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
 
   const rawChannel = String(body.channel || "WEBSITE_CHAT").toUpperCase();

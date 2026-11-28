@@ -293,19 +293,20 @@ export function ControlTowerDashboard({
 
   return (
     <div className="ct-workspace">
-      {/* 1. Executive Greeting Header */}
+      {/* 1. Executive Control Tower Header */}
       <div className="ct-hero-row">
         <div className="ct-greeting">
-          <h1>
-            Hello, <span className="ct-greeting-name">{firstName}!</span>
-          </h1>
-          <p>Monitor your freight operations in real-time</p>
+          <h1>Control Tower</h1>
+          <p>
+            Operations overview &middot; Signed in as{" "}
+            <span className="ct-greeting-name">{firstName}</span>
+          </p>
         </div>
 
         <div className="ct-hero-actions">
           <button type="button" className="ct-btn-outline" onClick={handleExportCsv}>
-            <Download size={14} strokeWidth={2} aria-hidden="true" />
-            <span>Export</span>
+            <Download size={14} strokeWidth={1.9} aria-hidden="true" />
+            <span>Export CSV</span>
           </button>
           <button
             type="button"
@@ -334,10 +335,10 @@ export function ControlTowerDashboard({
       {/* 2. 6-Column Executive KPI Strip */}
       <dl className="ct-kpi-strip">
         <div className="ct-kpi-card">
-          <dt>Active Shipment</dt>
+          <dt>Active Shipments</dt>
           <dd>
             <strong>{kpis.activeShipments}</strong>
-            <span className="ct-kpi-delta is-up">
+            <span className="ct-kpi-delta is-neutral">
               {kpis.totalShipments} total tracked
             </span>
           </dd>
@@ -347,7 +348,7 @@ export function ControlTowerDashboard({
           <dt>Quotes Generated</dt>
           <dd>
             <strong>{kpis.quotesGenerated}</strong>
-            <span className="ct-kpi-delta is-up">
+            <span className="ct-kpi-delta is-neutral">
               {kpis.quotesSelected} selected
             </span>
           </dd>
@@ -357,7 +358,7 @@ export function ControlTowerDashboard({
           <dt>AI Conversations</dt>
           <dd>
             <strong>{kpis.aiConversations}</strong>
-            <span className="ct-kpi-delta is-up">automated turns</span>
+            <span className="ct-kpi-delta is-neutral">automated turns</span>
           </dd>
         </div>
 
@@ -377,7 +378,7 @@ export function ControlTowerDashboard({
           <dt>Conversion Rate</dt>
           <dd>
             <strong>{kpis.conversionRatePct}%</strong>
-            <span className="ct-kpi-delta is-up">booked &amp; fulfilled</span>
+            <span className="ct-kpi-delta is-neutral">booked &amp; fulfilled</span>
           </dd>
         </div>
 
@@ -385,7 +386,7 @@ export function ControlTowerDashboard({
           <dt>Freight Value</dt>
           <dd>
             <strong>{formatCompactMoney(kpis.freightValueMinor, kpis.currency)}</strong>
-            <span className="ct-kpi-delta is-up">planned portfolio</span>
+            <span className="ct-kpi-delta is-neutral">planned portfolio</span>
           </dd>
         </div>
       </dl>

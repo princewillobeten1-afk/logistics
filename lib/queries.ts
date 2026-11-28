@@ -1,5 +1,10 @@
 import { query } from "@/lib/db";
 import {
+  buildPaginatedResult,
+  parsePaginationParams,
+  type PaginatedResult,
+} from "@/lib/pagination";
+import {
   buildSevenDayPerformanceTrend,
   type DailyPerformancePoint,
 } from "@/lib/performance-trends";
@@ -133,6 +138,59 @@ export async function listShipments(state?: string) {
       LIMIT 100`,
     state ? [state] : [],
   );
+}
+
+export async function listShipmentsPaginated(options: {
+  page?: number | string | null;
+  pageSize?: number | string | null;
+  state?: string | null;
+  q?: string | null;
+} = {}): Promise<PaginatedResult<ShipmentRow>> {
+  const { page, pageSize, offset } = parsePaginationParams(options.page, options.pageSize);
+  const stateFilter = options.state?.trim() || "";
+  const qFilter = options.q?.trim() || "";
+
+  const rows = await query<ShipmentRow & { total_count?: string }>(
+    `/* paginated_shipments */
+     SELECT id, reference, state, version, customer_ref, origin, destination,
+            cargo, deadline, allocation, plan, booking, created_at, updated_at,
+            created_via, COUNT(*) OVER()::text AS total_count
+       FROM shipments
+      WHERE ($1 = '' OR state = $1)
+        AND (
+          $2 = ''
+          OR reference ILIKE '%' || $2 || '%'
+          OR COALESCE(customer_ref, '') ILIKE '%' || $2 || '%'
+          OR COALESCE(origin->>'city', '') ILIKE '%' || $2 || '%'
+          OR COALESCE(destination->>'city', '') ILIKE '%' || $2 || '%'
+          OR COALESCE(cargo->>'description', '') ILIKE '%' || $2 || '%'
+        )
+      ORDER BY updated_at DESC
+      LIMIT $3 OFFSET $4`,
+    [stateFilter, qFilter, pageSize, offset],
+  );
+
+  let total = rows.length > 0 ? Number(rows[0].total_count ?? rows.length) : 0;
+  if (rows.length === 0 && offset > 0) {
+    const countRows = await query<{ total: string }>(
+      `/* paginated_shipments_count */
+       SELECT COUNT(*)::text AS total
+         FROM shipments
+        WHERE ($1 = '' OR state = $1)
+          AND (
+            $2 = ''
+            OR reference ILIKE '%' || $2 || '%'
+            OR COALESCE(customer_ref, '') ILIKE '%' || $2 || '%'
+            OR COALESCE(origin->>'city', '') ILIKE '%' || $2 || '%'
+            OR COALESCE(destination->>'city', '') ILIKE '%' || $2 || '%'
+            OR COALESCE(cargo->>'description', '') ILIKE '%' || $2 || '%'
+          )`,
+      [stateFilter, qFilter],
+    );
+    total = Number(countRows[0]?.total ?? 0);
+  }
+
+  return buildPaginatedResult(rows, total, page, pageSize);
 }
 
 export async function getShipment(reference: string) {
@@ -440,18 +498,20 @@ export async function listLocations() {
 
 // --------------------------------------------------------------- records
 
+export type OrderRow = {
+  id: string;
+  reference: string;
+  state: string;
+  source: string;
+  currency: string;
+  ordered_at: Date;
+  required_by: Date | null;
+  customer: string | null;
+  items: string;
+};
+
 export async function listOrders() {
-  return query<{
-    id: string;
-    reference: string;
-    state: string;
-    source: string;
-    currency: string;
-    ordered_at: Date;
-    required_by: Date | null;
-    customer: string | null;
-    items: string;
-  }>(
+  return query<OrderRow>(
     `SELECT o.id, o.reference, o.state, o.source, o.currency, o.ordered_at,
             o.required_by, c.name AS customer, count(i.id)::text AS items
        FROM orders o
@@ -461,6 +521,61 @@ export async function listOrders() {
       ORDER BY o.ordered_at DESC
       LIMIT 100`,
   );
+}
+
+export async function listOrdersPaginated(options: {
+  page?: number | string | null;
+  pageSize?: number | string | null;
+  source?: string | null;
+  q?: string | null;
+} = {}): Promise<PaginatedResult<OrderRow>> {
+  const { page, pageSize, offset } = parsePaginationParams(options.page, options.pageSize);
+  const sourceFilter = options.source?.trim().toUpperCase() || "";
+  const qFilter = options.q?.trim() || "";
+
+  const rows = await query<OrderRow & { total_count?: string }>(
+    `/* paginated_orders */
+     SELECT o.id, o.reference, o.state, o.source, o.currency, o.ordered_at,
+            o.required_by, c.name AS customer, count(i.id)::text AS items,
+            COUNT(*) OVER()::text AS total_count
+       FROM orders o
+       LEFT JOIN customers c ON c.id = o.customer_id
+       LEFT JOIN order_items i ON i.order_id = o.id
+      WHERE ($1 = '' OR upper(o.source::text) = $1)
+        AND (
+          $2 = ''
+          OR o.reference ILIKE '%' || $2 || '%'
+          OR COALESCE(c.name, '') ILIKE '%' || $2 || '%'
+          OR o.source::text ILIKE '%' || $2 || '%'
+          OR o.state::text ILIKE '%' || $2 || '%'
+        )
+      GROUP BY o.id, c.name
+      ORDER BY o.ordered_at DESC
+      LIMIT $3 OFFSET $4`,
+    [sourceFilter, qFilter, pageSize, offset],
+  );
+
+  let total = rows.length > 0 ? Number(rows[0].total_count ?? rows.length) : 0;
+  if (rows.length === 0 && offset > 0) {
+    const countRows = await query<{ total: string }>(
+      `/* paginated_orders_count */
+       SELECT COUNT(*)::text AS total
+         FROM orders o
+         LEFT JOIN customers c ON c.id = o.customer_id
+        WHERE ($1 = '' OR upper(o.source::text) = $1)
+          AND (
+            $2 = ''
+            OR o.reference ILIKE '%' || $2 || '%'
+            OR COALESCE(c.name, '') ILIKE '%' || $2 || '%'
+            OR o.source::text ILIKE '%' || $2 || '%'
+            OR o.state::text ILIKE '%' || $2 || '%'
+          )`,
+      [sourceFilter, qFilter],
+    );
+    total = Number(countRows[0]?.total ?? 0);
+  }
+
+  return buildPaginatedResult(rows, total, page, pageSize);
 }
 
 export async function listCommunications() {
@@ -580,6 +695,59 @@ export async function listCustomers() {
       GROUP BY c.id
       ORDER BY c.active DESC, count(s.id) DESC, c.name`,
   );
+}
+
+export async function listCustomersPaginated(options: {
+  page?: number | string | null;
+  pageSize?: number | string | null;
+  q?: string | null;
+} = {}): Promise<PaginatedResult<CustomerRow>> {
+  const { page, pageSize, offset } = parsePaginationParams(options.page, options.pageSize);
+  const qFilter = options.q?.trim() || "";
+
+  const rows = await query<CustomerRow & { total_count?: string }>(
+    `/* paginated_customers */
+     SELECT c.id, c.code, c.name, c.sla_hours, c.payment_terms,
+            c.default_currency, c.contacts, c.active,
+            count(s.id)::text                                        AS total,
+            count(s.id) FILTER (WHERE s.state NOT IN
+              ('CLOSED','CANCELLED','FAILED'))::text                 AS open,
+            count(s.id) FILTER (WHERE s.deadline < now() AND s.state NOT IN
+              ('DELIVERED','POD_VERIFIED','CLOSED','CANCELLED','FAILED'))::text AS late,
+            max(s.created_at)                                        AS last_shipment_at,
+            COUNT(*) OVER()::text                                    AS total_count
+       FROM customers c
+       LEFT JOIN shipments s ON s.customer_id = c.id
+      WHERE (
+        $1 = ''
+        OR c.code ILIKE '%' || $1 || '%'
+        OR c.name ILIKE '%' || $1 || '%'
+        OR COALESCE(c.payment_terms, '') ILIKE '%' || $1 || '%'
+      )
+      GROUP BY c.id
+      ORDER BY c.active DESC, count(s.id) DESC, c.name
+      LIMIT $2 OFFSET $3`,
+    [qFilter, pageSize, offset],
+  );
+
+  let total = rows.length > 0 ? Number(rows[0].total_count ?? rows.length) : 0;
+  if (rows.length === 0 && offset > 0) {
+    const countRows = await query<{ total: string }>(
+      `/* paginated_customers_count */
+       SELECT COUNT(*)::text AS total
+         FROM customers c
+        WHERE (
+          $1 = ''
+          OR c.code ILIKE '%' || $1 || '%'
+          OR c.name ILIKE '%' || $1 || '%'
+          OR COALESCE(c.payment_terms, '') ILIKE '%' || $1 || '%'
+        )`,
+      [qFilter],
+    );
+    total = Number(countRows[0]?.total ?? 0);
+  }
+
+  return buildPaginatedResult(rows, total, page, pageSize);
 }
 
 export async function getCustomer(code: string) {

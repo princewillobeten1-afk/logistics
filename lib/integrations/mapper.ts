@@ -85,6 +85,7 @@ export interface PayloadParseResult {
   format: DetectedPayloadFormat;
   records: Record<string, unknown>[];
   rawText?: string;
+  parseError?: string;
 }
 
 /**
@@ -495,6 +496,9 @@ export function detectAndParseRawPayload(
   rawInput: string | Record<string, unknown> | Record<string, unknown>[],
   contentType?: string | null,
 ): PayloadParseResult {
+  if (rawInput == null) {
+    return { format: "TEXT", records: [], rawText: "", parseError: "Empty payload." };
+  }
   if (typeof rawInput !== "string") {
     if (Array.isArray(rawInput)) {
       return {
@@ -572,6 +576,14 @@ export function detectAndParseRawPayload(
         if (ndRecords.length > 0) {
           return { format: "NDJSON", records: ndRecords, rawText: trimmed };
         }
+      }
+      if (ct.includes("json") && !ct.includes("ndjson")) {
+        return {
+          format: "JSON",
+          records: [],
+          rawText: trimmed,
+          parseError: "Malformed JSON payload for application/json content type.",
+        };
       }
     }
   }

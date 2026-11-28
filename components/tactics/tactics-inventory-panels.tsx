@@ -368,7 +368,7 @@ export function InTransitFlowPanel({
                       <span>{row.warehouseCode}</span>
                     </div>
                   </td>
-                  <td className="num">{row.onHand.toLocaleString()}</td>
+                  <td className="num">{row.onHand.toLocaleString("en-US")}</td>
                   <td className="num">
                     {formatMoneyMajor(row.monthlyHoldingCostMajor, currency)}/mo
                   </td>
@@ -530,7 +530,7 @@ export function PostponementCentersPanel({
                       </div>
                     </td>
                     <td className="num">{center.dispatchLeadHours}h</td>
-                    <td className="num">{center.baseUnitsHeld.toLocaleString()} units</td>
+                    <td className="num">{center.baseUnitsHeld.toLocaleString("en-US")} units</td>
                     <td className="num">{center.activeWorkOrders}</td>
                     <td>
                       <span

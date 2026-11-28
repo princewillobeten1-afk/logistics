@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { requireUser } from "@/lib/auth";
+import { requireDepartment } from "@/lib/auth";
 import { handleFrontendLogisticsAction } from "@/lib/controllers/action-controller";
 
 export interface OrderIntakeActionResult {
@@ -25,7 +25,7 @@ export async function submitOrderIntakeAction(input: {
   reefer?: boolean;
   notes?: string;
 }): Promise<OrderIntakeActionResult> {
-  await requireUser();
+  await requireDepartment("ORDERS", "EDIT_SHIPMENT");
 
   try {
     const out = await handleFrontendLogisticsAction({

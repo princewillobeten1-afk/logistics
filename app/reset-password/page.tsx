@@ -9,6 +9,7 @@ export default async function ResetPasswordPage({
   searchParams: Promise<{ token?: string }>;
 }) {
   const { token } = await searchParams;
+  const cleanToken = token?.trim() ?? "";
 
   return (
     <main className="auth-page">
@@ -29,8 +30,8 @@ export default async function ResetPasswordPage({
             <span>Control Tower</span>
             <h1>Set a new password</h1>
           </div>
-          {token ? (
-            <ResetPasswordForm token={token} />
+          {cleanToken ? (
+            <ResetPasswordForm token={cleanToken} />
           ) : (
             <p className="auth-notice" data-tone="warn" role="alert">
               This link is missing its token, so it cannot be used. Request a

@@ -77,14 +77,33 @@ test("selectDelegatedSpecialistsForIntent maps intents to backend domain special
   assert.ok(planSpecs.includes("fleet-management"));
 });
 
-test("dispatchToAutonomousAgent creates orders, shipments, and delegates immediately for website & external intakes", async () => {
+test("dispatchToAutonomousAgent creates orders, shipments, and delegates immediately for verified workspace intakes and fails closed without orgId", async () => {
   const prevKey = process.env.GEMINI_API_KEY;
   delete process.env.GEMINI_API_KEY;
   try {
+    // Missing orgId must fail closed (zero global workspace fallback)
+    await assert.rejects(
+      () =>
+        dispatchToAutonomousAgent({
+          sourceChannel: "EXTERNAL_API",
+          message: "Unscoped order from Lagos to Kano",
+          orgId: null,
+        }),
+      /Missing verified workspace context/i,
+    );
+
+    const { identityQuery } = await import("../db");
+    const slug = `auto-test-${Date.now()}`;
+    const orgs = await identityQuery<{ id: string }>(
+      "INSERT INTO organisations (name, slug) VALUES ($1, $2) RETURNING id",
+      ["Autonomous Test Workspace", slug],
+    );
+    const verifiedOrgId = orgs[0].id;
+
     const orderOut = await dispatchToAutonomousAgent({
       sourceChannel: "WEB_FORM_ORDER",
       message: "Website order from Lagos to Kano",
-      orgId: null,
+      orgId: verifiedOrgId,
       structured: {
         customerName: "Test Logistics Client",
         originCity: "Lagos",
@@ -105,7 +124,7 @@ test("dispatchToAutonomousAgent creates orders, shipments, and delegates immedia
       intentHint: "PLANNING_ROUTING",
       message: `External route planning for ${orderOut.shipmentReference}`,
       reference: orderOut.shipmentReference ?? undefined,
-      orgId: null,
+      orgId: verifiedOrgId,
       structured: {
         preferredMode: "ROAD",
         notes: "Prioritize fastest corridor",

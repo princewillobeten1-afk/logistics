@@ -1,16 +1,23 @@
 import { decideApproval } from "@/app/approvals/actions";
 import { Empty, Offline, Panel, ShipmentLink } from "@/app/components";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
 import { may, requireUser } from "@/lib/auth";
 import { money, relative, when } from "@/lib/format";
+import { paginateArray } from "@/lib/pagination";
 import { openApprovals } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
-export default async function Approvals() {
+export default async function Approvals({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string; pageSize?: string }>;
+}) {
   // The buttons are hidden from anyone who cannot use them, but the action
   // checks the role again on its own — hiding a control is presentation, not
   // authorisation, and a form can be submitted without the page.
-  const user = await requireUser();
+  const [user, sp] = await Promise.all([requireUser(), searchParams]);
   const canApprove = may(user.role, "APPROVE");
 
   let approvals;
@@ -27,6 +34,19 @@ export default async function Approvals() {
     );
   }
 
+  const pagedApprovals = paginateArray(approvals, {
+    q: sp.q,
+    page: sp.page,
+    pageSize: sp.pageSize,
+    matcher: (a, q) =>
+      (a.reference ?? "").toLowerCase().includes(q) ||
+      a.summary.toLowerCase().includes(q) ||
+      (a.rationale ?? "").toLowerCase().includes(q) ||
+      a.currency.toLowerCase().includes(q),
+  });
+
+  const queryParams = { q: pagedApprovals.query || undefined };
+
   return (
     <>
       <div className="page-head">
@@ -38,19 +58,32 @@ export default async function Approvals() {
         </p>
       </div>
 
+      <TableSearchBar
+        basePath="/approvals"
+        initialQuery={pagedApprovals.query}
+        pageSize={pagedApprovals.pageSize}
+        placeholder="Filter approvals by shipment reference, summary, or rationale…"
+        label="Search pending approvals"
+        summaryText={`${pagedApprovals.total} pending approval(s)`}
+      />
+
       <Panel
         title="Pending"
-        hint={`${approvals.length} awaiting a decision`}
+        hint={`${pagedApprovals.total} awaiting a decision`}
         flush
       >
-        {approvals.length === 0 ? (
+        {pagedApprovals.items.length === 0 ? (
           <Empty
-            message="Nothing awaiting approval"
+            message={
+              pagedApprovals.query
+                ? `No approvals matching "${pagedApprovals.query}"`
+                : "Nothing awaiting approval"
+            }
             hint="Bookings that would spend more than your approval limit allows appear here for a decision."
           />
         ) : (
           <div className="body stack-md">
-            {approvals.map((a) => (
+            {pagedApprovals.items.map((a) => (
               <article key={a.id} className="approval">
                 <header>
                   <div>
@@ -97,6 +130,17 @@ export default async function Approvals() {
             ))}
           </div>
         )}
+        <PaginationBar
+          basePath="/approvals"
+          page={pagedApprovals.page}
+          pageSize={pagedApprovals.pageSize}
+          total={pagedApprovals.total}
+          totalPages={pagedApprovals.totalPages}
+          startIndex={pagedApprovals.startIndex}
+          endIndex={pagedApprovals.endIndex}
+          queryParams={queryParams}
+          itemLabel="approvals"
+        />
       </Panel>
 
       <Panel title="How this works">

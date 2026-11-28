@@ -1,7 +1,11 @@
+import Link from "next/link";
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { OrderIntakeForm } from "@/app/orders/order-intake-form";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
 import { city, relative, when } from "@/lib/format";
-import { listOrders, listShipments } from "@/lib/queries";
+import { buildPageHref } from "@/lib/pagination";
+import { listOrders, listOrdersPaginated, listShipments } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -9,11 +13,19 @@ export const dynamic = "force-dynamic";
 const SOURCES = ["API", "ERP", "CRM", "EMAIL", "WHATSAPP", "CSV", "PORTAL", "MANUAL"];
 const LIVE_SOURCES = new Set(["API", "CSV", "MANUAL", "PORTAL", "WHATSAPP", "EMAIL"]);
 
-export default async function Orders() {
-  let orders, intake;
+export default async function Orders({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; source?: string; page?: string; pageSize?: string }>;
+}) {
+  const { q, source, page, pageSize } = await searchParams;
+  const activeSource = source?.trim().toUpperCase() || "";
+
+  let allForChannelCounts, pagedOrders, intake;
   try {
-    [orders, intake] = await Promise.all([
+    [allForChannelCounts, pagedOrders, intake] = await Promise.all([
       listOrders(),
+      listOrdersPaginated({ q, source: activeSource || undefined, page, pageSize }),
       listShipments("DRAFT"),
     ]);
   } catch (error) {
@@ -27,7 +39,7 @@ export default async function Orders() {
     );
   }
 
-  const bySource = orders.reduce<Record<string, number>>((acc, o) => {
+  const bySource = allForChannelCounts.reduce<Record<string, number>>((acc, o) => {
     acc[o.source] = (acc[o.source] ?? 0) + 1;
     return acc;
   }, {});
@@ -58,15 +70,26 @@ export default async function Orders() {
               </tr>
             </thead>
             <tbody>
-              {SOURCES.map((source) => (
-                <tr key={source}>
-                  <td className="ref">{source}</td>
+              {SOURCES.map((src) => (
+                <tr key={src}>
+                  <td className="ref">
+                    <Link
+                      href={buildPageHref("/orders", {
+                        source: activeSource === src ? undefined : src,
+                        q,
+                        page: 1,
+                        pageSize: pagedOrders.pageSize,
+                      })}
+                    >
+                      {src}
+                    </Link>
+                  </td>
                   <td>
-                    <Pill state={LIVE_SOURCES.has(source) ? "OK" : "PENDING"} />
+                    <Pill state={LIVE_SOURCES.has(src) ? "OK" : "PENDING"} />
                   </td>
                   <td className="num">
-                    {bySource[source] ?? 0}
-                    {!LIVE_SOURCES.has(source) ? (
+                    {bySource[src] ?? 0}
+                    {!LIVE_SOURCES.has(src) ? (
                       <span className="text-faint">
                         {" "}
                         — connector standby
@@ -80,48 +103,99 @@ export default async function Orders() {
         </div>
       </Panel>
 
-      <Panel title="Orders" hint={`${orders.length} recorded`} flush>
-        {orders.length === 0 ? (
+      <TableSearchBar
+        basePath="/orders"
+        initialQuery={q ?? ""}
+        pageSize={pagedOrders.pageSize}
+        extraParams={{ source: activeSource || undefined }}
+        label="Search orders by reference, customer, source, or state"
+        placeholder="Search order reference, customer, source, or status…"
+        summaryText={
+          pagedOrders.total === 0
+            ? "0 matching orders"
+            : `Showing ${pagedOrders.startIndex}–${pagedOrders.endIndex} of ${pagedOrders.total.toLocaleString()} orders`
+        }
+      />
+
+      {activeSource ? (
+        <div className="filters" role="group" aria-label="Active source filter">
+          <Link
+            href={buildPageHref("/orders", { q, page: 1, pageSize: pagedOrders.pageSize })}
+            className="rounded border border-[var(--border)] px-3 py-1 text-xs font-medium hover:bg-[var(--surface)]"
+          >
+            Clear source filter: {activeSource} ×
+          </Link>
+        </div>
+      ) : null}
+
+      <Panel
+        title={activeSource ? `${activeSource} orders` : "Orders"}
+        hint={`${pagedOrders.total.toLocaleString()} recorded · page ${pagedOrders.page} of ${pagedOrders.totalPages}`}
+        flush
+      >
+        {pagedOrders.items.length === 0 ? (
           <Empty
-            message="No orders recorded"
-            hint="Orders placed through your channels currently become shipments directly, so they appear under Shipments rather than here."
-            action={{ label: "Go to shipments", href: "/shipments" }}
+            message={q || activeSource ? "No matching orders" : "No orders recorded"}
+            hint={
+              q || activeSource
+                ? "Try clearing your search or channel filter to view all orders."
+                : "Orders placed through your channels currently become shipments directly, so they appear under Shipments rather than here."
+            }
+            action={
+              q || activeSource
+                ? { label: "Reset filters", href: "/orders" }
+                : { label: "Go to shipments", href: "/shipments" }
+            }
           />
         ) : (
-          <div className="scroller" tabIndex={0} role="region" aria-label="Recorded orders">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Reference</th>
-                  <th scope="col">Customer</th>
-                  <th scope="col">Source</th>
-                  <th scope="col">State</th>
-                  <th scope="col">Items</th>
-                  <th scope="col">Required by</th>
-                  <th scope="col">Received</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((o) => (
-                  <tr key={o.id}>
-                    <td className="ref">{o.reference}</td>
-                    <td>{o.customer ?? "—"}</td>
-                    <td>
-                      <Pill state={o.source} />
-                    </td>
-                    <td>
-                      <Pill state={o.state} />
-                    </td>
-                    <td className="num">{o.items}</td>
-                    <td className="num">{when(o.required_by)}</td>
-                    <td className="num text-faint">
-                      {relative(o.ordered_at)}
-                    </td>
+          <>
+            <div className="scroller" tabIndex={0} role="region" aria-label="Recorded orders">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Reference</th>
+                    <th scope="col">Customer</th>
+                    <th scope="col">Source</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Items</th>
+                    <th scope="col">Required by</th>
+                    <th scope="col">Received</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {pagedOrders.items.map((o) => (
+                    <tr key={o.id}>
+                      <td className="ref">{o.reference}</td>
+                      <td>{o.customer ?? "—"}</td>
+                      <td>
+                        <Pill state={o.source} />
+                      </td>
+                      <td>
+                        <Pill state={o.state} />
+                      </td>
+                      <td className="num">{o.items}</td>
+                      <td className="num">{when(o.required_by)}</td>
+                      <td className="num text-faint">
+                        {relative(o.ordered_at)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <PaginationBar
+              basePath="/orders"
+              page={pagedOrders.page}
+              pageSize={pagedOrders.pageSize}
+              total={pagedOrders.total}
+              totalPages={pagedOrders.totalPages}
+              startIndex={pagedOrders.startIndex}
+              endIndex={pagedOrders.endIndex}
+              queryParams={{ q: q || undefined, source: activeSource || undefined }}
+              itemLabel="orders"
+            />
+          </>
         )}
       </Panel>
 

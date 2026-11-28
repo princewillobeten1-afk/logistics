@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { recordAudit } from "@/lib/audit";
 import { currentUser } from "@/lib/auth";
 import { getBiAccessPolicy, isSameOriginMutation } from "@/lib/intelligence/access";
+import {
+  detectWorkspaceTampering,
+  hasDepartmentAccess,
+} from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -18,20 +22,25 @@ export async function POST(req: NextRequest) {
   }
 
   const policy = getBiAccessPolicy(user.role);
-  if (!policy.canAcknowledgeAlerts) {
+  if (!policy.canAcknowledgeAlerts || !hasDepartmentAccess(user, "BI")) {
     return NextResponse.json(
       {
-        error: `Your role (${user.role}) is read-only and cannot acknowledge or reopen proactive BI alerts.`,
+        error: `Your role or department scope cannot acknowledge or reopen proactive BI alerts.`,
       },
       { status: 403 },
     );
   }
 
-  let body: { alertId?: unknown; action?: unknown };
+  let body: { alertId?: unknown; action?: unknown } & Record<string, unknown>;
   try {
-    body = (await req.json()) as { alertId?: unknown; action?: unknown };
+    body = (await req.json()) as { alertId?: unknown; action?: unknown } & Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
 
   const alertId = typeof body.alertId === "string" ? body.alertId.trim() : "";

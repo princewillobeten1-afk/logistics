@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { query, runWithOrgScope } from "@/lib/db";
+import { query, queryAs, runWithOrgScope } from "@/lib/db";
 import {
   listCarriers,
   listConveyances,
@@ -11,20 +10,12 @@ import {
   listShipments,
   listWarehouses,
 } from "@/lib/queries";
+import { assertVerifiedOrgId } from "@/lib/tenant-guard";
 import { buildTacticsSnapshot } from "./engine";
 import type {
   TacticsTenantMutations,
   TacticsWorkspaceSnapshot,
 } from "./types";
-
-const TACTICS_STORE_PATH = "/tmp/logistics-tactics-store.json";
-
-type TacticsStoreMap = Record<string, TacticsTenantMutations>;
-
-const globalForTactics = globalThis as unknown as {
-  tacticsStore?: TacticsStoreMap;
-  tacticsStoreMtimeMs?: number;
-};
 
 export function createEmptyMutations(): TacticsTenantMutations {
   return {
@@ -39,81 +30,75 @@ export function createEmptyMutations(): TacticsTenantMutations {
   };
 }
 
-function readAllTacticsStore(): TacticsStoreMap {
-  try {
-    if (existsSync(TACTICS_STORE_PATH)) {
-      const mtimeMs = statSync(TACTICS_STORE_PATH).mtimeMs;
-      if (
-        !globalForTactics.tacticsStore ||
-        globalForTactics.tacticsStoreMtimeMs !== mtimeMs
-      ) {
-        const parsed = JSON.parse(
-          readFileSync(TACTICS_STORE_PATH, "utf8"),
-        ) as TacticsStoreMap;
-        globalForTactics.tacticsStore =
-          parsed && typeof parsed === "object" ? parsed : {};
-        globalForTactics.tacticsStoreMtimeMs = mtimeMs;
-      }
-    }
-  } catch {
-    // Ignore parse/fs errors and fall back to memory store
-  }
-  if (!globalForTactics.tacticsStore) {
-    globalForTactics.tacticsStore = {};
-  }
-  return globalForTactics.tacticsStore;
-}
-
-function writeAllTacticsStore(map: TacticsStoreMap): void {
-  globalForTactics.tacticsStore = map;
-  try {
-    writeFileSync(TACTICS_STORE_PATH, JSON.stringify(map), "utf8");
-    globalForTactics.tacticsStoreMtimeMs = statSync(TACTICS_STORE_PATH).mtimeMs;
-  } catch {
-    // Ignore read-only fs errors
-  }
-}
-
-export function getTenantTacticsMutations(orgId: string): TacticsTenantMutations {
-  const all = readAllTacticsStore();
-  const existing = all[orgId];
-  if (!existing) return createEmptyMutations();
+function normalizeMutations(
+  raw: Partial<TacticsTenantMutations> | null | undefined,
+): TacticsTenantMutations {
+  if (!raw || typeof raw !== "object") return createEmptyMutations();
   return {
-    supplierSyncs: Array.isArray(existing.supplierSyncs)
-      ? existing.supplierSyncs
+    supplierSyncs: Array.isArray(raw.supplierSyncs) ? raw.supplierSyncs : [],
+    initiatives: Array.isArray(raw.initiatives) ? raw.initiatives : [],
+    barcodeScans: Array.isArray(raw.barcodeScans) ? raw.barcodeScans : [],
+    crossDockSkuKeys: Array.isArray(raw.crossDockSkuKeys)
+      ? raw.crossDockSkuKeys
       : [],
-    initiatives: Array.isArray(existing.initiatives) ? existing.initiatives : [],
-    barcodeScans: Array.isArray(existing.barcodeScans)
-      ? existing.barcodeScans
+    postponementWarehouseCodes: Array.isArray(raw.postponementWarehouseCodes)
+      ? raw.postponementWarehouseCodes
       : [],
-    crossDockSkuKeys: Array.isArray(existing.crossDockSkuKeys)
-      ? existing.crossDockSkuKeys
+    postponementOrders: Array.isArray(raw.postponementOrders)
+      ? raw.postponementOrders
       : [],
-    postponementWarehouseCodes: Array.isArray(existing.postponementWarehouseCodes)
-      ? existing.postponementWarehouseCodes
-      : [],
-    postponementOrders: Array.isArray(existing.postponementOrders)
-      ? existing.postponementOrders
-      : [],
-    mixedShipments: Array.isArray(existing.mixedShipments)
-      ? existing.mixedShipments
-      : [],
+    mixedShipments: Array.isArray(raw.mixedShipments) ? raw.mixedShipments : [],
     preArrivalFilings:
-      existing.preArrivalFilings && typeof existing.preArrivalFilings === "object"
-        ? existing.preArrivalFilings
+      raw.preArrivalFilings && typeof raw.preArrivalFilings === "object"
+        ? raw.preArrivalFilings
         : {},
   };
 }
 
-export function updateTenantTacticsMutations(
+/**
+ * Loads tenant-isolated tactics mutations from the RLS-protected `tactics_state`
+ * table (or per-org bucket in local fallback mode). Never reads shared `/tmp` files.
+ */
+export async function getTenantTacticsMutations(
+  orgId: string,
+): Promise<TacticsTenantMutations> {
+  assertVerifiedOrgId(orgId, "getTenantTacticsMutations");
+  const rows = await queryAs<{ payload: Partial<TacticsTenantMutations> | string }>(
+    orgId,
+    `SELECT payload FROM tactics_state WHERE org_id = $1 LIMIT 1`,
+    [orgId],
+  );
+  if (rows.length === 0) return createEmptyMutations();
+  const raw = rows[0].payload;
+  if (typeof raw === "string") {
+    try {
+      return normalizeMutations(JSON.parse(raw) as Partial<TacticsTenantMutations>);
+    } catch {
+      return createEmptyMutations();
+    }
+  }
+  return normalizeMutations(raw);
+}
+
+/**
+ * Persists tenant-isolated tactics mutations into `tactics_state` under RLS.
+ */
+export async function updateTenantTacticsMutations(
   orgId: string,
   updater: (current: TacticsTenantMutations) => TacticsTenantMutations,
-): TacticsTenantMutations {
-  const all = readAllTacticsStore();
-  const current = getTenantTacticsMutations(orgId);
-  const next = updater(current);
-  all[orgId] = next;
-  writeAllTacticsStore(all);
+): Promise<TacticsTenantMutations> {
+  assertVerifiedOrgId(orgId, "updateTenantTacticsMutations");
+  const current = await getTenantTacticsMutations(orgId);
+  const next = normalizeMutations(updater(current));
+  await queryAs(
+    orgId,
+    `INSERT INTO tactics_state (payload, updated_at)
+     VALUES ($1::jsonb, now())
+     ON CONFLICT (org_id) DO UPDATE
+       SET payload = EXCLUDED.payload,
+           updated_at = now()`,
+    [JSON.stringify(next)],
+  );
   return next;
 }
 
@@ -127,6 +112,7 @@ export async function collectTacticsSnapshot({
   orgId: string;
   orgName: string;
 }): Promise<TacticsWorkspaceSnapshot> {
+  assertVerifiedOrgId(orgId, "collectTacticsSnapshot");
   return runWithOrgScope(orgId, async () => {
     const [
       warehouses,
@@ -139,6 +125,7 @@ export async function collectTacticsSnapshot({
       drivers,
       customs,
       documents,
+      mutations,
     ] = await Promise.all([
       listWarehouses(),
       listInventory(),
@@ -161,14 +148,13 @@ export async function collectTacticsSnapshot({
       listDrivers(),
       listCustoms(),
       listDocuments(),
+      getTenantTacticsMutations(orgId),
     ]);
 
     const currency =
       legs.find((l) => l.currency)?.currency ||
       customers.find((c) => c.default_currency)?.default_currency ||
       "NGN";
-
-    const mutations = getTenantTacticsMutations(orgId);
 
     return buildTacticsSnapshot({
       orgName,

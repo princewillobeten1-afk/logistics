@@ -9,8 +9,14 @@ import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { cache } from "react";
 
-import { identityQuery, transaction } from "./db";
-import { sendMail } from "./mail";
+import { identityQuery, runSchemaCompatDdl, transaction } from "./db";
+import { isMailConfigured, sendMailDetail } from "./mail";
+import {
+  hasDepartmentAccess,
+  normalizeBranchCodes,
+  normalizeDepartments,
+  type WorkspaceDepartment,
+} from "./tenant-guard";
 
 // Hand-wrapped rather than promisify()'d: promisify resolves to scrypt's
 // three-argument overload and silently drops the options object, which is
@@ -57,7 +63,90 @@ export type SessionUser = {
   email: string;
   name: string | null;
   role: Role;
+  departments: WorkspaceDepartment[];
+  branchCodes: string[];
 };
+
+function toSessionUser(row: SessionRow): SessionUser {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    orgName: row.org_name,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+    departments: normalizeDepartments(row.departments),
+    branchCodes: normalizeBranchCodes(row.branch_codes),
+  };
+}
+
+let schemaCompatPromise: Promise<void> | null = null;
+
+async function ensureIdentitySchemaCompat(): Promise<void> {
+  if (!schemaCompatPromise) {
+    schemaCompatPromise = runSchemaCompatDdl([
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS departments TEXT[] NOT NULL DEFAULT ARRAY['ALL']::TEXT[]`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS branch_codes TEXT[] NOT NULL DEFAULT ARRAY['ALL']::TEXT[]`,
+      `CREATE TABLE IF NOT EXISTS password_resets (
+        token TEXT PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ip_address TEXT
+      )`,
+      `ALTER TABLE policies DROP CONSTRAINT IF EXISTS policies_version_key`,
+      `DROP INDEX IF EXISTS policies_version_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS policies_org_version_idx ON policies (org_id, version)`,
+    ]).catch((err) => {
+      schemaCompatPromise = null;
+      throw err;
+    });
+  }
+  await schemaCompatPromise;
+}
+
+function isMissingColumnError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code;
+  return code === "42703";
+}
+
+/**
+ * Verifies a raw session token against the active sessions/users/organisations
+ * tables. Used by SSE and WebSocket handlers to detect revoked or deactivated
+ * sessions mid-stream.
+ */
+export async function verifyActiveSessionToken(
+  token: string | null | undefined,
+): Promise<SessionUser | null> {
+  if (!token) return null;
+  let rows: SessionRow[];
+  try {
+    rows = await identityQuery<SessionRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+              u.departments, u.branch_codes
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         JOIN organisations o ON o.id = u.org_id
+        WHERE s.token = $1 AND s.expires_at > now()
+          AND u.active AND o.active`,
+      [token],
+    );
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err;
+    rows = await identityQuery<SessionRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         JOIN organisations o ON o.id = u.org_id
+        WHERE s.token = $1 AND s.expires_at > now()
+          AND u.active AND o.active`,
+      [token],
+    );
+  }
+  if (rows.length === 0) return null;
+  return toSessionUser(rows[0]);
+}
 
 /**
  * The signed-in user, or null.
@@ -67,35 +156,7 @@ export type SessionUser = {
  */
 export const currentUser = cache(async (): Promise<SessionUser | null> => {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
-  if (!token) return null;
-
-  const rows = await identityQuery<{
-    id: string;
-    org_id: string;
-    org_name: string;
-    email: string;
-    name: string | null;
-    role: Role;
-  }>(
-    `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       JOIN organisations o ON o.id = u.org_id
-      WHERE s.token = $1 AND s.expires_at > now()
-        AND u.active AND o.active`,
-    [token],
-  );
-  if (rows.length === 0) return null;
-
-  const row = rows[0];
-  return {
-    id: row.id,
-    orgId: row.org_id,
-    orgName: row.org_name,
-    email: row.email,
-    name: row.name,
-    role: row.role,
-  };
+  return verifyActiveSessionToken(token);
 });
 
 /** For pages. Sends anyone without a session to the sign-in form. */
@@ -122,6 +183,27 @@ export async function requireRole(permission: Permission): Promise<SessionUser> 
     throw new Error(
       `Your role (${user.role}) is not permitted to do that.`,
     );
+  }
+  return user;
+}
+
+export async function requireDepartment(
+  department: WorkspaceDepartment,
+  permission: Permission = "READ",
+): Promise<SessionUser> {
+  const user = await requireRole(permission);
+  if (!hasDepartmentAccess(user, department)) {
+    throw new Error(
+      `Your workspace access does not include the ${department} department.`,
+    );
+  }
+  return user;
+}
+
+export async function requireAdmin(): Promise<SessionUser> {
+  const user = await requireRole("ADMINISTER");
+  if (user.role !== "ADMIN") {
+    throw new Error("Workspace administrator privileges are required.");
   }
   return user;
 }
@@ -195,48 +277,61 @@ export async function verifyPassword(
 
 // ------------------------------------------------------------ sessions
 
-type SessionRow = {
+export type SessionRow = {
   id: string;
   org_id: string;
   org_name: string;
   email: string;
   name: string | null;
   role: Role;
+  departments?: string[] | null;
+  branch_codes?: string[] | null;
 };
 
 export function isHttpsRequest(head: Headers): boolean {
-  const proto = (head.get("x-forwarded-proto") ?? "").toLowerCase();
-  const origin = (head.get("origin") ?? "").toLowerCase();
-  const referer = (head.get("referer") ?? "").toLowerCase();
-  const host = (
-    head.get("x-forwarded-host") ??
-    head.get("host") ??
-    ""
-  ).toLowerCase();
-  const appUrl = (process.env.APP_URL ?? "").toLowerCase();
+  const proto =
+    (head.get("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ??
+    "";
+  const origin = (head.get("origin") ?? "").trim().toLowerCase();
+  const referer = (head.get("referer") ?? "").trim().toLowerCase();
+  const rawHost =
+    (head.get("x-forwarded-host") ?? head.get("host") ?? "")
+      .split(",")[0]
+      ?.trim()
+      .toLowerCase() ?? "";
+  const hostname = rawHost.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
 
+  // 1. Explicit HTTPS request headers win first.
   if (
-    proto.includes("https") ||
+    proto === "https" ||
     origin.startsWith("https://") ||
-    referer.startsWith("https://") ||
-    host.endsWith(".run.app") ||
-    appUrl.startsWith("https://")
+    referer.startsWith("https://")
   ) {
     return true;
   }
 
-  // Local production runs (`next start` on http://localhost:3002) set
-  // NODE_ENV=production; marking them Secure/SameSite=None causes browsers to
-  // reject the session cookie over plain HTTP.
-  const hostname = host.split(":")[0];
+  // 2. Localhost / plain HTTP requests must NOT receive Secure cookies, even
+  //    when APP_URL points at an external HTTPS deployment or preview URL.
   if (
+    proto === "http" ||
+    origin.startsWith("http://") ||
     hostname === "localhost" ||
     hostname === "127.0.0.1" ||
     hostname === "0.0.0.0" ||
-    hostname === "[::1]" ||
-    proto === "http"
+    hostname === "::1"
   ) {
     return false;
+  }
+
+  // 3. Hosted HTTPS platforms (Cloud Run / Vercel)
+  if (hostname.endsWith(".run.app") || hostname.endsWith(".vercel.app")) {
+    return true;
+  }
+
+  // 4. Fallback when request host/proto headers are absent
+  const appUrl = (process.env.APP_URL ?? "").trim().toLowerCase();
+  if (appUrl.startsWith("https://")) {
+    return true;
   }
 
   return process.env.NODE_ENV === "production";
@@ -263,7 +358,7 @@ export type SessionCookieMeta = {
  * freshly created account does not have to be verified a second time right
  * after its password was hashed.
  */
-async function startSessionWithCookie(
+export async function startSessionWithCookie(
   row: SessionRow,
   meta: { ip?: string | null; userAgent?: string | null },
 ): Promise<{ user: SessionUser; cookie: SessionCookieMeta }> {
@@ -276,16 +371,23 @@ async function startSessionWithCookie(
   );
   await identityQuery("UPDATE users SET last_login_at = now() WHERE id = $1", [row.id]);
 
-  const isHttps = isHttpsRequest(await headers());
+  let head: Headers;
+  try {
+    head = await headers();
+  } catch {
+    head = new Headers();
+  }
+  const isHttps = isHttpsRequest(head);
   const options = sessionCookieOptions(isHttps, expires);
 
-  (await cookies()).set(SESSION_COOKIE, token, options);
+  try {
+    (await cookies()).set(SESSION_COOKIE, token, options);
+  } catch {
+    // Route Handlers also apply session cookie directly onto NextResponse.
+  }
 
   return {
-    user: {
-      id: row.id, orgId: row.org_id, orgName: row.org_name,
-      email: row.email, name: row.name, role: row.role,
-    },
+    user: toSessionUser(row),
     cookie: { token, options },
   };
 }
@@ -307,13 +409,33 @@ export async function signIn(
   password: string,
   meta: { ip?: string | null; userAgent?: string | null } = {},
 ): Promise<LoginResult> {
-  const rows = await identityQuery<SessionRow & { active: boolean; org_active: boolean; password_hash: string }>(
-    `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
-            u.active, o.active AS org_active, u.password_hash
-       FROM users u JOIN organisations o ON o.id = u.org_id
-      WHERE lower(u.email) = lower($1)`,
-    [email.trim()],
-  );
+  await ensureIdentitySchemaCompat();
+  const cleanEmail = email.trim();
+  type SignInRow = SessionRow & {
+    active: boolean;
+    org_active: boolean;
+    password_hash: string;
+  };
+  let rows: SignInRow[];
+  try {
+    rows = await identityQuery<SignInRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+              u.departments, u.branch_codes,
+              u.active, o.active AS org_active, u.password_hash
+         FROM users u JOIN organisations o ON o.id = u.org_id
+        WHERE lower(u.email) = lower($1)`,
+      [cleanEmail],
+    );
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err;
+    rows = await identityQuery<SignInRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+              u.active, o.active AS org_active, u.password_hash
+         FROM users u JOIN organisations o ON o.id = u.org_id
+        WHERE lower(u.email) = lower($1)`,
+      [cleanEmail],
+    );
+  }
 
   const row = rows[0];
   // Hash even when there is no such user, so the response time does not
@@ -334,20 +456,33 @@ export async function signInWithGoogle(
   input: { email: string; name?: string | null; companyName?: string | null },
   meta: { ip?: string | null; userAgent?: string | null } = {},
 ): Promise<LoginResult> {
+  await ensureIdentitySchemaCompat();
   const email = input.email.trim().toLowerCase();
   if (!email) {
     return { ok: false, error: "Google account did not return an email address." };
   }
 
-  const existing = await identityQuery<
-    SessionRow & { active: boolean; org_active: boolean }
-  >(
-    `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
-            u.active, o.active AS org_active
-       FROM users u JOIN organisations o ON o.id = u.org_id
-      WHERE lower(u.email) = lower($1)`,
-    [email],
-  );
+  type GoogleExistingRow = SessionRow & { active: boolean; org_active: boolean };
+  let existing: GoogleExistingRow[];
+  try {
+    existing = await identityQuery<GoogleExistingRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+              u.departments, u.branch_codes,
+              u.active, o.active AS org_active
+         FROM users u JOIN organisations o ON o.id = u.org_id
+        WHERE lower(u.email) = lower($1)`,
+      [email],
+    );
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err;
+    existing = await identityQuery<GoogleExistingRow>(
+      `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+              u.active, o.active AS org_active
+         FROM users u JOIN organisations o ON o.id = u.org_id
+        WHERE lower(u.email) = lower($1)`,
+      [email],
+    );
+  }
 
   if (existing.length > 0) {
     const row = existing[0];
@@ -397,12 +532,24 @@ export async function signInWithGoogle(
     });
   } catch (err) {
     if (isUniqueViolation(err, "users_email_idx")) {
-      const retry = await identityQuery<SessionRow>(
-        `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role
-           FROM users u JOIN organisations o ON o.id = u.org_id
-          WHERE lower(u.email) = lower($1) AND u.active AND o.active`,
-        [email],
-      );
+      let retry: SessionRow[];
+      try {
+        retry = await identityQuery<SessionRow>(
+          `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role,
+                  u.departments, u.branch_codes
+             FROM users u JOIN organisations o ON o.id = u.org_id
+            WHERE lower(u.email) = lower($1) AND u.active AND o.active`,
+          [email],
+        );
+      } catch (colErr) {
+        if (!isMissingColumnError(colErr)) throw colErr;
+        retry = await identityQuery<SessionRow>(
+          `SELECT u.id, u.org_id, o.name AS org_name, u.email, u.name, u.role
+             FROM users u JOIN organisations o ON o.id = u.org_id
+            WHERE lower(u.email) = lower($1) AND u.active AND o.active`,
+          [email],
+        );
+      }
       if (retry[0]) {
         const started = await startSessionWithCookie(retry[0], meta);
         return { ok: true, user: started.user, cookie: started.cookie };
@@ -508,26 +655,51 @@ async function seedNewOrgDefaults(
   await client.query("SELECT set_config('app.current_org', $1, true)", [orgId]);
 
   for (const [channel, displayName] of DEFAULT_ORG_CHANNELS) {
-    await client.query(
-      `INSERT INTO channel_connections (channel, display_name)
-       VALUES ($1, $2)
-       ON CONFLICT (org_id, channel) DO NOTHING`,
-      [channel, displayName],
-    );
+    await client.query("SAVEPOINT sp_channel");
+    try {
+      await client.query(
+        `INSERT INTO channel_connections (channel, display_name)
+         VALUES ($1, $2)
+         ON CONFLICT (org_id, channel) DO NOTHING`,
+        [channel, displayName],
+      );
+      await client.query("RELEASE SAVEPOINT sp_channel");
+    } catch {
+      await client.query("ROLLBACK TO SAVEPOINT sp_channel");
+      await client.query("RELEASE SAVEPOINT sp_channel");
+    }
   }
 
-  await client.query(
-    `INSERT INTO policies (version, name, rules, active)
-     VALUES (1, 'default conservative', $1::jsonb, true)
-     ON CONFLICT (org_id, version) DO NOTHING`,
-    [JSON.stringify(DEFAULT_ORG_POLICY)],
-  );
+  await client.query("SAVEPOINT sp_policy");
+  try {
+    const existing = (await client.query(
+      "SELECT 1 FROM policies WHERE org_id = $1 AND version = 1 LIMIT 1",
+      [orgId],
+    )) as { rows?: unknown[] } | undefined;
+    if (!existing?.rows?.length) {
+      await client.query(
+        `INSERT INTO policies (version, name, rules, active)
+         VALUES (1, 'default conservative', $1::jsonb, true)`,
+        [JSON.stringify(DEFAULT_ORG_POLICY)],
+      );
+    }
+    await client.query("RELEASE SAVEPOINT sp_policy");
+  } catch (err) {
+    await client.query("ROLLBACK TO SAVEPOINT sp_policy");
+    await client.query("RELEASE SAVEPOINT sp_policy");
+    const code = (err as { code?: string })?.code;
+    // Do not abort onboarding if an un-migrated DB still carries global policies_version_key.
+    if (code !== "23505" && code !== "42P10") {
+      throw err;
+    }
+  }
 }
 
 export async function signUp(
   input: { companyName: string; name: string; email: string; password: string },
   meta: { ip?: string | null; userAgent?: string | null } = {},
 ): Promise<SignUpResult> {
+  await ensureIdentitySchemaCompat();
   const companyName = input.companyName.trim();
   const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
@@ -594,22 +766,49 @@ const RESET_TOKEN_HOURS = 1;
 // attacker could make this endpoint send mail on someone else's behalf.
 const RESET_MIN_INTERVAL_MINUTES = 5;
 
-export type RequestResetResult = { ok: true };
+export type RequestResetResult =
+  | {
+      ok: true;
+      delivery: "sent" | "preview" | "suppressed";
+      previewResetUrl?: string;
+    }
+  | {
+      ok: false;
+      delivery: "unconfigured" | "failed";
+      error: string;
+    };
 
 /**
- * Always resolves the same way, whether or not the address has an account —
- * telling a visitor "no account with that email" is exactly the account
- * enumeration this has to refuse to do. `signIn` protects the same fact by
- * hashing a dummy password either way; this protects it by never branching
- * the visible outcome at all.
+ * Generates a single-use password reset token and dispatches it over email
+ * (or returns a dev-only preview link when outbound mail is unconfigured outside
+ * production) without exposing whether an email address is registered.
  */
 export async function requestPasswordReset(
   email: string,
-  meta: { ip?: string | null; userAgent?: string | null } = {},
+  meta: {
+    ip?: string | null;
+    userAgent?: string | null;
+    origin?: string | null;
+  } = {},
 ): Promise<RequestResetResult> {
-  const GENERIC: RequestResetResult = { ok: true };
+  await ensureIdentitySchemaCompat();
+
+  const mailConfigured = isMailConfigured();
+  const isProd =
+    process.env.NODE_ENV === "production" ||
+    process.env.VERCEL_ENV === "production";
+
+  if (!mailConfigured && isProd) {
+    return {
+      ok: false,
+      delivery: "unconfigured",
+      error:
+        "Password reset emails are not configured on this server (configure RESEND_API_KEY or SMTP_HOST).",
+    };
+  }
+
   const trimmed = email.trim();
-  if (!trimmed) return GENERIC;
+  if (!trimmed) return { ok: true, delivery: "suppressed" };
 
   const rows = await identityQuery<{ id: string; email: string; name: string | null }>(
     `SELECT u.id, u.email, u.name
@@ -618,15 +817,21 @@ export async function requestPasswordReset(
     [trimmed],
   );
   const row = rows[0];
-  if (!row) return GENERIC;
+  if (!row) return { ok: true, delivery: "suppressed" };
 
-  const recent = await identityQuery<{ n: string }>(
-    `SELECT count(*)::text AS n FROM password_resets
-      WHERE user_id = $1
-        AND created_at > now() - make_interval(mins => $2)`,
-    [row.id, RESET_MIN_INTERVAL_MINUTES],
-  );
-  if (recent[0].n !== "0") return GENERIC; // one was already sent recently
+  if (mailConfigured) {
+    const recent = await identityQuery<{ n: string }>(
+      `SELECT count(*)::text AS n FROM password_resets
+        WHERE user_id = $1
+          AND used_at IS NULL
+          AND expires_at > now()
+          AND created_at > now() - make_interval(mins => $2)`,
+      [row.id, RESET_MIN_INTERVAL_MINUTES],
+    );
+    if (recent[0]?.n && recent[0].n !== "0") {
+      return { ok: true, delivery: "suppressed" };
+    }
+  }
 
   const token = randomBytes(32).toString("base64url");
   const expires = new Date(Date.now() + RESET_TOKEN_HOURS * 3_600_000);
@@ -636,11 +841,21 @@ export async function requestPasswordReset(
     [token, row.id, expires, meta.ip ?? null],
   );
 
-  const base = (process.env.APP_URL ?? "http://localhost:3000").replace(/\/$/, "");
+  const base = (
+    meta.origin?.trim() ||
+    process.env.APP_URL?.trim() ||
+    "http://localhost:3000"
+  ).replace(/\/$/, "");
   const link = `${base}/reset-password?token=${token}`;
   const hours = RESET_TOKEN_HOURS === 1 ? "1 hour" : `${RESET_TOKEN_HOURS} hours`;
 
-  await sendMail({
+  if (!mailConfigured) {
+    // Development / non-production preview: no SMTP/Resend configured, so surface
+    // the reset URL directly to the operator instead of silently dropping it.
+    return { ok: true, delivery: "preview", previewResetUrl: link };
+  }
+
+  const mailRes = await sendMailDetail({
     to: row.email,
     subject: "Reset your Control Tower password",
     text:
@@ -651,7 +866,18 @@ export async function requestPasswordReset(
       `request this, you can ignore this message — your password will not change.`,
   });
 
-  return GENERIC;
+  if (!mailRes.ok) {
+    // Clean up failed-delivery token so the user is not blocked by cooldown.
+    await identityQuery("DELETE FROM password_resets WHERE token = $1", [token]);
+    return {
+      ok: false,
+      delivery: "failed",
+      error:
+        "Unable to deliver the password reset email right now. Please try again later.",
+    };
+  }
+
+  return { ok: true, delivery: "sent" };
 }
 
 export type ResetResult =
@@ -659,7 +885,9 @@ export type ResetResult =
   | { ok: false; error: string };
 
 export async function resetPassword(token: string, newPassword: string): Promise<ResetResult> {
-  if (!token) return { ok: false, error: "This reset link is invalid." };
+  await ensureIdentitySchemaCompat();
+  const cleanToken = token.trim();
+  if (!cleanToken) return { ok: false, error: "This reset link is invalid." };
   if (newPassword.length < MIN_PASSWORD_LENGTH) {
     return {
       ok: false,
@@ -669,27 +897,27 @@ export async function resetPassword(token: string, newPassword: string): Promise
 
   const rows = await identityQuery<{
     user_id: string;
-    used_at: Date | null;
-    expires_at: Date;
+    used_at: Date | string | null;
+    expires_at: Date | string;
     org_id: string;
     email: string;
   }>(
     `SELECT pr.user_id, pr.used_at, pr.expires_at, u.org_id, u.email
        FROM password_resets pr JOIN users u ON u.id = pr.user_id
       WHERE pr.token = $1`,
-    [token],
+    [cleanToken],
   );
   const row = rows[0];
 
   if (!row) return { ok: false, error: "This reset link is invalid." };
   if (row.used_at) return { ok: false, error: "This reset link has already been used." };
-  if (row.expires_at.getTime() < Date.now()) {
+  if (new Date(row.expires_at).getTime() < Date.now()) {
     return { ok: false, error: "This reset link has expired. Request a new one." };
   }
 
   const hash = await hashPassword(newPassword);
   await identityQuery("UPDATE users SET password_hash = $1 WHERE id = $2", [hash, row.user_id]);
-  await identityQuery("UPDATE password_resets SET used_at = now() WHERE token = $1", [token]);
+  await identityQuery("UPDATE password_resets SET used_at = now() WHERE token = $1", [cleanToken]);
   // A reset is usually prompted by a suspected compromise. Leaving an
   // intruder's existing session alive would defeat the point — mirrors
   // AuthRepo.set_password on the Python side.
@@ -705,7 +933,13 @@ export async function signOut(): Promise<void> {
     // Delete the row, not just the cookie: a copied token must stop working.
     await identityQuery("DELETE FROM sessions WHERE token = $1", [token]);
   }
-  const isHttps = isHttpsRequest(await headers());
+  let head: Headers;
+  try {
+    head = await headers();
+  } catch {
+    head = new Headers();
+  }
+  const isHttps = isHttpsRequest(head);
   jar.set(SESSION_COOKIE, "", {
     ...sessionCookieOptions(isHttps, new Date(0)),
     maxAge: 0,

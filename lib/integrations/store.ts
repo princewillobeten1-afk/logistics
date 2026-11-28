@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { identityQuery, pool } from "@/lib/db";
+import { identityQuery, pool, queryAs } from "@/lib/db";
+import { assertVerifiedOrgId } from "@/lib/tenant-guard";
 import type {
   IntegrationConnectionMode,
   IntegrationConnectorRecord,
@@ -147,6 +148,12 @@ async function ensureIntegrationTables(): Promise<void> {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
+    await pool.query(`
+      ALTER TABLE integration_connectors ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE integration_connectors FORCE ROW LEVEL SECURITY;
+      ALTER TABLE integration_events ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE integration_events FORCE ROW LEVEL SECURITY;
+    `).catch(() => {});
     tablesInitialized = true;
   } catch {
     // Local fallback store handles queries without DDL
@@ -227,8 +234,10 @@ function toPublicEvent(row: IntegrationEventRecord): PublicIntegrationEvent {
 }
 
 export async function listOrgConnectors(orgId: string): Promise<PublicConnector[]> {
+  assertVerifiedOrgId(orgId, "listOrgConnectors");
   await ensureIntegrationTables();
-  const rows = await identityQuery<IntegrationConnectorRecord>(
+  const rows = await queryAs<IntegrationConnectorRecord>(
+    orgId,
     `SELECT * FROM integration_connectors WHERE org_id = $1 ORDER BY created_at DESC`,
     [orgId],
   );
@@ -239,8 +248,10 @@ export async function getOrgConnector(
   id: string,
   orgId: string,
 ): Promise<IntegrationConnectorRecord | null> {
+  assertVerifiedOrgId(orgId, "getOrgConnector");
   await ensureIntegrationTables();
-  const rows = await identityQuery<IntegrationConnectorRecord>(
+  const rows = await queryAs<IntegrationConnectorRecord>(
+    orgId,
     `SELECT * FROM integration_connectors WHERE id = $1 AND org_id = $2 LIMIT 1`,
     [id, orgId],
   );
@@ -353,7 +364,9 @@ export async function createOrgConnector(input: {
       ? input.outboundEvents
       : ["shipment.created", "shipment.booked", "exception.detected", "approval.decided"];
 
-  const rows = await identityQuery<IntegrationConnectorRecord>(
+  assertVerifiedOrgId(input.orgId, "createOrgConnector");
+  const rows = await queryAs<IntegrationConnectorRecord>(
+    input.orgId,
     `INSERT INTO integration_connectors
        (id, org_id, name, system_type, category, status, autonomy_mode,
         api_key_prefix, api_key_hash, webhook_secret_hash,
@@ -472,7 +485,8 @@ export async function updateOrgConnector(
   const nextMapping = patch.fieldMapping ?? existing.field_mapping;
   const nextDbTables = patch.dbTables ?? existing.db_tables ?? [];
 
-  const rows = await identityQuery<IntegrationConnectorRecord>(
+  const rows = await queryAs<IntegrationConnectorRecord>(
+    orgId,
     `UPDATE integration_connectors
         SET name = $1,
             status = $2,
@@ -520,7 +534,8 @@ export async function rotateOrgConnectorKey(
 
   const key = generateConnectorApiKey();
   const secret = generateWebhookSecret();
-  const rows = await identityQuery<IntegrationConnectorRecord>(
+  const rows = await queryAs<IntegrationConnectorRecord>(
+    orgId,
     `UPDATE integration_connectors
         SET api_key_prefix = $1,
             api_key_hash = $2,
@@ -539,10 +554,12 @@ export async function rotateOrgConnectorKey(
 }
 
 export async function deleteOrgConnector(id: string, orgId: string): Promise<boolean> {
+  assertVerifiedOrgId(orgId, "deleteOrgConnector");
   await ensureIntegrationTables();
   const existing = await getOrgConnector(id, orgId);
   if (!existing) return false;
-  await identityQuery(
+  await queryAs(
+    orgId,
     `DELETE FROM integration_connectors WHERE id = $1 AND org_id = $2`,
     [id, orgId],
   );
@@ -553,8 +570,23 @@ export async function bumpConnectorStats(
   connectorId: string,
   processedDelta: number,
   errorsDelta: number,
+  orgId?: string,
 ): Promise<void> {
   await ensureIntegrationTables();
+  if (orgId) {
+    assertVerifiedOrgId(orgId, "bumpConnectorStats");
+    await queryAs(
+      orgId,
+      `UPDATE integration_connectors
+          SET events_processed = events_processed + $1,
+              errors_count = errors_count + $2,
+              last_sync_at = now(),
+              updated_at = now()
+        WHERE id = $3 AND org_id = $4`,
+      [processedDelta, errorsDelta, connectorId, orgId],
+    );
+    return;
+  }
   await identityQuery(
     `UPDATE integration_connectors
         SET events_processed = events_processed + $1,
@@ -571,8 +603,10 @@ export async function findDuplicateEvent(
   connectorId: string,
   idempotencyKey: string,
 ): Promise<PublicIntegrationEvent | null> {
+  assertVerifiedOrgId(orgId, "findDuplicateEvent");
   await ensureIntegrationTables();
-  const rows = await identityQuery<IntegrationEventRecord>(
+  const rows = await queryAs<IntegrationEventRecord>(
+    orgId,
     `SELECT * FROM integration_events
       WHERE org_id = $1 AND connector_id = $2 AND idempotency_key = $3
       LIMIT 1`,
@@ -602,9 +636,11 @@ export async function recordIntegrationEvent(input: {
   latencyMs: number;
   error?: string | null;
 }): Promise<PublicIntegrationEvent> {
+  assertVerifiedOrgId(input.orgId, "recordIntegrationEvent");
   await ensureIntegrationTables();
   const id = `iev_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const rows = await identityQuery<IntegrationEventRecord>(
+  const rows = await queryAs<IntegrationEventRecord>(
+    input.orgId,
     `INSERT INTO integration_events
        (id, org_id, connector_id, connector_name, direction, format, entity_type,
         status, idempotency_key, external_ref, shipment_ref, order_ref, mapped_by,
@@ -642,8 +678,10 @@ export async function listOrgIntegrationEvents(
   orgId: string,
   limit = 60,
 ): Promise<PublicIntegrationEvent[]> {
+  assertVerifiedOrgId(orgId, "listOrgIntegrationEvents");
   await ensureIntegrationTables();
-  const rows = await identityQuery<IntegrationEventRecord>(
+  const rows = await queryAs<IntegrationEventRecord>(
+    orgId,
     `SELECT * FROM integration_events WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2`,
     [orgId, limit],
   );

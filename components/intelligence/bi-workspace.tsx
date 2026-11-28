@@ -13,6 +13,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
+import { ClientWhen } from "@/components/client-time";
 import { BiAlertsPanel } from "@/components/intelligence/bi-alerts-panel";
 import { ProvenanceTag } from "@/components/intelligence/bi-charts";
 import { BiComparisonsPanel } from "@/components/intelligence/bi-comparisons-panel";
@@ -395,7 +396,7 @@ export function BiWorkspace({ initialSnapshot }: { initialSnapshot: BiSnapshot }
             </p>
           </div>
           <span className="bi-timestamp">
-            Computed {new Date(snapshot.generatedAt).toLocaleString()}
+            Computed <ClientWhen date={snapshot.generatedAt} />
           </span>
         </div>
 

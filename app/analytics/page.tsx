@@ -64,7 +64,7 @@ export default async function Analytics() {
         </div>
         <div className="tile">
           <dt>Distance planned</dt>
-          <dd>{totalKm.toLocaleString()}</dd>
+          <dd>{totalKm.toLocaleString("en-US")}</dd>
           <small>km across all legs</small>
         </div>
         <div className="tile">
@@ -144,7 +144,7 @@ export default async function Analytics() {
                         <Pill state={l.mode} />
                       </td>
                       <td className="num">{l.legs}</td>
-                      <td className="num">{km.toLocaleString()} km</td>
+                      <td className="num">{km.toLocaleString("en-US")} km</td>
                       <td className="num">{co2e.toFixed(1)} kg</td>
                       <td className="num text-muted">
                         {km > 0 ? `${((co2e / km) * 1000).toFixed(1)} g/km` : "—"}

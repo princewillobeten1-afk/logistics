@@ -2,25 +2,30 @@
 
 import { headers } from "next/headers";
 
-import { requestPasswordReset } from "@/lib/auth";
+import { isHttpsRequest, requestPasswordReset } from "@/lib/auth";
+import { resolvePublicOrigin } from "@/lib/request-origin";
 
-export type ForgotState = { submitted: boolean; error?: string | null };
+export type ForgotState = {
+  submitted: boolean;
+  error?: string | null;
+  previewResetUrl?: string | null;
+};
 
 export async function requestResetAction(
   _prev: ForgotState,
   formData: FormData,
 ): Promise<ForgotState> {
-  const email = String(formData.get("email") ?? "");
+  const email = String(formData.get("email") ?? "").trim();
 
   const head = await headers();
   const ip =
     head.get("x-forwarded-for")?.split(",")[0]?.trim() ?? head.get("x-real-ip");
   const userAgent = head.get("user-agent");
+  const origin = resolvePublicOrigin(head, isHttpsRequest(head));
 
-  // No error branch reaches the visitor here on purpose — see lib/auth.ts.
-  // Whether or not the address has an account, the page says the same thing.
+  let result;
   try {
-    await requestPasswordReset(email, { ip, userAgent });
+    result = await requestPasswordReset(email, { ip, userAgent, origin });
   } catch {
     return {
       submitted: false,
@@ -29,5 +34,16 @@ export async function requestResetAction(
     };
   }
 
-  return { submitted: true, error: null };
+  if (!result.ok) {
+    return {
+      submitted: false,
+      error: result.error,
+    };
+  }
+
+  return {
+    submitted: true,
+    error: null,
+    previewResetUrl: result.previewResetUrl ?? null,
+  };
 }

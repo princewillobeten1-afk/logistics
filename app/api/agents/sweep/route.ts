@@ -5,7 +5,9 @@ import {
   type OperationsSweepScope,
 } from "@/lib/agents/background";
 import { MissingGeminiKeyError } from "@/lib/agents/gemini-client";
-import { currentUser } from "@/lib/auth";
+import { currentUser, may } from "@/lib/auth";
+import { checkDistributedTenantRateLimit } from "@/lib/distributed-guard";
+import { detectWorkspaceTampering } from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +26,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: { scope?: string; reference?: string } = {};
+  if (!may(user.role, "EDIT_SHIPMENT") && user.role !== "ADMIN") {
+    return NextResponse.json(
+      { error: "Only dispatchers or workspace administrators can run operational sweeps." },
+      { status: 403 },
+    );
+  }
+
+  let body: { scope?: string; reference?: string } & Record<string, unknown> = {};
   try {
     const text = await req.text();
     if (text.trim()) {
@@ -32,6 +41,19 @@ export async function POST(req: NextRequest) {
     }
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+
+  const rate = await checkDistributedTenantRateLimit(user.orgId, "agents:sweep", 12, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: "Workspace operations sweep rate limit exceeded." },
+      { status: 429 },
+    );
   }
 
   const rawScope = (body.scope ?? "exceptions").trim() as OperationsSweepScope;

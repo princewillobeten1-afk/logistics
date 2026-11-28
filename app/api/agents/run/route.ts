@@ -6,8 +6,14 @@ import {
 } from "@/lib/agents/catalog";
 import { MissingGeminiKeyError } from "@/lib/agents/gemini-client";
 import { executeAgentTask } from "@/lib/agents/orchestrator";
-import { currentUser } from "@/lib/auth";
+import { currentUser, may } from "@/lib/auth";
 import { runWithOrgScope } from "@/lib/db";
+import { checkDistributedTenantRateLimit } from "@/lib/distributed-guard";
+import {
+  departmentForAgent,
+  detectWorkspaceTampering,
+  hasDepartmentAccess,
+} from "@/lib/tenant-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -17,15 +23,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: { agentId?: string; task?: string; reference?: string };
+  let body: { agentId?: string; task?: string; reference?: string } & Record<string, unknown>;
   try {
     body = (await req.json()) as {
       agentId?: string;
       task?: string;
       reference?: string;
-    };
+    } & Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
 
   const rawAgentId = (body.agentId ?? "orchestrator").trim();
@@ -34,6 +45,36 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: `Unknown agent "${rawAgentId}".` },
       { status: 400 },
+    );
+  }
+
+  const requiredDept = departmentForAgent(agent.id);
+  if (!hasDepartmentAccess(user, requiredDept)) {
+    return NextResponse.json(
+      {
+        error: `Your workspace permissions do not grant access to the ${requiredDept} department agent.`,
+      },
+      { status: 403 },
+    );
+  }
+
+  if (
+    user.role === "VIEWER" &&
+    !may(user.role, "EDIT_SHIPMENT") &&
+    agent.id !== "logistics-analytics" &&
+    agent.id !== "ai-customer-support"
+  ) {
+    return NextResponse.json(
+      { error: "Read-only viewers cannot run operational dispatch or mutation agents." },
+      { status: 403 },
+    );
+  }
+
+  const rate = await checkDistributedTenantRateLimit(user.orgId, "agents:run", 40, 60_000);
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: "Workspace AI agent rate limit exceeded. Please retry shortly." },
+      { status: 429 },
     );
   }
 
@@ -52,6 +93,11 @@ export async function POST(req: NextRequest) {
         task: task || agent.quickPrompts[0],
         reference: body.reference?.trim() || undefined,
         actorEmail: user.email,
+        userScope: {
+          role: user.role,
+          departments: user.departments,
+          branchCodes: user.branchCodes,
+        },
       }),
     );
 

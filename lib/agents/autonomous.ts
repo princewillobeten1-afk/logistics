@@ -9,6 +9,7 @@ import {
 import { recordAudit } from "@/lib/audit";
 import { identityQuery, query, runWithOrgScope } from "@/lib/db";
 import { calculateShipmentPlan } from "@/lib/planning";
+import { assertVerifiedOrgId } from "@/lib/tenant-guard";
 
 export type IntakeSourceChannel =
   | "WEBSITE_CHAT"
@@ -287,15 +288,12 @@ export function selectDelegatedSpecialistsForIntent(
   return Array.from(merged).slice(0, 4);
 }
 
+/**
+ * Deprecated fail-closed stub. Multi-tenant isolation forbids routing
+ * unauthenticated or unscoped requests into the first workspace.
+ */
 export async function resolveDefaultOrgId(): Promise<string | null> {
-  try {
-    const rows = await identityQuery<{ id: string }>(
-      `SELECT id FROM organisations WHERE active = true ORDER BY created_at ASC LIMIT 1`,
-    );
-    return rows[0]?.id ?? null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function generateOrderRef(): string {
@@ -311,7 +309,10 @@ function generateShipmentRef(): string {
 export async function dispatchToAutonomousAgent(
   input: AutonomousIntakeInput,
 ): Promise<AutonomousDispatchResult> {
-  const effectiveOrgId = input.orgId ?? (await resolveDefaultOrgId());
+  const effectiveOrgId = assertVerifiedOrgId(
+    input.orgId,
+    "dispatchToAutonomousAgent",
+  );
   const textExtracted = extractOrderFieldsFromText(input.message);
   const structured: AutonomousStructuredInput = {
     ...textExtracted,
@@ -912,7 +913,16 @@ export async function processOmnichannelSupportTurn({
     return { ok: false, error: "Message is too long (max 2000 characters)." };
   }
 
-  const effectiveOrgId = orgId ?? (await resolveDefaultOrgId());
+  if (!orgId || !orgId.trim()) {
+    return {
+      ok: false,
+      error: "Verified workspace context is required for support processing.",
+    };
+  }
+  const effectiveOrgId = assertVerifiedOrgId(
+    orgId,
+    "processOmnichannelSupportTurn",
+  );
   const dbChannel =
     sourceChannel === "WEBSITE_CHAT" ? "WIDGET" : sourceChannel;
   const trimmedRef = reference?.trim().toUpperCase() || null;

@@ -1,8 +1,10 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { scheduleBackgroundAgent } from "@/lib/agents/background";
 import { recordAudit } from "@/lib/audit";
-import { currentUser } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { currentUser, may } from "@/lib/auth";
+import { query, runWithOrgScope } from "@/lib/db";
+import { verifySameOriginMutation } from "@/lib/request-origin";
+import { detectWorkspaceTampering, hasDepartmentAccess } from "@/lib/tenant-guard";
 
 function encodeBase64Url(str: string): string {
   return Buffer.from(str, "utf-8")
@@ -17,9 +19,28 @@ function sanitizeHeader(value: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  if (!verifySameOriginMutation(req)) {
+    return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
+  }
+
   const sessionUser = await currentUser();
   if (!sessionUser) {
     return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+  }
+
+  const tamper = detectWorkspaceTampering(req, sessionUser.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+
+  if (
+    (!may(sessionUser.role, "EDIT_SHIPMENT") && !may(sessionUser.role, "ADMINISTER")) ||
+    (!hasDepartmentAccess(sessionUser, "SUPPORT") && !hasDepartmentAccess(sessionUser, "CUSTOMERS"))
+  ) {
+    return NextResponse.json(
+      { error: "Your role is not permitted to send outbound workspace emails." },
+      { status: 403 },
+    );
   }
 
   const authHeader = req.headers.get("Authorization");
@@ -111,11 +132,13 @@ export async function POST(req: NextRequest) {
   });
 
   try {
-    await query(
-      `INSERT INTO communications
-          (shipment_id, contact_id, channel, direction, body, recipient, state, safety_checked)
-       VALUES ($1, $2, 'EMAIL', 'OUTBOUND', $3, $4, 'SENT', true)`,
-      [null, null, `${subject}: ${message.slice(0, 500)}`, to],
+    await runWithOrgScope(sessionUser.orgId, () =>
+      query(
+        `INSERT INTO communications
+            (shipment_id, contact_id, channel, direction, body, recipient, state, safety_checked)
+         VALUES ($1, $2, 'EMAIL', 'OUTBOUND', $3, $4, 'SENT', true)`,
+        [null, null, `${subject}: ${message.slice(0, 500)}`, to],
+      ),
     );
   } catch {
     // Non-fatal communications log

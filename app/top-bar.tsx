@@ -1,17 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Monitor, Moon, Search, Sun } from "lucide-react";
+import { CommandPalette } from "@/components/command-palette";
 import { LiveVoiceWidget } from "@/components/live-voice-widget";
 
 const ROUTE_META: Record<string, { group: string; label: string }> = {
-  "/": { group: "Dashboard", label: "Control Tower" },
+  "/": { group: "Operations", label: "Overview" },
+  "/intelligence": { group: "Operations", label: "Business Intelligence" },
+  "/tactics": { group: "Operations", label: "Logistics tactics" },
   "/map": { group: "Operations", label: "Shipments map" },
   "/orders": { group: "Operations", label: "Orders" },
   "/shipments": { group: "Operations", label: "Shipments" },
   "/planning": { group: "Operations", label: "Planning" },
+  "/returns": { group: "Operations", label: "Returns & RMA" },
   "/exceptions": { group: "Operations", label: "Exceptions" },
   "/approvals": { group: "Operations", label: "Approvals" },
   "/carriers": { group: "Network", label: "Carriers" },
@@ -46,10 +50,8 @@ function applyScheme(value: Scheme) {
 
 export function TopBar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const [refQuery, setRefQuery] = useState("");
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [scheme, setScheme] = useState<Scheme>("light dark");
-  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -78,6 +80,11 @@ export function TopBar() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+        return;
+      }
       if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
@@ -90,7 +97,7 @@ export function TopBar() {
         return;
       }
       e.preventDefault();
-      searchInputRef.current?.focus();
+      setPaletteOpen(true);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -110,20 +117,8 @@ export function TopBar() {
     }
   }
 
-  function onQuickJump(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = refQuery.trim();
-    if (!trimmed) return;
-    setRefQuery("");
-    if (/^[a-z]{2,4}[-_]?\d{3,}$/i.test(trimmed)) {
-      router.push(`/shipments/${encodeURIComponent(trimmed.toUpperCase())}`);
-    } else {
-      router.push(`/shipments?q=${encodeURIComponent(trimmed)}`);
-    }
-  }
-
   const exact = ROUTE_META[pathname];
-  let group = exact?.group ?? "Dashboard";
+  let group = exact?.group ?? "Operations";
   let parentHref: string | null = null;
   let parentLabel: string | null = null;
   let currentLabel = exact?.label ?? "Control Tower";
@@ -141,97 +136,88 @@ export function TopBar() {
   }
 
   return (
-    <header className="topbar">
-      <nav aria-label="Breadcrumb" className="breadcrumbs">
-        <ol>
-          <li>
-            <span className="crumb-group">{group}</span>
-          </li>
-          <li aria-hidden="true" className="crumb-sep">
-            &rsaquo;
-          </li>
-          {parentHref && parentLabel ? (
-            <>
+    <>
+      <header className="topbar">
+        <nav aria-label="Breadcrumb" className="breadcrumbs">
+          <ol>
+            <li>
+              <span className="crumb-group">{group}</span>
+            </li>
+            <li aria-hidden="true" className="crumb-sep">
+              /
+            </li>
+            {parentHref && parentLabel ? (
+              <>
+                <li>
+                  <Link href={parentHref}>{parentLabel}</Link>
+                </li>
+                <li aria-hidden="true" className="crumb-sep">
+                  /
+                </li>
+                <li>
+                  <span className="crumb-current font-mono" aria-current="page">
+                    {currentLabel}
+                  </span>
+                </li>
+              </>
+            ) : (
               <li>
-                <Link href={parentHref}>{parentLabel}</Link>
-              </li>
-              <li aria-hidden="true" className="crumb-sep">
-                &rsaquo;
-              </li>
-              <li>
-                <span className="crumb-current font-mono" aria-current="page">
+                <span className="crumb-current" aria-current="page">
                   {currentLabel}
                 </span>
               </li>
-            </>
-          ) : (
-            <li>
-              <span className="crumb-current" aria-current="page">
-                {currentLabel}
-              </span>
-            </li>
-          )}
-        </ol>
-      </nav>
+            )}
+          </ol>
+        </nav>
 
-      <div className="topbar-controls">
-        <form onSubmit={onQuickJump} className="quick-jump" role="search">
-          <label htmlFor="quick-jump-ref" className="visually-hidden">
-            Search by shipment ref, customer, or route
-          </label>
-          <Search
-            size={14}
-            strokeWidth={1.75}
-            aria-hidden="true"
-            className="quick-jump-icon"
-          />
-          <input
-            ref={searchInputRef}
-            id="quick-jump-ref"
-            name="reference"
-            type="search"
-            value={refQuery}
-            onChange={(e) => setRefQuery(e.target.value)}
-            placeholder="Search by cargo, ref, route (press /)…"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            enterKeyHint="search"
-          />
-        </form>
-
-        <LiveVoiceWidget />
-
-        <div className="theme-switch" role="group" aria-label="Color theme">
+        <div className="topbar-controls">
           <button
             type="button"
-            aria-pressed={scheme === "light dark"}
-            onClick={() => selectScheme("light dark")}
-            title="Match system theme"
+            className="cmd-trigger"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+            aria-keyshortcuts="Meta+K Control+K /"
           >
-            <Monitor size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span>Auto</span>
+            <Search size={14} strokeWidth={1.85} aria-hidden="true" />
+            <span className="cmd-trigger-text">Jump to module or shipment ref…</span>
+            <kbd className="cmd-trigger-kbd">⌘K</kbd>
           </button>
-          <button
-            type="button"
-            aria-pressed={scheme === "light"}
-            onClick={() => selectScheme("light")}
-            title="Light theme"
-          >
-            <Sun size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span>Light</span>
-          </button>
-          <button
-            type="button"
-            aria-pressed={scheme === "dark"}
-            onClick={() => selectScheme("dark")}
-            title="Dark theme"
-          >
-            <Moon size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span>Dark</span>
-          </button>
+
+          <LiveVoiceWidget />
+
+          <div className="theme-switch" role="group" aria-label="Color theme">
+            <button
+              type="button"
+              aria-pressed={scheme === "light dark"}
+              onClick={() => selectScheme("light dark")}
+              title="Match system theme"
+            >
+              <Monitor size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>Auto</span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={scheme === "light"}
+              onClick={() => selectScheme("light")}
+              title="Light theme"
+            >
+              <Sun size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>Light</span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={scheme === "dark"}
+              onClick={() => selectScheme("dark")}
+              title="Dark theme"
+            >
+              <Moon size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>Dark</span>
+            </button>
+          </div>
         </div>
-      </div>
-    </header>
+      </header>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+    </>
   );
 }

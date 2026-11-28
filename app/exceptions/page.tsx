@@ -1,11 +1,19 @@
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { Live } from "@/app/live";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
 import { relative } from "@/lib/format";
+import { paginateArray } from "@/lib/pagination";
 import { listShipments, openExceptions } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 
-export default async function Exceptions() {
+export default async function Exceptions({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string; pageSize?: string }>;
+}) {
+  const sp = await searchParams;
   let exceptions, inException;
   try {
     [exceptions, inException] = await Promise.all([
@@ -23,6 +31,28 @@ export default async function Exceptions() {
     );
   }
 
+  const pagedShipments = paginateArray(inException, {
+    q: sp.q,
+    page: sp.page,
+    pageSize: sp.pageSize,
+    matcher: (s, q) =>
+      s.reference.toLowerCase().includes(q) ||
+      (s.customer_ref ?? "").toLowerCase().includes(q),
+  });
+
+  const pagedExceptions = paginateArray(exceptions, {
+    q: sp.q,
+    page: sp.page,
+    pageSize: sp.pageSize,
+    matcher: (e, q) =>
+      (e.reference ?? "").toLowerCase().includes(q) ||
+      e.kind.toLowerCase().includes(q) ||
+      e.severity.toLowerCase().includes(q) ||
+      e.detected_by.toLowerCase().includes(q),
+  });
+
+  const queryParams = { q: pagedExceptions.query || undefined };
+
   return (
     <>
       <div className="page-head">
@@ -35,14 +65,27 @@ export default async function Exceptions() {
 
       <Live label="detections and exceptions" />
 
+      <TableSearchBar
+        basePath="/exceptions"
+        initialQuery={pagedExceptions.query}
+        pageSize={pagedExceptions.pageSize}
+        placeholder="Filter exceptions by shipment, issue, severity, or detector…"
+        label="Search exceptions"
+        summaryText={`${pagedExceptions.total} open exception(s) · ${pagedShipments.total} shipment(s) in exception`}
+      />
+
       <Panel
         title="Shipments in exception"
-        hint={`${inException.length} shipment(s)`}
+        hint={`${pagedShipments.total} shipment(s)`}
         flush
       >
-        {inException.length === 0 ? (
+        {pagedShipments.items.length === 0 ? (
           <Empty
-            message="Nothing in exception"
+            message={
+              pagedShipments.query
+                ? `No exception shipments matching "${pagedShipments.query}"`
+                : "Nothing in exception"
+            }
             hint="Shipments land here when allocation falls short or a deadline cannot be met."
           />
         ) : (
@@ -56,7 +99,7 @@ export default async function Exceptions() {
                 </tr>
               </thead>
               <tbody>
-                {inException.map((s) => (
+                {pagedShipments.items.map((s) => (
                   <tr key={s.id}>
                     <td className="ref">
                       <ShipmentLink reference={s.reference} />
@@ -71,16 +114,31 @@ export default async function Exceptions() {
             </table>
           </div>
         )}
+        <PaginationBar
+          basePath="/exceptions"
+          page={pagedShipments.page}
+          pageSize={pagedShipments.pageSize}
+          total={pagedShipments.total}
+          totalPages={pagedShipments.totalPages}
+          startIndex={pagedShipments.startIndex}
+          endIndex={pagedShipments.endIndex}
+          queryParams={queryParams}
+          itemLabel="exception shipments"
+        />
       </Panel>
 
       <Panel
         title="Exception records"
-        hint="raised by automated monitoring"
+        hint={`${pagedExceptions.total} open · raised by automated monitoring`}
         flush
       >
-        {exceptions.length === 0 ? (
+        {pagedExceptions.items.length === 0 ? (
           <Empty
-            message="No open exception records"
+            message={
+              pagedExceptions.query
+                ? `No exception records matching "${pagedExceptions.query}"`
+                : "No open exception records"
+            }
             hint="All active shipments are currently operating within SLA thresholds."
           />
         ) : (
@@ -96,7 +154,7 @@ export default async function Exceptions() {
                 </tr>
               </thead>
               <tbody>
-                {exceptions.map((e) => (
+                {pagedExceptions.items.map((e) => (
                   <tr key={e.id}>
                     <td>
                       <Pill
@@ -121,6 +179,17 @@ export default async function Exceptions() {
             </table>
           </div>
         )}
+        <PaginationBar
+          basePath="/exceptions"
+          page={pagedExceptions.page}
+          pageSize={pagedExceptions.pageSize}
+          total={pagedExceptions.total}
+          totalPages={pagedExceptions.totalPages}
+          startIndex={pagedExceptions.startIndex}
+          endIndex={pagedExceptions.endIndex}
+          queryParams={queryParams}
+          itemLabel="exception records"
+        />
       </Panel>
     </>
   );

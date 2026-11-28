@@ -75,6 +75,17 @@ export async function POST(req: NextRequest) {
     maxRecords: 250,
   });
 
+  if (result.parseError) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: result.parseError,
+        format: result.format,
+      },
+      { status: 400 },
+    );
+  }
+
   for (const path of [
     "/",
     "/integrations",

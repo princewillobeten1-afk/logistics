@@ -11,6 +11,7 @@ import {
   BarChart3,
   BookOpen,
   BrainCircuit,
+  ChevronDown,
   ClipboardList,
   Compass,
   FileText,
@@ -35,35 +36,36 @@ import {
 } from "lucide-react";
 
 const ICONS: Record<string, ReactNode> = {
-  "/": <LayoutGrid size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/intelligence": <BrainCircuit size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/tactics": <SlidersHorizontal size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/map": <Map size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/orders": <ClipboardList size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/shipments": <Package size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/planning": <Route size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/returns": <RotateCcw size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/exceptions": <AlertTriangle size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/approvals": <ShieldCheck size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/carriers": <Ship size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/fleet": <Truck size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/warehouses": <Warehouse size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/customers": <Users size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/support": <MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/track": <Compass size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/communications": <Mail size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/documents": <FileText size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/analytics": <BarChart3 size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/activity": <Activity size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/queue": <Layers size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/integrations": <Plug size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/api-docs": <BookOpen size={16} strokeWidth={1.75} aria-hidden="true" />,
-  "/settings": <Settings size={16} strokeWidth={1.75} aria-hidden="true" />,
+  "/": <LayoutGrid size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/intelligence": <BrainCircuit size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/tactics": <SlidersHorizontal size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/map": <Map size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/orders": <ClipboardList size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/shipments": <Package size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/planning": <Route size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/returns": <RotateCcw size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/exceptions": <AlertTriangle size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/approvals": <ShieldCheck size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/carriers": <Ship size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/fleet": <Truck size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/warehouses": <Warehouse size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/customers": <Users size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/support": <MessageSquare size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/track": <Compass size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/communications": <Mail size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/documents": <FileText size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/analytics": <BarChart3 size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/activity": <Activity size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/queue": <Layers size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/integrations": <Plug size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/api-docs": <BookOpen size={15} strokeWidth={1.75} aria-hidden="true" />,
+  "/settings": <Settings size={15} strokeWidth={1.75} aria-hidden="true" />,
 };
 
-const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = [
+const SECTIONS: { group: string; defaultOpen: boolean; items: { href: string; label: string }[] }[] = [
   {
     group: "Operations",
+    defaultOpen: true,
     items: [
       { href: "/", label: "Overview" },
       { href: "/intelligence", label: "Business Intelligence" },
@@ -79,6 +81,7 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
   },
   {
     group: "Network",
+    defaultOpen: true,
     items: [
       { href: "/carriers", label: "Carriers" },
       { href: "/fleet", label: "Fleet" },
@@ -87,6 +90,7 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
   },
   {
     group: "Customer",
+    defaultOpen: false,
     items: [
       { href: "/customers", label: "Customers" },
       { href: "/support", label: "Support inbox" },
@@ -95,6 +99,7 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
   },
   {
     group: "Records",
+    defaultOpen: false,
     items: [
       { href: "/communications", label: "Communications" },
       { href: "/documents", label: "Documents" },
@@ -103,6 +108,7 @@ const SECTIONS: { group: string; items: { href: string; label: string }[] }[] = 
   },
   {
     group: "System",
+    defaultOpen: false,
     items: [
       { href: "/integrations", label: "Integrations" },
       { href: "/api-docs", label: "API Docs" },
@@ -128,51 +134,125 @@ function BrandEmblem() {
   );
 }
 
+function activeGroupFor(pathname: string): string | null {
+  for (const section of SECTIONS) {
+    if (
+      section.items.some((item) =>
+        item.href === "/" ? pathname === "/" : pathname.startsWith(item.href),
+      )
+    ) {
+      return section.group;
+    }
+  }
+  return null;
+}
+
 function NavLinks({
   pathname,
+  disabledSet,
   onNavigate,
 }: {
   pathname: string;
+  disabledSet: Set<string>;
   onNavigate?: () => void;
 }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    const currentGroup = activeGroupFor(pathname);
+    for (const s of SECTIONS) {
+      initial[s.group] = s.defaultOpen || s.group === currentGroup;
+    }
+    return initial;
+  });
+
+  useEffect(() => {
+    const currentGroup = activeGroupFor(pathname);
+    if (currentGroup) {
+      setExpanded((prev) =>
+        prev[currentGroup] ? prev : { ...prev, [currentGroup]: true },
+      );
+    }
+  }, [pathname]);
+
+  function toggleGroup(group: string) {
+    setExpanded((prev) => ({ ...prev, [group]: !prev[group] }));
+  }
+
   return (
     <nav aria-label="Primary" className="nav">
-      {SECTIONS.map((section) => (
-        <div key={section.group}>
-          <div className="nav-group">{section.group}</div>
-          {section.items.map((item) => {
-            const active =
-              item.href === "/"
-                ? pathname === "/"
-                : pathname.startsWith(item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                data-active={active}
-                aria-current={active ? "page" : undefined}
-                onClick={onNavigate}
-              >
-                {ICONS[item.href]}
-                <span>{item.label}</span>
-              </Link>
-            );
-          })}
-        </div>
-      ))}
+      {SECTIONS.map((section) => {
+        const visibleItems = section.items.filter(
+          (item) => !disabledSet.has(item.href),
+        );
+        if (visibleItems.length === 0) return null;
+        const isOpen = Boolean(expanded[section.group]);
+        const groupId = `nav-group-${section.group.toLowerCase()}`;
+        return (
+          <div key={section.group} className="nav-section">
+            <button
+              type="button"
+              className="nav-group-btn"
+              aria-expanded={isOpen}
+              aria-controls={groupId}
+              onClick={() => toggleGroup(section.group)}
+            >
+              <span>{section.group}</span>
+              <span className="nav-group-meta">
+                {!isOpen ? (
+                  <span className="nav-group-count">{visibleItems.length}</span>
+                ) : null}
+                <ChevronDown
+                  size={12}
+                  strokeWidth={2}
+                  aria-hidden="true"
+                  className="nav-group-chevron"
+                  data-open={isOpen}
+                />
+              </span>
+            </button>
+            {isOpen ? (
+              <div id={groupId} className="nav-group-items">
+                {visibleItems.map((item) => {
+                  const active =
+                    item.href === "/"
+                      ? pathname === "/"
+                      : pathname.startsWith(item.href);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      data-active={active}
+                      aria-current={active ? "page" : undefined}
+                      onClick={onNavigate}
+                    >
+                      {ICONS[item.href]}
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
     </nav>
   );
 }
 
 export function NavShell({
   orgName,
+  tierLabel,
+  disabledHrefs = [],
   account,
 }: {
   orgName?: string;
+  tierLabel?: string | null;
+  disabledHrefs?: string[];
   account: ReactNode;
 }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const disabledSet = new Set(disabledHrefs);
 
   useEffect(() => {
     setOpen(false);
@@ -200,12 +280,12 @@ export function NavShell({
           <div className="brand-lockup">
             <BrandEmblem />
             <div className="brand-text">
-              <span>Control Tower</span>
+              <span>{tierLabel ? `Control Tower · ${tierLabel.split(" · ")[0]}` : "Control Tower"}</span>
               <strong>{orgName || "Workspace"}</strong>
             </div>
           </div>
         </div>
-        <NavLinks pathname={pathname} />
+        <NavLinks pathname={pathname} disabledSet={disabledSet} />
         {account}
       </aside>
 
@@ -268,7 +348,7 @@ export function NavShell({
                   <X size={16} strokeWidth={2} aria-hidden="true" />
                 </button>
               </div>
-              <NavLinks pathname={pathname} onNavigate={() => setOpen(false)} />
+              <NavLinks pathname={pathname} disabledSet={disabledSet} onNavigate={() => setOpen(false)} />
               {account}
             </motion.aside>
           </motion.div>

@@ -15,6 +15,10 @@ import {
   collectTacticsSnapshot,
   updateTenantTacticsMutations,
 } from "@/lib/tactics/store";
+import {
+  detectWorkspaceTampering,
+  hasDepartmentAccess,
+} from "@/lib/tenant-guard";
 import type {
   CommunicationCadence,
   MixedLoadSkuLine,
@@ -56,13 +60,17 @@ function cleanStr(v: unknown, maxLen = 220): string {
   return typeof v === "string" ? v.trim().slice(0, maxLen) : "";
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const user = await currentUser();
   if (!user) {
     return NextResponse.json(
       { error: "Authentication required." },
       { status: 401 },
     );
+  }
+  const tamper = detectWorkspaceTampering(req, user.orgId);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
   }
   const snapshot = await collectTacticsSnapshot({
     orgId: user.orgId,
@@ -101,6 +109,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
   }
 
+  const tamper = detectWorkspaceTampering(req, user.orgId, body);
+  if (tamper) {
+    return NextResponse.json({ error: tamper }, { status: 403 });
+  }
+
+  const canModifyTactics =
+    hasDepartmentAccess(user, "WAREHOUSE") ||
+    hasDepartmentAccess(user, "SHIPMENTS") ||
+    hasDepartmentAccess(user, "ORDERS") ||
+    hasDepartmentAccess(user, "CUSTOMS");
+  if (!canModifyTactics) {
+    return NextResponse.json(
+      { error: "Your department scope does not allow modifying logistics tactics." },
+      { status: 403 },
+    );
+  }
+
   const action = cleanStr(body.action, 60);
   const now = new Date();
   const nowIso = now.toISOString();
@@ -136,7 +161,7 @@ export async function POST(req: NextRequest) {
     ).toISOString();
 
     const syncId = `sync-${randomUUID().slice(0, 8)}`;
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       supplierSyncs: [
         {
@@ -187,7 +212,7 @@ export async function POST(req: NextRequest) {
     }
 
     const id = `pdca-${randomUUID().slice(0, 8)}`;
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       initiatives: [
         {
@@ -236,7 +261,7 @@ export async function POST(req: NextRequest) {
       updatedAt: nowIso,
     };
 
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       initiatives: [
         updated,
@@ -291,7 +316,7 @@ export async function POST(req: NextRequest) {
       : "RECEIVING";
 
     const scanId = `scan-${randomUUID().slice(0, 8)}`;
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       barcodeScans: [
         {
@@ -332,7 +357,7 @@ export async function POST(req: NextRequest) {
       );
     }
     const key = `${warehouseCode}::${sku}`;
-    updateTenantTacticsMutations(user.orgId, (cur) => {
+    await updateTenantTacticsMutations(user.orgId, (cur) => {
       const exists = cur.crossDockSkuKeys.includes(key);
       return {
         ...cur,
@@ -368,7 +393,7 @@ export async function POST(req: NextRequest) {
       ? currentlyEnabled.filter((c) => c !== warehouseCode)
       : [...currentlyEnabled, warehouseCode];
 
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       postponementWarehouseCodes:
         nextEnabled.length > 0 ? nextEnabled : ["__NONE__"],
@@ -406,7 +431,7 @@ export async function POST(req: NextRequest) {
 
     const id = `pp-${randomUUID().slice(0, 8)}`;
     const unitAvoided = currentSnapshot.currency === "NGN" ? 6_500 : 28;
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       postponementOrders: [
         {
@@ -453,7 +478,7 @@ export async function POST(req: NextRequest) {
       updatedAt: nowIso,
     };
 
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       postponementOrders: [
         updated,
@@ -517,7 +542,7 @@ export async function POST(req: NextRequest) {
 
     const id = `mix-${randomUUID().slice(0, 8)}`;
     const reference = `MIX-${Math.floor(1000 + Math.random() * 9000)}`;
-    updateTenantTacticsMutations(user.orgId, (cur) => ({
+    await updateTenantTacticsMutations(user.orgId, (cur) => ({
       ...cur,
       mixedShipments: [
         {
@@ -567,7 +592,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    updateTenantTacticsMutations(user.orgId, (cur) => {
+    await updateTenantTacticsMutations(user.orgId, (cur) => {
       const prev = cur.preArrivalFilings[shipmentRef] ?? {};
       return {
         ...cur,

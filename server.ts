@@ -236,8 +236,21 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
     let client;
     try {
       client = await pool.connect();
-      await client.query("SET ROLE logistics_app");
-      await client.query("SELECT set_config('app.current_org', $1, false)", [auth.orgId]);
+      await client.query("BEGIN");
+      await client.query("SAVEPOINT sp_app_role");
+      try {
+        await client.query("SET LOCAL ROLE logistics_app");
+        await client.query("RELEASE SAVEPOINT sp_app_role");
+      } catch (roleErr: unknown) {
+        const code = (roleErr as { code?: string })?.code;
+        if (code === "42704" || code === "28000" || code === "42501") {
+          await client.query("ROLLBACK TO SAVEPOINT sp_app_role");
+          await client.query("RELEASE SAVEPOINT sp_app_role");
+        } else {
+          throw roleErr;
+        }
+      }
+      await client.query("SELECT set_config('app.current_org', $1, true)", [auth.orgId]);
       const [shipRes, excRes, appRes, drvRes] = await Promise.all([
         client.query<{
           reference: string;
@@ -272,6 +285,7 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
           )
           .catch(() => ({ rows: [{ total: "0" }] })),
       ]);
+      await client.query("COMMIT");
       const ships = shipRes.rows
         .map(
           (s) =>
@@ -288,6 +302,9 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
         `Active drivers on roster: ${activeDrivers}.`,
       ].join(" ");
     } catch {
+      if (client) {
+        await client.query("ROLLBACK").catch(() => {});
+      }
       pgUnavailableUntil = Date.now() + 60_000;
     } finally {
       if (client) {
@@ -302,7 +319,8 @@ async function buildLiveOperationalBriefing(auth: AuthContext): Promise<string> 
   }
 
   const store = readLocalStore();
-  const orgData = store?.dataByOrg?.[auth.orgId] ?? store?.data;
+  // Strict per-tenant lookup — never fall back to legacy global data for another workspace
+  const orgData = store?.dataByOrg?.[auth.orgId];
   const shipments = (orgData?.shipments ?? []).slice(0, 8);
   const openExceptions = (orgData?.exceptions ?? [])
     .filter((e) => e.state !== "RESOLVED")
@@ -557,9 +575,56 @@ const server = createServer((req, res) => {
   });
 });
 
+function stripDefaultWsPort(host: string): string {
+  return host.trim().toLowerCase().replace(/:(80|443)$/, "");
+}
+
+function isAllowedWebSocketOrigin(req: IncomingMessage): boolean {
+  const originHeader = Array.isArray(req.headers.origin)
+    ? req.headers.origin[0]
+    : req.headers.origin;
+  const origin = originHeader?.trim();
+  if (!origin) return false;
+
+  const forwardedHeader = Array.isArray(req.headers["x-forwarded-host"])
+    ? req.headers["x-forwarded-host"][0]
+    : req.headers["x-forwarded-host"];
+  const forwardedHost = forwardedHeader?.split(",")[0]?.trim().toLowerCase();
+  const host = req.headers.host?.trim().toLowerCase();
+
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    const originHost = stripDefaultWsPort(parsed.host);
+    if (forwardedHost && originHost === stripDefaultWsPort(forwardedHost)) {
+      return true;
+    }
+    if (host && originHost === stripDefaultWsPort(host)) {
+      return true;
+    }
+    const appUrl = process.env.APP_URL?.trim();
+    if (appUrl) {
+      const configuredHost = stripDefaultWsPort(new URL(appUrl).host);
+      if (originHost === configuredHost) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 server.on("upgrade", (req, socket, head) => {
   const pathname = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).pathname;
   if (pathname !== "/api/live") {
+    return;
+  }
+
+  if (!isAllowedWebSocketOrigin(req)) {
+    writeHttpRejection(socket, 403, "Forbidden");
     return;
   }
 

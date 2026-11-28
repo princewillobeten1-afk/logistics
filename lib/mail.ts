@@ -5,77 +5,142 @@ import nodemailer, { type Transporter } from "nodemailer";
 // same reason lib/db.ts keeps its pool on globalThis.
 const globalForMail = globalThis as unknown as { logisticsMailer?: Transporter };
 
+function getSmtpPassword(): string | undefined {
+  const pass = process.env.SMTP_PASSWORD ?? process.env.SMTP_PASS;
+  return pass && pass.length > 0 ? pass : undefined;
+}
+
+function getResendApiKey(): string | undefined {
+  const key = process.env.RESEND_API_KEY?.trim();
+  return key && key.length > 0 ? key : undefined;
+}
+
+export function isMailConfigured(): boolean {
+  return Boolean(process.env.SMTP_HOST?.trim() || getResendApiKey());
+}
+
 function transporter(): Transporter | null {
-  const host = process.env.SMTP_HOST;
+  const host = process.env.SMTP_HOST?.trim();
   if (!host) return null;
   if (globalForMail.logisticsMailer) return globalForMail.logisticsMailer;
 
+  const port = Number(process.env.SMTP_PORT ?? 587);
+  const secureEnv = process.env.SMTP_SECURE?.trim().toLowerCase();
+  const secure =
+    secureEnv === "true" ? true : secureEnv === "false" ? false : port === 465;
+  const user = process.env.SMTP_USER?.trim();
+
   const t = nodemailer.createTransport({
     host,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    // 465 is implicit TLS; 587/25 start plaintext and upgrade. Getting this
-    // wrong against a real provider produces a hang, not a clean error, so it
-    // is explicit rather than guessed from the port.
-    secure: process.env.SMTP_SECURE === "true",
-    auth: process.env.SMTP_USER
-      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
-      : undefined,
+    port,
+    // 465 uses implicit TLS; 587/25 start plaintext and upgrade via STARTTLS.
+    secure,
+    auth: user ? { user, pass: getSmtpPassword() } : undefined,
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
   });
 
   if (process.env.NODE_ENV !== "production") globalForMail.logisticsMailer = t;
   return t;
 }
 
-const FROM = process.env.SMTP_FROM || "Control Tower <no-reply@localhost>";
+const FROM =
+  process.env.RESEND_FROM?.trim() ||
+  process.env.SMTP_FROM?.trim() ||
+  "Control Tower <no-reply@localhost>";
+
+export type MailSendResult = {
+  ok: boolean;
+  provider: "smtp" | "resend" | "none";
+  error?: string;
+};
 
 /**
- * Send a transactional email — password resets today, and anything else the
- * platform needs to say outside the app itself.
- *
- * Deliberately separate from the Gmail channel provider in
- * `src/logistics/channels/providers.py`. That one sends *as* one
- * organisation's own connected Gmail account, replying inside a customer's
- * shipment thread, and its credentials only exist once that org has
- * configured the channel — a chicken-and-egg problem for a password reset on
- * day one, before any org has configured anything. This is the platform's own
- * outbound line: one SMTP relay, configured once via SMTP_*, shared by every
- * tenant, and used only for messages about the account itself rather than
- * shipment correspondence.
- *
- * Without SMTP_HOST configured, this logs the message instead of sending it
- * and returns false. Every caller has to behave correctly either way —
- * requestPasswordReset in lib/auth.ts always reports the same outcome to the
- * visitor regardless, so a missing SMTP config fails towards "developer can
- * see the link in the server log" rather than towards a broken-looking flow.
+ * Send a transactional email — password resets and account lifecycle notices.
+ * Supports SMTP (SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD) and Resend
+ * HTTP API (RESEND_API_KEY).
  */
+export async function sendMailDetail(message: {
+  to: string;
+  subject: string;
+  text: string;
+}): Promise<MailSendResult> {
+  const t = transporter();
+  if (t) {
+    try {
+      await t.sendMail({
+        from: FROM,
+        to: message.to,
+        subject: message.subject,
+        text: message.text,
+      });
+      return { ok: true, provider: "smtp" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("mail: SMTP send failed", message.to, err);
+      // Fall through to Resend if also configured; otherwise report failure.
+      if (!getResendApiKey()) {
+        return { ok: false, provider: "smtp", error: msg };
+      }
+    }
+  }
+
+  const resendKey = getResendApiKey();
+  if (resendKey) {
+    try {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: FROM,
+          to: [message.to],
+          subject: message.subject,
+          text: message.text,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        console.error("mail: Resend send failed", res.status, errBody);
+        return {
+          ok: false,
+          provider: "resend",
+          error: `Resend returned ${res.status}`,
+        };
+      }
+      return { ok: true, provider: "resend" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("mail: Resend request failed", message.to, err);
+      return { ok: false, provider: "resend", error: msg };
+    }
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.warn(
+      `mail: Neither SMTP_HOST nor RESEND_API_KEY is set; transactional email was not dispatched externally.\n` +
+        `  to: ${message.to}\n  subject: ${message.subject}\n`,
+    );
+  } else {
+    console.error(
+      "mail: Neither SMTP_HOST nor RESEND_API_KEY is configured in production.",
+    );
+  }
+  return {
+    ok: false,
+    provider: "none",
+    error: "No outbound mail provider configured.",
+  };
+}
+
 export async function sendMail(message: {
   to: string;
   subject: string;
   text: string;
 }): Promise<boolean> {
-  const t = transporter();
-  if (!t) {
-    console.warn(
-      `mail: SMTP_HOST is not set, so this was logged instead of sent.\n` +
-        `  to: ${message.to}\n  subject: ${message.subject}\n\n${message.text}\n`,
-    );
-    return false;
-  }
-
-  try {
-    await t.sendMail({
-      from: FROM,
-      to: message.to,
-      subject: message.subject,
-      text: message.text,
-    });
-    return true;
-  } catch (err) {
-    // A failed send must not throw into the caller: requestPasswordReset
-    // reports the same generic success either way, so an outage here should
-    // not turn into a stack trace for the visitor — it turns into a support
-    // ticket instead, which is the correct amount of visibility.
-    console.error("mail: send failed", message.to, err);
-    return false;
-  }
+  const result = await sendMailDetail(message);
+  return result.ok;
 }

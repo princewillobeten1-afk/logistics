@@ -2,7 +2,10 @@ import Link from "next/link";
 import { Empty, Offline, Panel, Pill, ShipmentLink } from "@/app/components";
 import { Live } from "@/app/live";
 import { AgentDiagnosticsPanel } from "@/components/agent-diagnostics-panel";
+import { PaginationBar } from "@/components/pagination-bar";
+import { TableSearchBar } from "@/components/table-search-bar";
 import { relative } from "@/lib/format";
+import { buildPageHref, paginateArray } from "@/lib/pagination";
 import {
   activityFeed,
   auditLogs,
@@ -42,15 +45,15 @@ function toneFor(row: ActivityRow): string {
 export default async function Activity({
   searchParams,
 }: {
-  searchParams: Promise<{ kind?: string }>;
+  searchParams: Promise<{ kind?: string; q?: string; page?: string; pageSize?: string }>;
 }) {
-  const { kind } = await searchParams;
-  const selected = KINDS.includes(kind as (typeof KINDS)[number]) ? kind : undefined;
+  const sp = await searchParams;
+  const selected = KINDS.includes(sp.kind as (typeof KINDS)[number]) ? sp.kind : undefined;
 
   let feed, usage, audit;
   try {
     [feed, usage, audit] = await Promise.all([
-      activityFeed(120, selected ? [selected] : undefined),
+      activityFeed(250, selected ? [selected] : undefined),
       modelUsage(),
       auditLogs(),
     ]);
@@ -64,6 +67,35 @@ export default async function Activity({
       </>
     );
   }
+
+  const pagedFeed = paginateArray(feed, {
+    q: sp.q,
+    page: sp.page,
+    pageSize: sp.pageSize,
+    matcher: (row, q) =>
+      row.kind.toLowerCase().includes(q) ||
+      row.actor.toLowerCase().includes(q) ||
+      row.action.toLowerCase().includes(q) ||
+      (row.reference ?? "").toLowerCase().includes(q) ||
+      (row.reason ?? "").toLowerCase().includes(q) ||
+      (row.result ?? "").toLowerCase().includes(q),
+  });
+
+  const pagedAudit = paginateArray(audit, {
+    q: sp.q,
+    page: sp.page,
+    pageSize: sp.pageSize,
+    matcher: (row, q) =>
+      row.actor.toLowerCase().includes(q) ||
+      row.actor_type.toLowerCase().includes(q) ||
+      row.action.toLowerCase().includes(q) ||
+      (row.entity_type ?? "").toLowerCase().includes(q),
+  });
+
+  const queryParams = {
+    kind: selected,
+    q: pagedFeed.query || undefined,
+  };
 
   return (
     <>
@@ -83,24 +115,52 @@ export default async function Activity({
       <AgentDiagnosticsPanel />
 
       <div className="filters">
-        <Link href="/activity" data-active={!selected}>
+        <Link
+          href={buildPageHref("/activity", {
+            q: pagedFeed.query || undefined,
+            pageSize: pagedFeed.pageSize,
+          })}
+          data-active={!selected}
+        >
           All
         </Link>
         {KINDS.map((k) => (
-          <Link key={k} href={`/activity?kind=${k}`} data-active={selected === k}>
+          <Link
+            key={k}
+            href={buildPageHref("/activity", {
+              kind: k,
+              q: pagedFeed.query || undefined,
+              pageSize: pagedFeed.pageSize,
+            })}
+            data-active={selected === k}
+          >
             {KIND_LABEL[k]}
           </Link>
         ))}
       </div>
 
+      <TableSearchBar
+        basePath="/activity"
+        initialQuery={pagedFeed.query}
+        pageSize={pagedFeed.pageSize}
+        extraParams={{ kind: selected }}
+        placeholder="Filter timeline and audit log by actor, action, shipment, or result…"
+        label="Search activity and audit logs"
+        summaryText={`${pagedFeed.total} timeline event(s) · ${pagedAudit.total} audit log entry(ies)`}
+      />
+
       <Panel
         title="Timeline"
-        hint={`${feed.length} most recent${selected ? ` · ${KIND_LABEL[selected]}` : ""}`}
+        hint={`${pagedFeed.total} matching${selected ? ` · ${KIND_LABEL[selected]}` : ""}`}
         flush
       >
-        {feed.length === 0 ? (
+        {pagedFeed.items.length === 0 ? (
           <Empty
-            message="Nothing recorded yet"
+            message={
+              pagedFeed.query
+                ? `No activity events matching "${pagedFeed.query}"`
+                : "Nothing recorded yet"
+            }
             hint="Deterministic steps still write events — an empty feed means nothing has run."
           />
         ) : (
@@ -123,7 +183,7 @@ export default async function Activity({
                 </tr>
               </thead>
               <tbody>
-                {feed.map((row, i) => (
+                {pagedFeed.items.map((row, i) => (
                   <tr key={`${row.kind}-${row.at}-${i}`}>
                     <td className="num text-faint">
                       {relative(row.at)}
@@ -156,6 +216,17 @@ export default async function Activity({
             </table>
           </div>
         )}
+        <PaginationBar
+          basePath="/activity"
+          page={pagedFeed.page}
+          pageSize={pagedFeed.pageSize}
+          total={pagedFeed.total}
+          totalPages={pagedFeed.totalPages}
+          startIndex={pagedFeed.startIndex}
+          endIndex={pagedFeed.endIndex}
+          queryParams={queryParams}
+          itemLabel="timeline events"
+        />
       </Panel>
 
       <Panel title="Assistant usage, last 24h" hint="calls, latency, and token output" flush>
@@ -209,12 +280,16 @@ export default async function Activity({
 
       <Panel
         title="Audit log"
-        hint="what a person did to the system, not what the system did"
+        hint={`${pagedAudit.total} entry(ies) · what a person did to the system`}
         flush
       >
-        {audit.length === 0 ? (
+        {pagedAudit.items.length === 0 ? (
           <Empty
-            message="No audited actions yet"
+            message={
+              pagedAudit.query
+                ? `No audit log entries matching "${pagedAudit.query}"`
+                : "No audited actions yet"
+            }
             hint="Sign-ins, approval decisions and channel changes land here."
           />
         ) : (
@@ -235,7 +310,7 @@ export default async function Activity({
                 </tr>
               </thead>
               <tbody>
-                {audit.map((row) => (
+                {pagedAudit.items.map((row) => (
                   <tr key={row.id}>
                     <td className="num text-faint">
                       {relative(row.created_at)}
@@ -254,6 +329,17 @@ export default async function Activity({
             </table>
           </div>
         )}
+        <PaginationBar
+          basePath="/activity"
+          page={pagedAudit.page}
+          pageSize={pagedAudit.pageSize}
+          total={pagedAudit.total}
+          totalPages={pagedAudit.totalPages}
+          startIndex={pagedAudit.startIndex}
+          endIndex={pagedAudit.endIndex}
+          queryParams={queryParams}
+          itemLabel="audit entries"
+        />
       </Panel>
     </>
   );

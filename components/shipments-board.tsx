@@ -1,12 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, PackageOpen, Search, X } from "lucide-react";
 import { ClientRelative, ClientWhen } from "@/components/client-time";
+import { PaginationBar } from "@/components/pagination-bar";
 import { toneFor, city } from "@/lib/format";
+import { buildPageHref } from "@/lib/pagination";
 import {
-  filterShipments,
   formatStateLabel,
   type ShipmentFilterable,
 } from "@/lib/view-helpers";
@@ -16,90 +18,122 @@ export type ShipmentsBoardItem = ShipmentFilterable & {
   updated_at: Date | string;
 };
 
+export interface BoardPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  startIndex: number;
+  endIndex: number;
+}
+
 export function ShipmentsBoard({
   shipments,
   counts,
   initialState,
   initialQuery = "",
+  pagination,
 }: {
   shipments: ShipmentsBoardItem[];
   counts: Record<string, number>;
   initialState?: string;
   initialQuery?: string;
+  pagination: BoardPagination;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
-  const [activeState, setActiveState] = useState<string>(initialState ?? "");
+  const activeState = initialState ?? "";
+
+  useEffect(() => {
+    setQuery(initialQuery);
+  }, [initialQuery]);
 
   const states = useMemo(
     () => Object.entries(counts).sort((a, b) => b[1] - a[1]),
     [counts],
   );
 
-  const filtered = useMemo(
-    () =>
-      filterShipments(shipments, {
-        query,
-        state: activeState || undefined,
-      }),
-    [shipments, query, activeState],
+  const totalAcrossAllStates = useMemo(
+    () => Object.values(counts).reduce((sum, n) => sum + n, 0),
+    [counts],
   );
 
-  function selectState(next: string) {
-    setActiveState(next);
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams();
-      if (next) params.set("state", next);
-      if (query.trim()) params.set("q", query.trim());
-      const qs = params.toString();
-      window.history.replaceState(null, "", qs ? `/shipments?${qs}` : "/shipments");
-    }
+  function navigateWithFilters(next: { state?: string; q?: string; page?: number }) {
+    const href = buildPageHref("/shipments", {
+      state: next.state !== undefined ? next.state : activeState || undefined,
+      q: next.q !== undefined ? next.q : initialQuery || undefined,
+      page: next.page ?? 1,
+      pageSize: pagination.pageSize,
+    });
+    router.push(href);
   }
 
   return (
     <>
-      <div className="board-toolbar">
-        <div className="search-field">
-          <Search
-            size={15}
-            strokeWidth={1.75}
-            aria-hidden="true"
-            className="search-field-icon"
-          />
-          <label htmlFor="shipments-search" className="visually-hidden">
-            Search shipments by reference, customer name, or route origin and destination
-          </label>
-          <input
-            id="shipments-search"
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape" && query) {
-                e.preventDefault();
-                setQuery("");
-              }
-            }}
-            placeholder="Search reference, customer name, or route (origin → destination)…"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-          />
-          {query ? (
-            <button
-              type="button"
-              className="search-clear"
-              aria-label="Clear search"
-              onClick={() => setQuery("")}
-            >
-              <X size={13} strokeWidth={2} aria-hidden="true" />
-            </button>
-          ) : null}
+      <form
+        className="board-toolbar"
+        onSubmit={(e) => {
+          e.preventDefault();
+          navigateWithFilters({ q: query.trim(), page: 1 });
+        }}
+      >
+        <div className="board-search-group">
+          <div className="search-field">
+            <Search
+              size={15}
+              strokeWidth={1.75}
+              aria-hidden="true"
+              className="search-field-icon"
+            />
+            <label htmlFor="shipments-search" className="visually-hidden">
+              Search shipments by reference, customer name, or route origin and destination
+            </label>
+            <input
+              id="shipments-search"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && query) {
+                  e.preventDefault();
+                  setQuery("");
+                  navigateWithFilters({ q: "", page: 1 });
+                }
+              }}
+              placeholder="Search reference, customer name, or route (origin → destination)…"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+            {query ? (
+              <button
+                type="button"
+                className="search-clear"
+                aria-label="Clear search"
+                onClick={() => {
+                  setQuery("");
+                  navigateWithFilters({ q: "", page: 1 });
+                }}
+              >
+                <X size={13} strokeWidth={2} aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+          <button type="submit" className="search-submit-btn">
+            Search
+          </button>
         </div>
         <div className="board-summary" aria-live="polite">
-          Showing <strong>{filtered.length}</strong> of{" "}
-          <strong>{shipments.length}</strong> shipments
+          {pagination.total === 0 ? (
+            <span>0 matching shipments</span>
+          ) : (
+            <span>
+              Showing <strong>{pagination.startIndex}–{pagination.endIndex}</strong> of{" "}
+              <strong>{pagination.total.toLocaleString()}</strong> shipments
+            </span>
+          )}
         </div>
-      </div>
+      </form>
 
       <div
         className="filters"
@@ -109,17 +143,17 @@ export function ShipmentsBoard({
         <button
           type="button"
           data-active={!activeState}
-          onClick={() => selectState("")}
+          onClick={() => navigateWithFilters({ state: "", page: 1 })}
         >
           <span>All</span>
-          <span className="filter-count">{shipments.length}</span>
+          <span className="filter-count">{totalAcrossAllStates}</span>
         </button>
         {states.map(([s, n]) => (
           <button
             key={s}
             type="button"
             data-active={activeState === s}
-            onClick={() => selectState(activeState === s ? "" : s)}
+            onClick={() => navigateWithFilters({ state: activeState === s ? "" : s, page: 1 })}
           >
             <span>{formatStateLabel(s)}</span>
             <span className="filter-count">{n}</span>
@@ -134,32 +168,34 @@ export function ShipmentsBoard({
               ? `${formatStateLabel(activeState)} shipments`
               : "All shipments"}
           </h2>
-          <span className="hint">{filtered.length} shown</span>
+          <span className="hint tabular-nums">
+            {pagination.total.toLocaleString()} total · page {pagination.page} of {pagination.totalPages}
+          </span>
         </header>
 
-        {filtered.length === 0 ? (
+        {shipments.length === 0 ? (
           <div className="empty">
             <span className="empty-icon" aria-hidden="true">
               <PackageOpen size={18} strokeWidth={1.75} />
             </span>
             <strong>
-              {query || activeState
+              {initialQuery || activeState
                 ? "No matching shipments"
                 : "No shipments yet"}
             </strong>
             <div className="empty-hint">
-              {query || activeState
+              {initialQuery || activeState
                 ? "Try clearing your search or selecting a different status filter."
                 : "Shipments appear here once a customer order is confirmed."}
             </div>
-            {query || activeState ? (
+            {initialQuery || activeState ? (
               <div>
                 <button
                   type="button"
                   className="empty-action"
                   onClick={() => {
                     setQuery("");
-                    selectState("");
+                    navigateWithFilters({ state: "", q: "", page: 1 });
                   }}
                 >
                   <span>Reset filters</span>
@@ -169,59 +205,73 @@ export function ShipmentsBoard({
             ) : null}
           </div>
         ) : (
-          <div
-            className="scroller"
-            tabIndex={0}
-            role="region"
-            aria-label="Shipments list"
-          >
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Reference</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Customer</th>
-                  <th scope="col">Lane</th>
-                  <th scope="col">Cargo</th>
-                  <th scope="col">Deadline</th>
-                  <th scope="col">Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((s) => (
-                  <tr key={s.id}>
-                    <td className="ref">
-                      <Link href={`/shipments/${s.reference}`}>
-                        {s.reference}
-                      </Link>
-                    </td>
-                    <td>
-                      <span
-                        className="status-tag"
-                        data-tone={toneFor(s.state)}
-                      >
-                        {formatStateLabel(s.state)}
-                      </span>
-                    </td>
-                    <td>{s.customer_ref ?? "—"}</td>
-                    <td className="num">
-                      {city(s.origin)} → {city(s.destination)}
-                    </td>
-                    <td className="num">
-                      {(s.cargo?.quantity as number) ?? "—"} ×{" "}
-                      {(s.cargo?.weight_kg as number) ?? "—"}kg
-                    </td>
-                    <td className="num">
-                      <ClientWhen date={s.deadline} />
-                    </td>
-                    <td className="num text-faint">
-                      <ClientRelative date={s.updated_at} />
-                    </td>
+          <>
+            <div
+              className="scroller"
+              tabIndex={0}
+              role="region"
+              aria-label="Shipments list"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Reference</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Customer</th>
+                    <th scope="col">Lane</th>
+                    <th scope="col">Cargo</th>
+                    <th scope="col">Deadline</th>
+                    <th scope="col">Updated</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {shipments.map((s) => (
+                    <tr key={s.id}>
+                      <td className="ref">
+                        <Link href={`/shipments/${s.reference}`}>
+                          {s.reference}
+                        </Link>
+                      </td>
+                      <td>
+                        <span
+                          className="status-tag"
+                          data-tone={toneFor(s.state)}
+                        >
+                          {formatStateLabel(s.state)}
+                        </span>
+                      </td>
+                      <td>{s.customer_ref ?? "—"}</td>
+                      <td className="num">
+                        {city(s.origin)} → {city(s.destination)}
+                      </td>
+                      <td className="num">
+                        {(s.cargo?.quantity as number) ?? "—"} ×{" "}
+                        {(s.cargo?.weight_kg as number) ?? "—"}kg
+                      </td>
+                      <td className="num">
+                        <ClientWhen date={s.deadline} />
+                      </td>
+                      <td className="num text-faint">
+                        <ClientRelative date={s.updated_at} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <PaginationBar
+              basePath="/shipments"
+              page={pagination.page}
+              pageSize={pagination.pageSize}
+              total={pagination.total}
+              totalPages={pagination.totalPages}
+              startIndex={pagination.startIndex}
+              endIndex={pagination.endIndex}
+              queryParams={{ state: activeState || undefined, q: initialQuery || undefined }}
+              itemLabel="shipments"
+            />
+          </>
         )}
       </section>
     </>

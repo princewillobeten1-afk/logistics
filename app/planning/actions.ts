@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { requireUser } from "@/lib/auth";
+import { requireDepartment } from "@/lib/auth";
 import { handleFrontendLogisticsAction } from "@/lib/controllers/action-controller";
 
 export async function submitPlanningIntakeAction(input: {
@@ -17,7 +17,7 @@ export async function submitPlanningIntakeAction(input: {
   shipmentReference?: string | null;
   aiWarning?: string | null;
 }> {
-  await requireUser();
+  await requireDepartment("FLEET", "EDIT_SHIPMENT");
 
   try {
     const out = await handleFrontendLogisticsAction({
@@ -68,7 +68,7 @@ export async function triggerFleetOptimization(): Promise<{
   message: string;
   updatedCount?: number;
 }> {
-  await requireUser();
+  await requireDepartment("FLEET", "EDIT_SHIPMENT");
 
   const out = await handleFrontendLogisticsAction({
     intent: "FLEET_OPTIMIZE",

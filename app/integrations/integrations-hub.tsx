@@ -105,6 +105,7 @@ function formatShortTime(iso: string | null): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
   });
 }
 
@@ -1340,7 +1341,7 @@ print(resp.json())`,
                                     </span>
                                     <span className="int-meta-text">
                                       → {entityLabel(tbl.suggestedEntity)} ·{" "}
-                                      {tbl.rowCount.toLocaleString()} rows
+                                      {tbl.rowCount.toLocaleString("en-US")} rows
                                     </span>
                                   </span>
                                 </label>

@@ -177,7 +177,7 @@ export default async function Planning() {
                         </div>
                       </td>
                       <td className="num">
-                        {Number(g.total_weight_kg).toLocaleString()} kg · {Number(g.total_volume_cbm).toFixed(2)} cbm
+                        {Number(g.total_weight_kg).toLocaleString("en-US")} kg · {Number(g.total_volume_cbm).toFixed(2)} cbm
                       </td>
                       <td style={{ width: 130 }}>
                         <div className="text-xs text-muted">{util.toFixed(1)}%</div>

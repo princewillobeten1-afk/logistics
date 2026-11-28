@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { googleSignIn, prewarmGoogleAuth } from "@/lib/google-auth";
+import { useCallback, useEffect, useState } from "react";
+import {
+  consumeGoogleRedirectResult,
+  googleSignIn,
+} from "@/lib/google-auth";
 
 function isEmbeddedIframe(): boolean {
   if (typeof window === "undefined") return false;
@@ -14,6 +17,7 @@ function isEmbeddedIframe(): boolean {
 
 function formatGoogleAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code;
+  const rawMessage = err instanceof Error ? err.message : "";
   switch (code) {
     case "auth/popup-closed-by-user":
     case "auth/cancelled-popup-request":
@@ -27,15 +31,16 @@ function formatGoogleAuthError(err: unknown): string {
         ? "Browser storage is blocked inside this embedded preview. Open sign-in in a new tab to continue."
         : "Your browser has third-party storage or cookies disabled. Enable storage for this site and try again.";
     case "auth/unauthorized-domain":
-      return `Google sign-in is not authorized for ${typeof window !== "undefined" ? window.location.hostname : "this domain"}. Use email sign-in below or authorize this domain in Firebase Auth.`;
+      return `Google sign-in is not authorized for ${typeof window !== "undefined" ? window.location.hostname : "this domain"}. Add this domain under Firebase Authentication → Settings → Authorized domains, or sign in with email below.`;
     case "auth/operation-not-allowed":
-      return "Google sign-in provider is not enabled for this project.";
+      return "Google sign-in provider is not enabled for this Firebase project.";
     case "auth/network-request-failed":
       return "Network error while contacting Google. Check your connection and try again.";
     default:
-      return err instanceof Error
-        ? err.message
-        : "Could not complete Google sign-in.";
+      if (/access_denied|403|testing|verification/i.test(rawMessage)) {
+        return "Google rejected this account because the app's Google OAuth consent screen is still in Testing mode. Publish the OAuth consent screen to Production in Google Cloud Console so any Google account can sign in.";
+      }
+      return rawMessage || "Could not complete Google sign-in.";
   }
 }
 
@@ -54,16 +59,8 @@ export function GoogleSignInButton({
   const [error, setError] = useState<string | null>(null);
   const [newTabUrl, setNewTabUrl] = useState<string | null>(null);
 
-  useEffect(() => {
-    void prewarmGoogleAuth();
-  }, []);
-
-  async function handleClick() {
-    setError(null);
-    setNewTabUrl(null);
-    setPending(true);
-    try {
-      const { idToken } = await googleSignIn({ includeGmailScopes });
+  const exchangeIdToken = useCallback(
+    async (idToken: string) => {
       const res = await fetch("/api/auth/google", {
         method: "POST",
         credentials: "same-origin",
@@ -105,6 +102,36 @@ export function GoogleSignInButton({
       }
 
       window.location.assign(data.redirectTo ?? "/");
+    },
+    [companyName, next],
+  );
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const redirectPayload = await consumeGoogleRedirectResult();
+        if (!active || !redirectPayload) return;
+        setPending(true);
+        await exchangeIdToken(redirectPayload.idToken);
+      } catch (err) {
+        if (!active) return;
+        setError(formatGoogleAuthError(err));
+        setPending(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [exchangeIdToken]);
+
+  async function handleClick() {
+    setError(null);
+    setNewTabUrl(null);
+    setPending(true);
+    try {
+      const { idToken } = await googleSignIn({ includeGmailScopes });
+      await exchangeIdToken(idToken);
     } catch (err) {
       const code = (err as { code?: string })?.code;
       if (

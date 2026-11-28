@@ -14,6 +14,8 @@ const ADMIN_USER: SessionUser = {
   email: "admin@apex.test",
   name: "Ada Admin",
   role: "ADMIN",
+  departments: [],
+  branchCodes: [],
 };
 
 const VIEWER_USER: SessionUser = {
@@ -23,6 +25,8 @@ const VIEWER_USER: SessionUser = {
   email: "viewer@apex.test",
   name: "Victor Viewer",
   role: "VIEWER",
+  departments: [],
+  branchCodes: [],
 };
 
 const DISPATCHER_USER: SessionUser = {
@@ -32,6 +36,8 @@ const DISPATCHER_USER: SessionUser = {
   email: "dispatcher@apex.test",
   name: "Dara Dispatcher",
   role: "DISPATCHER",
+  departments: [],
+  branchCodes: [],
 };
 
 test("verifyFrontendIdentity rejects unauthenticated callers with 401 and insufficient roles with 403", async () => {

@@ -30,6 +30,8 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/login",
   "/api/auth/signup",
   "/api/auth/google",
+  "/api/auth/forgot-password",
+  "/api/auth/reset-password",
   "/api/auth/session",
   "/api/webhooks/whatsapp",
   "/api/webhooks/telegram",
@@ -50,7 +52,10 @@ export function middleware(request: NextRequest) {
   const headers = new Headers(request.headers);
   headers.set("x-pathname", pathname);
 
-  const isPublic = PUBLIC_PATHS.has(pathname);
+  const isPublic =
+    PUBLIC_PATHS.has(pathname) ||
+    pathname.startsWith("/invite/") ||
+    pathname.startsWith("/api/workspace/invites/");
   const hasCookie = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
 
   if (!isPublic && !hasCookie) {
@@ -69,18 +74,34 @@ export function middleware(request: NextRequest) {
 
   if (AUTH_ENTRY_PATHS.has(pathname) && hasCookie && searchParams.has("expired")) {
     const res = NextResponse.next({ request: { headers } });
-    const proto = (request.headers.get("x-forwarded-proto") ?? "").toLowerCase();
-    const origin = (request.headers.get("origin") ?? "").toLowerCase();
-    const host = (
+    const proto = (request.headers.get("x-forwarded-proto") ?? "")
+      .split(",")[0]
+      ?.trim()
+      .toLowerCase() ?? "";
+    const origin = (request.headers.get("origin") ?? "").trim().toLowerCase();
+    const rawHost = (
       request.headers.get("x-forwarded-host") ??
       request.headers.get("host") ??
       ""
-    ).toLowerCase();
+    )
+      .split(",")[0]
+      ?.trim()
+      .toLowerCase() ?? "";
+    const hostname = rawHost.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+    const isLoopback =
+      proto === "http" ||
+      origin.startsWith("http://") ||
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname === "::1";
     const isHttps =
-      proto.includes("https") ||
+      proto === "https" ||
       origin.startsWith("https://") ||
-      host.endsWith(".run.app") ||
-      request.nextUrl.protocol === "https:";
+      (!isLoopback &&
+        (hostname.endsWith(".run.app") ||
+          hostname.endsWith(".vercel.app") ||
+          request.nextUrl.protocol === "https:"));
     res.cookies.set(SESSION_COOKIE, "", {
       httpOnly: true,
       sameSite: isHttps ? "none" : "lax",
